@@ -23,6 +23,8 @@ defmodule Newbee.DEE.Evaluator do
             worker: nil,
             # standby：%{peer, node, worker} | nil
             standby: nil,
+            # 后台 standby boot 任务（不阻塞 GenServer）
+            standby_boot: nil,
             restarts: 0,
             boot_error: nil,
             last_boot_attempt: nil
@@ -34,6 +36,11 @@ defmodule Newbee.DEE.Evaluator do
   @peer_boot_timeout 60_000
   @rpc_boot_timeout 60_000
   @reboot_cooldown 5_000
+  # rpc 总上限：async_call + nb_yield 轮询（长任务不误判节点死亡）
+  @rpc_long_timeout 300_000
+  # 等待在途 standby boot 完成的上限 / boot 失败后的重试间隔
+  @standby_wait_timeout 60_000
+  @standby_retry_ms 1_000
 
   # ── API ──
 
@@ -67,11 +74,20 @@ defmodule Newbee.DEE.Evaluator do
           %__MODULE__{mode: :local, worker: worker}
 
         :node ->
+          # 主备并行 boot：standby 提前开跑。boot 必须在独立进程跑（不阻塞
+          # GenServer），但该进程必须**存活**——:peer 把 origin（调用
+          # :peer.start_link 的进程）绑进 peer，origin 死则整个 peer BEAM
+          # halt（peer.erl origin_link）。所以 spawn_standby_boot 返回的
+          # keeper 在 boot 完成后继续存活，直到 peer 死或 evaluator 停。
+          standby_boot = spawn_standby_boot(%__MODULE__{mode: :node})
+
           case boot_node(%__MODULE__{mode: :node}) do
-            {:ok, s} -> s
+            {:ok, s} ->
+              %{s | standby_boot: standby_boot}
+
             {:error, reason} ->
               Logger.error("evaluator node 初始启动失败: #{inspect(reason)}")
-              %__MODULE__{mode: :node, boot_error: reason}
+              %__MODULE__{mode: :node, boot_error: reason, standby_boot: standby_boot}
           end
       end
 
@@ -92,15 +108,25 @@ defmodule Newbee.DEE.Evaluator do
         {:ok, result} ->
           {:reply, result, state}
 
+        {:timeout, result} ->
+          # rpc 超时（长任务/远端卡住）：不重试不切节点——副作用可能已执行，
+          # 重跑会重复；原样把超时错误返回给调用方。
+          {:reply, result, state}
+
         :dead ->
           Newbee.DebugLog.log(:eval, "primary dead, trying standby")
 
-          case remote_call(state.standby, {:eval, code, opts}) do
+          {standby, state} = resolve_standby(state)
+
+          case remote_call(standby, {:eval, code, opts}) do
             {:ok, result} ->
               # standby 顶替 primary，异步补新 standby
-              s = promote_standby(state)
+              s = promote_standby(%{state | standby: standby})
               send(self(), :ensure_standby)
               {:reply, Map.put(result, :node_restarted, true), s}
+
+            {:timeout, result} ->
+              {:reply, result, state}
 
             :dead ->
               # 双死：冷却防抖重建
@@ -109,6 +135,7 @@ defmodule Newbee.DEE.Evaluator do
 
               case remote_call(primary_target(s), {:eval, code, opts}) do
                 {:ok, result} -> {:reply, Map.put(result, :node_restarted, true), s}
+                {:timeout, result} -> {:reply, result, s}
 
                 :dead ->
                   {:reply,
@@ -123,14 +150,14 @@ defmodule Newbee.DEE.Evaluator do
   end
 
   def handle_call(:bindings_summary, _from, state) do
-    case remote_call(state, :bindings_summary) do
+    case remote_call(primary_target(state), :bindings_summary) do
       {:ok, summary} ->
         {:reply, summary, state}
 
-      :dead ->
+      _dead_or_timeout ->
         case remote_call(state.standby, :bindings_summary) do
           {:ok, summary} -> {:reply, summary, promote_standby(state)}
-          :dead -> {:reply, [], state}
+          _dead_or_timeout -> {:reply, [], state}
         end
     end
   end
@@ -160,16 +187,16 @@ defmodule Newbee.DEE.Evaluator do
   end
 
   def handle_call(:dump_bindings, _from, state) do
-    case remote_call(state, :dump_bindings) do
+    case remote_call(primary_target(state), :dump_bindings) do
       {:ok, binding} -> {:reply, binding, state}
-      :dead -> {:reply, [], state}
+      _dead_or_timeout -> {:reply, [], state}
     end
   end
 
   def handle_call({:restore_bindings, binding}, _from, state) do
-    case remote_call(state, {:restore_bindings, binding}) do
+    case remote_call(primary_target(state), {:restore_bindings, binding}) do
       {:ok, res} -> {:reply, res, state}
-      :dead -> {:reply, {:error, :node_down}, state}
+      _dead_or_timeout -> {:reply, {:error, :node_down}, state}
     end
   end
 
@@ -191,18 +218,13 @@ defmodule Newbee.DEE.Evaluator do
   @impl true
   def handle_info({:EXIT, pid, reason}, state) do
     cond do
-      # primary 死
+      # primary 死：只清空 primary，不主动提升 standby——切换留给下一次调用
+      # 的 :dead 回退路径（这样调用方能观察到 node_restarted=true 与
+      # 新节点绑定丢失语义，见 evaluatornodetest/双节点冗余）。
       state.worker != nil and pid == state.peer ->
         Newbee.DebugLog.log(:node, "primary exited reason=#{inspect(reason)} node=#{inspect(state.node)} restarts=#{state.restarts}")
-        Logger.warning("evaluator primary node exited; switching to standby if available")
-
-        if state.standby do
-          s = promote_standby(state)
-          send(self(), :ensure_standby)
-          {:noreply, s}
-        else
-          {:noreply, %{state | peer: nil, node: nil, worker: nil}}
-        end
+        Logger.warning("evaluator primary node exited; standby will take over on next call")
+        {:noreply, %{state | peer: nil, node: nil, worker: nil}}
 
       # standby 死
       state.standby != nil and pid == state.standby.peer ->
@@ -215,22 +237,38 @@ defmodule Newbee.DEE.Evaluator do
     end
   end
 
-  # 异步补 standby：boot 一个全新节点（每次随机新名字）
+  # 异步补 standby：keeper 进程 boot 一个全新节点（每次随机新名字）。
+  # 不能在 handle_info 里同步 boot——standby boot 1-3s（负载下更久），
+  # 同步会阻塞 GenServer，把紧随其后的 eval call 卡在信箱里（实测首调延迟 1s+）。
   def handle_info(:ensure_standby, state) do
-    if state.mode == :node and state.standby == nil do
-      case boot_node(%{state | peer: nil, node: nil, worker: nil, standby: nil, last_boot_attempt: System.monotonic_time(:millisecond)}) do
-        {:ok, s} ->
-          Newbee.DebugLog.log(:node, "standby up node=#{s.node}")
-          {:noreply, %{state | standby: %{peer: s.peer, node: s.node, worker: s.worker}}}
+    if state.mode == :node and state.standby == nil and state.standby_boot == nil do
+      boot =
+        spawn_standby_boot(%{state | peer: nil, node: nil, worker: nil, standby: nil, standby_boot: nil,
+                                   last_boot_attempt: System.monotonic_time(:millisecond)})
 
-        {:error, reason} ->
-          Newbee.DebugLog.log(:node, "standby boot failed #{inspect(reason)}; retry in #{@reboot_cooldown}ms")
-          Process.send_after(self(), :ensure_standby, @reboot_cooldown)
-          {:noreply, state}
-      end
+      {:noreply, %{state | standby_boot: boot}}
     else
       {:noreply, state}
     end
+  end
+
+  def handle_info({:standby_boot_result, keeper, {:ok, s}}, %{standby_boot: keeper} = state) do
+    Newbee.DebugLog.log(:node, "standby up node=#{s.node}")
+    # keeper 与 peer 的 link 随 keeper 存活；本进程再 link 一份，
+    # 保证 standby 死后 EXIT 仍能通知到（一对一监督）。
+    try do
+      Process.link(s.peer)
+    rescue
+      _ -> :ok
+    end
+
+    {:noreply, %{state | standby: %{peer: s.peer, node: s.node, worker: s.worker}, standby_boot: nil}}
+  end
+
+  def handle_info({:standby_boot_result, keeper, {:error, reason}}, %{standby_boot: keeper} = state) do
+    Newbee.DebugLog.log(:node, "standby boot failed #{inspect(reason)}; retry in #{@standby_retry_ms}ms")
+    Process.send_after(self(), :ensure_standby, @standby_retry_ms)
+    {:noreply, %{state | standby_boot: nil}}
   end
 
   def handle_info(_, state), do: {:noreply, state}
@@ -271,7 +309,9 @@ defmodule Newbee.DEE.Evaluator do
                 {:ok, worker} ->
                   Newbee.DebugLog.log(:boot, "worker up #{inspect(worker)}")
                   Newbee.DEE.Tools.HotLoader.load_into_node(node)
-                  {:ok, %{state | peer: peer, node: node, worker: worker, restarts: 0, boot_error: nil}}
+                  # 注意：保留 state.restarts —— maybe_reboot 在 boot 前自增，
+                  # 若这里清零会把重启计数抹掉（restarts >= 1 断言）。
+                  {:ok, %{state | peer: peer, node: node, worker: worker, boot_error: nil}}
 
                 bad ->
                   Newbee.DebugLog.log(:boot, "worker failed #{inspect(bad)}")
@@ -330,8 +370,12 @@ defmodule Newbee.DEE.Evaluator do
     end
   end
 
-  # 停主 + 备
+  # 停主 + 备（含在途的 standby boot keeper）
   defp stop_all(state) do
+    if state.standby_boot do
+      Process.exit(state.standby_boot, :kill)
+    end
+
     if state.standby do
       stop_peer(state.standby.peer)
     end
@@ -348,7 +392,7 @@ defmodule Newbee.DEE.Evaluator do
       end
     end
 
-    %{state | peer: nil, node: nil, worker: nil}
+    %{state | peer: nil, node: nil, worker: nil, standby_boot: nil}
   end
 
   # standby 顶替 primary
@@ -360,6 +404,72 @@ defmodule Newbee.DEE.Evaluator do
       standby: nil,
       restarts: state.restarts + 1,
       boot_error: nil}
+  end
+
+  # primary 死后解析 standby：已就绪直接用；在途 boot 则等它完成（不 reboot）。
+  defp resolve_standby(%{standby: s} = state) when s != nil, do: {s, state}
+  defp resolve_standby(state), do: await_standby_boot(state)
+
+  # 等待在途的 standby boot（standby boot 与 primary 并行开跑，kill 测试里
+  # primary 死时 standby 往往还在 boot：等它完成比从零 reboot 更快且不丢计数）。
+  # 返回 {standby_map | nil, state}。
+  defp await_standby_boot(%{standby_boot: nil} = state), do: {nil, state}
+
+  defp await_standby_boot(state) do
+    keeper = state.standby_boot
+
+    receive do
+      {:standby_boot_result, ^keeper, {:ok, s}} ->
+        try do
+          Process.link(s.peer)
+        rescue
+          _ -> :ok
+        end
+
+        {%{peer: s.peer, node: s.node, worker: s.worker}, %{state | standby_boot: nil}}
+
+      {:standby_boot_result, ^keeper, {:error, _}} ->
+        Process.send_after(self(), :ensure_standby, @standby_retry_ms)
+        {nil, %{state | standby_boot: nil}}
+    after
+      @standby_wait_timeout ->
+        # boot 卡死：杀掉 keeper（其 peer 随之 halt），稍后重试，本调用走 reboot
+        Process.exit(keeper, :kill)
+        Process.send_after(self(), :ensure_standby, @standby_retry_ms)
+        {nil, %{state | standby_boot: nil}}
+    end
+  end
+
+  # ── standby boot keeper ──
+
+  # 后台 boot standby，返回 keeper pid（存 state.standby_boot）。
+  # keeper 与 GenServer link：evaluator 崩 → keeper 死 → peer BEAM halt，不留孤儿节点。
+  defp spawn_standby_boot(state) do
+    gen = self()
+
+    keeper =
+      spawn(fn ->
+        result = boot_node(state)
+        send(gen, {:standby_boot_result, self(), result})
+
+        case result do
+          {:ok, s} ->
+            # 保持存活：peer 以本进程为 origin，origin 死则整个 peer BEAM halt。
+            # peer 死（DOWN）或 evaluator 停（:stop）才退出。
+            Process.monitor(s.peer)
+
+            receive do
+              {:DOWN, _, :process, _, _} -> :ok
+              :stop -> :ok
+            end
+
+          _ ->
+            :ok
+        end
+      end)
+
+    Process.link(keeper)
+    keeper
   end
 
   # ── rpc ──
@@ -376,16 +486,39 @@ defmodule Newbee.DEE.Evaluator do
   end
 
   defp remote_call(%{node: node, worker: w}, msg) when is_pid(w) do
-    # rpc.call 默认 5s 超时：模型死循环/节点卡住时由此兜底，切 standby/reboot
-    case :rpc.call(node, GenServer, :call, [w, msg, :infinity], 10_000) do
-      {:badrpc, reason} ->
-        Newbee.DebugLog.log(:rpc, "badrpc #{inspect(reason)} msg=#{elem(msg, 0)}")
+    # async_call + nb_yield 轮询（总上限 @rpc_long_timeout）：
+    # rpc.call 的 10s 硬超时曾把长任务（sleep 30s 等）误判为节点死亡，
+    # 切 standby/重启导致 ① 报 unavailable ② 副作用重复执行（回归事故）。
+    # 超时不重试不切节点：返回 {:timeout, result}，由上层原样回给调用方。
+    ref = :rpc.async_call(node, GenServer, :call, [w, msg, :infinity])
+
+    case nb_yield_poll(ref, @rpc_long_timeout) do
+      {:value, {:badrpc, reason}} ->
+        Newbee.DebugLog.log(:rpc, "badrpc #{inspect(reason)} msg=#{msg_name(msg)}")
         :dead
 
-      other ->
-        {:ok, other}
+      {:value, result} ->
+        {:ok, result}
+
+      :timeout ->
+        Newbee.DebugLog.log(:rpc, "rpc timeout after #{@rpc_long_timeout}ms msg=#{msg_name(msg)}")
+        {:timeout, %{status: :error, error: "evaluator rpc timeout after #{@rpc_long_timeout}ms", output: ""}}
     end
   end
+
+  # nb_yield 分步轮询，避免一次阻塞太久（结果到达即返回，毫秒级轮询无开销）。
+  defp nb_yield_poll(ref, total) do
+    step = min(total, 5_000)
+
+    case :rpc.nb_yield(ref, step) do
+      {:value, _} = v -> v
+      :timeout when total > step -> nb_yield_poll(ref, total - step)
+      :timeout -> :timeout
+    end
+  end
+
+  defp msg_name(msg) when is_tuple(msg), do: elem(msg, 0)
+  defp msg_name(msg), do: msg
 
   defp alive?(state) do
     state.mode == :local or
@@ -404,7 +537,18 @@ defmodule Newbee.DEE.Evaluator do
   defp ensure_distribution! do
     unless Node.alive?() do
       name = String.to_atom("newbee_#{:crypto.strong_rand_bytes(8) |> Base.encode32(case: :lower, padding: false)}")
-      {:ok, _} = :net_kernel.start([name, :shortnames])
+
+      case :net_kernel.start([name, :shortnames]) do
+        {:ok, _} ->
+          :ok
+
+        # 并发 boot（async 测试多 evaluator 同启）时另一个进程已启动 distribution
+        {:error, {:already_started, _}} ->
+          :ok
+
+        {:error, reason} ->
+          raise "net_kernel start failed: #{inspect(reason)}"
+      end
     end
 
     :ok

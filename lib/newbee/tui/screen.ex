@@ -22,28 +22,31 @@ defmodule Newbee.TUI.Screen do
   paint 每帧只显示末尾几十行，全量折行在巨型工具输出下是 O(历史×宽度)。
   """
   def wrap_tail(lines, cols, need) do
-    {chunks, row_count} =
-      lines
-      |> Enum.reverse()
-      |> Enum.reduce_while({[], 0}, fn line, {acc, rows} ->
-        w = wrap_line(line, cols)
-        rows = rows + length(w)
-
-        if rows >= need do
-          {:halt, {[w | acc], rows}}
-        else
-          {:cont, {[w | acc], rows}}
-        end
-      end)
+    {chunks, _row_count, top?} = do_wrap_tail(Enum.reverse(lines), cols, need, [], 0)
 
     # 注意：倒序遍历 + 头部 cons 后 acc 已是显示顺序，不可再 reverse。
-    {Enum.concat(chunks), row_count < need}
+    {Enum.concat(chunks), top?}
+  end
+
+  # 从最后一行往前折，凑够 need 个屏幕行即停。
+  # top? = 已扫到首行（列表耗尽或恰好停在首行）——即 complete?（已到顶）。
+  defp do_wrap_tail([], _cols, _need, acc, rows), do: {acc, rows, true}
+
+  defp do_wrap_tail([line | rest], cols, need, acc, rows) do
+    w = wrap_line(line, cols)
+    rows = rows + length(w)
+
+    if rows >= need do
+      {[w | acc], rows, rest == []}
+    else
+      do_wrap_tail(rest, cols, need, [w | acc], rows)
+    end
   end
 
   # 单行折行：ANSI 转义不占宽。把行拆成 {段, 样式} 流再按宽度拼。
   defp wrap_line(line, cols) do
     chunks = ansi_chunks(line)
-    max = max(cols - 1, 1)
+    max = max(cols, 1)
     rows = layout(chunks, max) |> Enum.reverse() |> Enum.map(&Enum.reverse/1)
     rows |> Enum.map(fn row -> row |> Enum.reverse() |> build_row() end)
   end
@@ -111,12 +114,21 @@ defmodule Newbee.TUI.Screen do
       |> Enum.reduce({row, w, rows}, fn cp, {row, w, rows} ->
         cw = Line.char_width(cp)
 
-        if w + cw > max and row != [] do
-          # 换行：当前行封板，cp 开新行
-          {[{cp, style}], cw, [row | rows]}
+      # 双宽字符不得贴到右缘（留 1 空隙，避免折进半格）：窄字符超界才折，
+      # 宽字符到边界即折。单字符行（row == []）永不折，保证超宽字符有处放。
+      overflow? =
+        if cw > 1 do
+          w + cw >= max
         else
-          {[{cp, style} | row], w + cw, rows}
+          w + cw > max
         end
+
+      if overflow? and row != [] do
+        # 换行：当前行封板，cp 开新行
+        {[{cp, style}], cw, [row | rows]}
+      else
+        {[{cp, style} | row], w + cw, rows}
+      end
       end)
 
     layout(rest, max, row, w, rows)
@@ -135,18 +147,15 @@ defmodule Newbee.TUI.Screen do
 
   defp merge_runs([], acc, _style), do: Enum.reverse(acc)
 
-  defp merge_runs([{cp, style} | rest], acc, style) when is_list(style) do
-    merge_runs(rest, [{<<cp::utf8>>, style} | acc], style)
-  end
+  # 首段：起新 run
+  defp merge_runs([{cp, style} | rest], [], _old), do: merge_runs(rest, [{<<cp::utf8>>, style}], style)
 
-  # 注意：上方子句 style 绑定要求与 acc 头同段；首段/换段走这里
-  defp merge_runs([{cp, style} | rest], [], _), do: merge_runs(rest, [{<<cp::utf8>>, style}], style)
-
-  defp merge_runs([{cp, style} | rest], [{cur, s} | acc_tail], _old)
-       when style == s do
+  # 与 acc 头同样式：并入当前 run（聚相邻同段，避免每字符一个 SGR）
+  defp merge_runs([{cp, style} | rest], [{cur, s} | acc_tail], _old) when style == s do
     merge_runs(rest, [{cur <> <<cp::utf8>>, s} | acc_tail], style)
   end
 
+  # 换段：起新 run
   defp merge_runs([{cp, style} | rest], acc, _old) do
     merge_runs(rest, [{<<cp::utf8>>, style} | acc], style)
   end

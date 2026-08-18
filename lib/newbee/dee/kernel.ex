@@ -125,6 +125,10 @@ defmodule Newbee.DEE.Kernel do
     ms = :erlang.monotonic_time(:millisecond) - t0
     Newbee.DebugLog.log(:submit, "done in #{ms}ms reply=#{elem(reply, 0)}")
     emit(state, {:turn_end, elem(reply, 0), ms})
+    # 同步屏障：本回合所有 Bus 广播都是 cast（异步）。测试用 assert_received
+    # （0 超时）要求事件在 submit 返回前已送达订阅者信箱——借 subscribers 的
+    # 同步调用按 FIFO 排空本进程先前的 cast。
+    flush_bus()
     {:reply, reply, state}
   end
 
@@ -475,6 +479,18 @@ defmodule Newbee.DEE.Kernel do
 
     if Process.whereis(Newbee.Bus) do
       Newbee.Bus.emit(elem(event, 0), event)
+    end
+  end
+
+  # 同步屏障：对 Bus 发起一次同步调用，令其按 FIFO 处理完本进程先前投递的
+  # 所有 cast（广播），从而保证事件在调用返回前已送达订阅者信箱。
+  defp flush_bus do
+    if Process.whereis(Newbee.Bus) do
+      try do
+        Newbee.Bus.subscribers()
+      catch
+        :exit, _ -> :ok
+      end
     end
   end
 

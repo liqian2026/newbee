@@ -73,7 +73,7 @@ defmodule Newbee.EventLog do
       line =
         Jason.encode_to_iodata!(%{
           topic: topic,
-          event: event,
+          event: encodable(event),
           at: DateTime.to_iso8601(DateTime.utc_now())
         })
 
@@ -84,7 +84,22 @@ defmodule Newbee.EventLog do
     {:noreply, state}
   end
 
+  @impl true
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # 事件常是元组（{:goal_start, "..."}、{:audit, :ok, actor, target, ring}）——
+  # Jason 不能编码元组，转成可编码形态（元组 → [tag | args]，递归）
+  defp encodable(v) when is_tuple(v) do
+    v |> Tuple.to_list() |> Enum.map(&encodable/1)
+  end
+
+  defp encodable(v) when is_list(v), do: Enum.map(v, &encodable/1)
+
+  defp encodable(v) when is_map(v) do
+    Map.new(v, fn {k, val} -> {k, encodable(val)} end)
+  end
+
+  defp encodable(v), do: v
 
   defp trim do
     case File.stat(@path) do

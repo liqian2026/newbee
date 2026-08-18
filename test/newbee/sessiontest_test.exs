@@ -2,6 +2,31 @@ defmodule Newbee.SessionTest do
   use ExUnit.Case, async: false
   alias Newbee.Session
 
+  # OTP 的 erlang:unique_integer([:positive]) 跨 VM 重启序列几乎相同（实测仅
+  # ±3 抖动），同一 "test_<int>" id 的 transcript 会在多次运行间累积——
+  # 重复跑本文件时历史消息翻倍导致断言失败（环境污染，非契约问题）。
+  # 每个测试前后清理自己的制品；只清纯数字后缀，不动其它组的
+  # test_resume_*/test_repair_* 会话。
+
+  setup do
+    cleanup_test_sessions()
+    on_exit(&cleanup_test_sessions/0)
+    :ok
+  end
+
+  defp cleanup_test_sessions do
+    root = Path.join(System.user_home!(), ".newbee/sessions")
+
+    for f <- Path.wildcard(Path.join(root, "test_*.jsonl")),
+        Regex.match?(~r{/test_\d+\.jsonl$}, f) do
+      File.rm(f)
+
+      File.rm_rf(
+        Path.join(System.user_home!(), ".newbee/session-artifacts/#{Path.basename(f, ".jsonl")}")
+      )
+    end
+  end
+
   test "transcript 追加与读取" do
     s = Session.open("test_#{:erlang.unique_integer([:positive])}")
     Session.append(s, %{"role" => "user", "content" => "hi"})

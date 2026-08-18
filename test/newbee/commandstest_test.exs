@@ -19,8 +19,14 @@ defmodule Newbee.CommandsTest do
     assert :quit = Commands.handle("/quit", %{say: fn _ -> :ok end})
   end
 
+  defp unique_session_id do
+    # crypto 随机定长：跨 VM 不重复，且不互为前缀（前缀匹配测试需要唯一性）
+    "test_resume_" <> (:crypto.strong_rand_bytes(6) |> Base.encode16(case: :lower))
+  end
+
   test "/resume 无参数返回 {:resume_picker, metas} 且含最新会话" do
-    s = Newbee.Session.open("test_resume_#{:erlang.unique_integer([:positive])}")
+    id = unique_session_id()
+    s = Newbee.Session.open(id)
     Newbee.Session.append(s, %{"role" => "user", "content" => "帮我做个功能"})
 
     assert {:resume_picker, metas} = Commands.handle("/resume", %{say: fn _ -> :ok end})
@@ -28,7 +34,8 @@ defmodule Newbee.CommandsTest do
   end
 
   test "/resume 精确 id 与前缀都返回 {:resume, id}" do
-    s = Newbee.Session.open("test_resume_#{:erlang.unique_integer([:positive])}")
+    id = unique_session_id()
+    s = Newbee.Session.open(id)
     Newbee.Session.append(s, %{"role" => "user", "content" => "hi"})
     pref = String.slice(s.id, 0, String.length(s.id) - 1)
 

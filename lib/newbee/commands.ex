@@ -115,7 +115,16 @@ defmodule Newbee.Commands do
     {:resume_picker, Newbee.Session.list_with_meta(20)}
   end
 
-  defp run("resume", id, _ctx), do: {:resume, String.trim(id)}
+  defp run("resume", id, _ctx) do
+    id = String.trim(id)
+
+    case Newbee.Session.find(id) do
+      # 精确或唯一前缀 → 返回完整 id（会话恢复用）
+      [found] -> {:resume, found}
+      # 无匹配：原样透传（kernel 会报错提示）
+      [] -> {:resume, id}
+    end
+  end
 
   defp run("approve", arg, ctx) do
     id = if arg == "", do: :all, else: String.to_integer(arg)

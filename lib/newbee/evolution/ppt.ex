@@ -57,23 +57,28 @@ defmodule Newbee.Evolution.PPT do
 
       # (4) 聚合 w_i/c_i
       merged =
-        Enum.reduce(ring_scores ++ tourney_scores, %{}, fn {i, w}, acc ->
+        Enum.reduce(Map.to_list(ring_scores) ++ Map.to_list(tourney_scores), %{}, fn {i, w}, acc ->
           Map.update(acc, i, %{w: w, c: 1}, fn e -> %{w: e.w + w, c: e.c + 1} end)
         end)
 
       normalized =
         Map.new(merged, fn {i, %{w: w, c: c}} -> {i, if(c > 0, do: w / c, else: 0.0)} end)
 
-      ranking = Enum.sort_by(normalized, fn {_i, s} -> -s end) |> Enum.map(&elem(&1, 0))
-      best = hd(ranking)
+      if normalized == %{} do
+        # 全部比较失败（判分器不可用）：均匀回退，选第一个候选
+        %{best: 0, ranking: Enum.to_list(0..(n - 1)), scores: %{0 => 1.0}, comparisons: 0, method: :trivial}
+      else
+        ranking = Enum.sort_by(normalized, fn {_i, s} -> -s end) |> Enum.map(&elem(&1, 0))
+        best = hd(ranking)
 
-      %{
-        best: best,
-        ranking: ranking,
-        scores: normalized,
-        comparisons: ring_comp + tourney_comp,
-        method: if(ring_comp > 0, do: :ppt, else: :single)
-      }
+        %{
+          best: best,
+          ranking: ranking,
+          scores: normalized,
+          comparisons: ring_comp + tourney_comp,
+          method: if(ring_comp > 0, do: :ppt, else: :single)
+        }
+      end
     end
   end
 

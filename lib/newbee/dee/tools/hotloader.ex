@@ -60,7 +60,8 @@ defmodule Newbee.DEE.Tools.HotLoader do
 
     results =
       Enum.map(files, fn f ->
-        :rpc.call(node, Code, :compile_file, [String.to_charlist(f)], 60_000)
+        # 注意：路径必须传 string（charlist 在 OTP 29 的 Code.compile_file 会 function_clause）
+        :rpc.call(node, Code, :compile_file, [f], 60_000)
       end)
 
     if Enum.any?(results, &match?({:error, _}, &1)) do
@@ -115,11 +116,24 @@ defmodule Newbee.DEE.Tools.HotLoader do
   defp git_commit(path, message) do
     dir = global_dir()
 
-    with {_, 0} <- System.cmd("git", ["-C", dir, "add", path], stderr_to_stdout: true),
-         {_, 0} <- System.cmd("git", ["-C", dir, "commit", "-q", "-m", message], stderr_to_stdout: true) do
-      :ok
+    with {_, 0} <- System.cmd("git", ["-C", dir, "add", path], stderr_to_stdout: true) do
+      case System.cmd("git", ["-C", dir, "commit", "-q", "-m", message], stderr_to_stdout: true) do
+        {_, 0} ->
+          :ok
+
+        # 内容与上次相同（残留发布）——没有新提交，视为成功
+        {out, _} when is_binary(out) ->
+          if out =~ "nothing to commit" or out =~ "无文件要提交" or out =~ "no changes added" do
+            :ok
+          else
+            {:error, {:git_commit, String.slice(out, 0, 200)}}
+          end
+
+        {out, _} ->
+          {:error, {:git_commit, String.slice(out, 0, 200)}}
+      end
     else
-      {out, _} -> {:error, {:git_commit, String.slice(out, 0, 200)}}
+      {out, _} -> {:error, {:git_add, String.slice(out, 0, 200)}}
     end
   rescue
     e -> {:error, {:git, e}}

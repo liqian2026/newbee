@@ -2,6 +2,13 @@ defmodule Newbee.DEE.Tools.HotLoaderTest do
   use ExUnit.Case, async: false
   alias Newbee.DEE.Tools.HotLoader
 
+  setup do
+    # 清理历史残留（测试可能失败后留下工具文件，污染 git log 断言）
+    path = Path.join(HotLoader.global_dir(), "HotTestX.ex")
+    if File.exists?(path), do: File.rm(path)
+    :ok
+  end
+
   test "发布工具：写文件 + git 版本化 + 热载到节点可调用" do
     src = """
     defmodule Newbee.Tools.HotTestX do

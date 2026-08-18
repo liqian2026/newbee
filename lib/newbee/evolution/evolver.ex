@@ -39,7 +39,7 @@ defmodule Newbee.Evolution.Evolver do
   client_fun 可注入（测试用假客户端）。
   """
   def run_once(opts \\ []) do
-    policy = Newbee.Evolution.Policy.get()
+    policy = effective_policy()
 
     if policy == :off do
       {:skipped, :policy_off}
@@ -54,6 +54,22 @@ defmodule Newbee.Evolution.Evolver do
     kind, reason ->
       Logger.error("evolver run halted: #{inspect({kind, reason})}")
       {:error, {kind, reason}}
+  end
+
+  # Policy.set/1 把档位原子写成 JSON 字符串（"off"），而 Policy.get/0 的守卫用
+  # 原子列表比较（"off" in [:off, ...] 恒 false）→ 一律退回 :background，:off
+  # 信息丢失。这里直接从 config 读原始档位，避免依赖该行为。
+  defp effective_policy do
+    case File.read(Path.join(System.user_home!(), ".newbee/config.json")) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, %{"policy" => p}} when p in ~w(off hint background auto) -> String.to_atom(p)
+          _ -> :background
+        end
+
+      _ ->
+        :background
+    end
   end
 
   defp do_run(opts) do

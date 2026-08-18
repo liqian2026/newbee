@@ -59,7 +59,7 @@ defmodule Newbee.Evolution.Bench do
       end)
 
     failed = Enum.filter(results, fn {_, ok, _} -> !ok end)
-    {length(results) - length(failed), length(results), results}
+    {length(results) - length(failed), length(failed), results}
   end
 
   defp score_default(%{"code" => code, "task" => task, "score_opts" => score_opts}, _evaluator) do

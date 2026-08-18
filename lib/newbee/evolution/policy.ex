@@ -17,11 +17,12 @@ defmodule Newbee.Evolution.Policy do
   @doc "合法档位列表。"
   def levels, do: @levels
 
-  @doc "当前档位（默认 :hint）。"
+  @doc "当前档位（默认 :background）。"
   def get do
     case File.read(@config) do
       {:ok, body} ->
         case Jason.decode(body) do
+          {:ok, %{"policy" => p}} when is_binary(p) -> String.to_atom(p)
           {:ok, %{"policy" => p}} when p in @levels -> p
           _ -> @default
         end
