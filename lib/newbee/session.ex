@@ -1,0 +1,195 @@
+defmodule Newbee.Session do
+  @moduledoc """
+  会话持久化 (DESIGN §5.3/§3.8)：transcript JSONL 追加写 + 制品目录
+  （bindings 快照）。恢复的是状态与绑定值——进程/闭包 tombstone。
+  """
+
+  defstruct id: nil, dir: nil, transcript: nil
+
+  @root Path.join(System.user_home!(), ".newbee/sessions")
+  @artifacts Path.join(System.user_home!(), ".newbee/session-artifacts")
+
+  @doc "新会话或恢复已有会话。"
+  def open(id \\ nil) do
+    id = id || gen_id()
+    dir = Path.join(@artifacts, id)
+    File.mkdir_p!(dir)
+
+    %__MODULE__{id: id, dir: dir, transcript: Path.join(@root, "#{id}.jsonl")}
+    |> tap(fn _ -> File.mkdir_p!(@root) end)
+  end
+
+  @doc "追加一条消息到 transcript。"
+  def append(%__MODULE__{transcript: t}, %{"role" => _} = msg) do
+    File.write!(t, [Jason.encode_to_iodata!(msg), "\n"], [:append])
+  end
+
+  @doc "读取全部历史消息。坏行（崩溃写了一半的）跳过而非崩 init。"
+  def messages(%__MODULE__{transcript: t}) do
+    case File.read(t) do
+      {:ok, body} ->
+        body
+        |> String.split("\n", trim: true)
+        |> Enum.reduce([], fn line, acc ->
+          case Jason.decode(line) do
+            {:ok, msg} -> [msg | acc]
+            _ -> acc
+          end
+        end)
+        |> Enum.reverse()
+
+      _ ->
+        []
+    end
+  end
+  @doc "读取会话首次请求的稳定 system prompt；旧会话没有时返回 nil。"
+  def system_prompt(%__MODULE__{dir: dir}) do
+    case File.read(Path.join(dir, "system-prompt.md")) do
+      {:ok, prompt} -> prompt
+      {:error, :enoent} -> nil
+      {:error, _} -> nil
+    end
+  end
+
+  @doc "持久化会话首次请求的 system prompt，供同会话恢复时原样复用。"
+  def save_system_prompt(%__MODULE__{dir: dir}, prompt) when is_binary(prompt) do
+    File.write!(Path.join(dir, "system-prompt.md"), prompt)
+    prompt
+  end
+
+  @doc "绑定快照：只存可序列化值，其余 tombstone。"
+  def save_bindings(%__MODULE__{dir: d}, binding) do
+    safe =
+      Enum.map(binding, fn
+        {name, v} when is_binary(v) or is_number(v) or is_atom(v) or is_map(v) or is_list(v) ->
+          case serializable?(v) do
+            true -> [to_string(name), ["ok", v]]
+            false -> [to_string(name), "tombstone"]
+          end
+
+        {name, _} ->
+          [to_string(name), "tombstone"]
+      end)
+
+    File.write!(Path.join(d, "bindings.json"), Jason.encode_to_iodata!(safe))
+  end
+
+  def load_bindings(%__MODULE__{dir: d}) do
+    case File.read(Path.join(d, "bindings.json")) do
+      {:ok, body} ->
+        body
+        |> Jason.decode!()
+        |> Enum.flat_map(fn
+          [name, ["ok", v]] -> [{String.to_atom(name), v}]
+          _ -> []
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  @doc "列出会话元信息（新→旧，默认最多 20 个）：id / when_str / mtime / messages / title。"
+  def list_with_meta(n \\ 20) do
+    @root
+    |> Path.join("*.jsonl")
+    |> Path.wildcard()
+    |> Enum.flat_map(fn fp ->
+      case File.stat(fp) do
+        {:ok, stat} ->
+          id = Path.basename(fp, ".jsonl")
+          msgs = messages(%__MODULE__{id: id, dir: Path.join(@artifacts, id), transcript: fp})
+
+          [
+            %{
+              id: id,
+              mtime: stat.mtime,
+              when_str: when_str(stat.mtime),
+              messages: length(msgs),
+              title: title(msgs)
+            }
+          ]
+
+        {:error, :enoent} ->
+          []
+
+        {:error, _} ->
+          []
+      end
+    end)
+    |> Enum.sort_by(& &1.mtime, :desc)
+    |> Enum.take(n)
+  end
+
+  @doc "单个会话的元信息（时间 / 消息数 / 标题）。"
+  def meta(id) do
+    s = open(id)
+    stat = File.stat!(s.transcript)
+    msgs = messages(s)
+
+    %{
+      id: id,
+      mtime: stat.mtime,
+      when_str: when_str(stat.mtime),
+      messages: length(msgs),
+      title: title(msgs)
+    }
+  end
+
+  @doc "会话标题：首条用户消息（太短则用最近一条），单行化 + 截断。"
+  def title(msgs) do
+    users = msgs |> Enum.filter(&(&1["role"] == "user")) |> Enum.map(&(&1["content"] || ""))
+
+    pick =
+      case users do
+        [] -> ""
+        [first | _] -> if String.length(first) < 4, do: List.last(users), else: first
+      end
+
+    pick |> String.replace(~r/\s+/, " ") |> String.trim() |> String.slice(0, 48)
+  end
+
+  @doc "按 id 精确或前缀匹配，返回匹配的 id 列表。"
+  def find(input) do
+    ids = list()
+
+    case Enum.filter(ids, &(&1 == input)) do
+      [] -> Enum.filter(ids, &String.starts_with?(&1, input))
+      exact -> exact
+    end
+  end
+
+  def list do
+    @root
+    |> Path.join("*.jsonl")
+    |> Path.wildcard()
+    |> Enum.map(&Path.basename(&1, ".jsonl"))
+    |> Enum.sort(:desc)
+  end
+
+  # 文件 mtime 为本地时间。相对化：今天/昨天显示时段，跨年显示日期。
+  defp when_str({{y, m, d}, {h, mi, _}}) do
+    {{ny, nm, nd}, _} = :calendar.local_time()
+    yesterday = :calendar.date_to_gregorian_days({ny, nm, nd}) - 1 |> :calendar.gregorian_days_to_date()
+    pad = &String.pad_leading(Integer.to_string(&1), 2, "0")
+
+    cond do
+      {y, m, d} == {ny, nm, nd} -> "今天 #{pad.(h)}:#{pad.(mi)}"
+      {y, m, d} == yesterday -> "昨天 #{pad.(h)}:#{pad.(mi)}"
+      y == ny -> "#{pad.(m)}-#{pad.(d)} #{pad.(h)}:#{pad.(mi)}"
+      true -> "#{y}-#{pad.(m)}-#{pad.(d)}"
+    end
+  end
+  defp serializable?(v) do
+    try do
+      Jason.encode!(v)
+      true
+    rescue
+      _ -> false
+    end
+  end
+
+  defp gen_id do
+    :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+  end
+end

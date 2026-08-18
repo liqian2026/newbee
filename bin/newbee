@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# newbee 启动脚本
+# 用法：./bin/newbee [子命令] [参数]
+#   ./bin/newbee            → mix newbee（CLI）
+#   ./bin/newbee tui        → mix newbee.tui
+#   ./bin/newbee daemon     → mix newbee.daemon
+#   ./bin/newbee bench      → mix newbee.bench
+#   ./bin/newbee <args>     → mix newbee <args>（透传，如 ./bin/newbee -r <id>）
+# 运行目录即 newbee 的工作目录：通过 NEWBEE_CWD 注入，newbee 启动时切过去。
+set -euo pipefail
+
+# 优先使用本机 toolchains 里的 OTP/Elixir
+export PATH="$HOME/toolchains/otp-29/bin:$HOME/toolchains/elixir-1.20/bin:$PATH"
+
+# 定位 newbee 工程根（脚本所在目录的上一级，脚本在 bin/ 下）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NEWBEE_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# 用户运行目录 = 工作目录
+export NEWBEE_CWD="$PWD"
+
+cd "$NEWBEE_ROOT"
+
+# 解析子命令
+case "${1:-}" in
+  tui)     shift; exec mix newbee.tui "$@" ;;
+  daemon)  shift; exec mix newbee.daemon "$@" ;;
+  bench)   shift; exec mix newbee.bench "$@" ;;
+  "")      exec mix newbee ;;
+  *)       exec mix newbee "$@" ;;
+esac

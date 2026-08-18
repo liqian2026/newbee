@@ -1,0 +1,213 @@
+defmodule Newbee.TUI.Screen do
+  @moduledoc """
+  屏幕渲染（纯逻辑 + 单个 paint 落点）：
+
+  - 折行：按可见宽度（CJK 双宽感知，Line.width），超宽行真正折行
+  - 双缓冲：与上次帧 diff，只重写变化的行；首帧/resize 全清重画
+  - 无闪烁：不清屏（旧实现每帧 \e[2J 是闪烁根源），行内重写后 \e[K 去尾
+  - 输出区滚动：page>0 时上翻历史（PgUp/PgDn），底部固定输入行
+  """
+
+  alias Newbee.TUI.Line
+
+  @doc "把渲染行列表 -> 屏幕行列表（真实折行）。"
+  @spec wrap(term(), pos_integer()) :: list(String.t())
+  def wrap(lines, cols) when is_list(lines) do
+    Enum.flat_map(lines, &wrap_line(&1, cols))
+  end
+
+  @doc """
+  只折行尾部：从最后一行往前折，凑够 need 个屏幕行即停。
+  返回 {rows（显示顺序）, complete?（已扫到首行/到顶）}。
+  paint 每帧只显示末尾几十行，全量折行在巨型工具输出下是 O(历史×宽度)。
+  """
+  def wrap_tail(lines, cols, need) do
+    {chunks, row_count} =
+      lines
+      |> Enum.reverse()
+      |> Enum.reduce_while({[], 0}, fn line, {acc, rows} ->
+        w = wrap_line(line, cols)
+        rows = rows + length(w)
+
+        if rows >= need do
+          {:halt, {[w | acc], rows}}
+        else
+          {:cont, {[w | acc], rows}}
+        end
+      end)
+
+    # 注意：倒序遍历 + 头部 cons 后 acc 已是显示顺序，不可再 reverse。
+    {Enum.concat(chunks), row_count < need}
+  end
+
+  # 单行折行：ANSI 转义不占宽。把行拆成 {段, 样式} 流再按宽度拼。
+  defp wrap_line(line, cols) do
+    chunks = ansi_chunks(line)
+    max = max(cols - 1, 1)
+    rows = layout(chunks, max) |> Enum.reverse() |> Enum.map(&Enum.reverse/1)
+    rows |> Enum.map(fn row -> row |> Enum.reverse() |> build_row() end)
+  end
+
+  # [{text, style} | :nl] 段流；style 是当前 SGR 码列表。
+  # \n 是硬换行：流式回复常含多行，若当普通字符会与终端自动换行错位（行乱根因）。
+  defp ansi_chunks(line), do: do_ansi(String.to_charlist(line), "", [], [])
+
+  defp do_ansi([], text, style, acc) do
+    acc = if text == "", do: acc, else: [{text, style} | acc]
+    Enum.reverse(acc)
+  end
+
+  defp do_ansi([10 | rest], text, style, acc) do
+    acc = if text == "", do: acc, else: [{text, style} | acc]
+    do_ansi(rest, "", style, [:nl | acc])
+  end
+
+  # 孤立的 \r 丢弃（\r\n 里 \n 已断行）
+  defp do_ansi([13 | rest], text, style, acc), do: do_ansi(rest, text, style, acc)
+
+  defp do_ansi([27, ?[ | rest], text, style, acc) do
+    {codes, rest} = take_sgr(rest, "")
+    acc = if text == "", do: acc, else: [{text, style} | acc]
+    style2 =
+      case codes do
+        "0" -> []
+        "" -> style
+        _ -> merge_sgr(style, codes)
+      end
+    do_ansi(rest, "", style2, acc)
+  end
+
+  defp do_ansi([cp | rest], text, style, acc) do
+    do_ansi(rest, text <> <<cp::utf8>>, style, acc)
+  end
+
+  # 吃掉 SGR 参数直到 m
+  defp take_sgr([?m | rest], acc), do: {acc, rest}
+  defp take_sgr([cp | rest], acc), do: take_sgr(rest, acc <> <<cp>>)
+  defp take_sgr([], acc), do: {acc, []}
+
+  # SGR 合并：新码替换同类属性（粗略：直接追加，0 清空）
+  defp merge_sgr(style, codes) do
+    style ++ String.split(codes, ";")
+  end
+
+  # 按宽度铺行；宽度随行携带（O(n)）。
+  # 旧实现每个字符都重算 row_width（O(行长×列数)），巨型工具输出行卡死 paint。
+  defp layout(chunks, max), do: layout(chunks, max, [], 0, [])
+
+  defp layout([], _max, row, _w, rows) do
+    if row == [], do: rows, else: [row | rows]
+  end
+
+  # 硬换行：封当前行；空行（连续 \n）也占一行
+  defp layout([:nl | rest], max, row, _w, rows) do
+    layout(rest, max, [], 0, [row | rows])
+  end
+
+  defp layout([{text, style} | rest], max, row, w, rows) do
+    {row, w, rows} =
+      text
+      |> String.to_charlist()
+      |> Enum.reduce({row, w, rows}, fn cp, {row, w, rows} ->
+        cw = Line.char_width(cp)
+
+        if w + cw > max and row != [] do
+          # 换行：当前行封板，cp 开新行
+          {[{cp, style}], cw, [row | rows]}
+        else
+          {[{cp, style} | row], w + cw, rows}
+        end
+      end)
+
+    layout(rest, max, row, w, rows)
+  end
+
+  # 按原顺序聚相邻同段；无样式段不加 SGR
+  defp build_row(pairs) do
+    pairs
+    |> Enum.reverse()
+    |> merge_runs([], nil)
+    |> Enum.map_join(fn
+      {cps, []} -> cps
+      {cps, style} -> "\e[" <> Enum.join(style, ";") <> "m" <> cps <> "\e[0m"
+    end)
+  end
+
+  defp merge_runs([], acc, _style), do: Enum.reverse(acc)
+
+  defp merge_runs([{cp, style} | rest], acc, style) when is_list(style) do
+    merge_runs(rest, [{<<cp::utf8>>, style} | acc], style)
+  end
+
+  # 注意：上方子句 style 绑定要求与 acc 头同段；首段/换段走这里
+  defp merge_runs([{cp, style} | rest], [], _), do: merge_runs(rest, [{<<cp::utf8>>, style}], style)
+
+  defp merge_runs([{cp, style} | rest], [{cur, s} | acc_tail], _old)
+       when style == s do
+    merge_runs(rest, [{cur <> <<cp::utf8>>, s} | acc_tail], style)
+  end
+
+  defp merge_runs([{cp, style} | rest], acc, _old) do
+    merge_runs(rest, [{<<cp::utf8>>, style} | acc], style)
+  end
+
+  # ── 双缓冲 paint ──
+
+  defstruct prev: :nil, cols: 0, rows: 0
+
+  @doc """
+  全量重画（首帧 / resize / 翻页跳变）。
+  """
+  def paint_full(lines, input_view, status, cols, rows) do
+    body = wrap(lines, cols) |> Enum.take(max(rows - 2, 1))
+    out = ["\e[H\e[2J"]
+
+    out =
+      out ++
+        Enum.map(Enum.with_index(body, 1), fn {l, i} ->
+          "\e[#{i};1H" <> l <> "\e[K"
+        end)
+
+    {line_no, cursor_col} = status
+    out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
+    out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
+    out = out ++ ["\e[#{line_no};#{cursor_col}H"]
+    IO.write(out)
+    %__MODULE__{prev: body, cols: cols, rows: rows}
+  end
+
+  @doc """
+  增量重画：只重写与上一帧不同的行。
+  """
+  def paint_delta(screen, lines, input_view, status, cols, rows) do
+    body = wrap(lines, cols) |> Enum.take(max(rows - 2, 1))
+    # 屏幕上第 i 行（1 起）
+    out =
+      diff_rows(screen.prev, body)
+      |> Enum.map(fn {i, l} -> "\e[#{i + 1};1H" <> l <> "\e[K" end)
+
+    {line_no, cursor_col} = status
+    out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
+    out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
+    out = out ++ ["\e[#{line_no};#{cursor_col}H"]
+    IO.write(out)
+    %__MODULE__{prev: body, cols: cols, rows: rows}
+  end
+
+  # 返回 [{行号(0起), 新行}]
+  defp diff_rows(prev, next) do
+    n = max(length(prev), length(next))
+
+    Enum.reduce(0..(n - 1)//1, [], fn i, acc ->
+      p = Enum.at(prev, i)
+      c = Enum.at(next, i)
+
+      if p != c do
+        [{i, c || ""} | acc]
+      else
+        acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+end

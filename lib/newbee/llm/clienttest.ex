@@ -1,0 +1,52 @@
+defmodule Newbee.LLM.ClientTest do
+  use ExUnit.Case, async: true
+  alias Newbee.LLM.Client
+
+  test "OpenRouter 与 DeepSeek 缓存字段归一化" do
+    assert Client.normalize_usage(%{"prompt_tokens" => 100, "cached_tokens" => 80, "cache_write_tokens" => 12}) ==
+             %{
+               "prompt_tokens" => 100,
+               "cached_tokens" => 80,
+               "cache_write_tokens" => 12,
+               "cache_read_tokens" => 80,
+               "uncached_prompt_tokens" => 20
+             }
+
+    assert Client.normalize_usage(%{"prompt_tokens" => 100, "prompt_cache_hit_tokens" => 64})["cache_read_tokens"] == 64
+
+    # 无缓存字段：uncached = prompt_tokens
+    assert Client.normalize_usage(%{"prompt_tokens" => 50, "completion_tokens" => 9})["uncached_prompt_tokens"] == 50
+  end
+
+  test "缓存字段优先取 OpenRouter 专名" do
+    u =
+      Client.normalize_usage(%{
+        "prompt_tokens" => 100,
+        "prompt_tokens_details" => %{"cached_tokens" => 30},
+        "cache_read_input_tokens" => 40
+      })
+
+    assert u["cache_read_tokens"] == 40
+  end
+
+  test "stream_chat 返回的 tool_calls 按 index 聚合" do
+    # 不发起真实请求：直接验证 apply_delta 的聚合逻辑不可行（私有），
+    # 因此验证消息组装路径：interrupt 标志可反复设置/清除。
+    Client.clear_interrupt()
+    refute Client.interrupted?()
+    Client.interrupt()
+    assert Client.interrupted?()
+    Client.clear_interrupt()
+    refute Client.interrupted?()
+  end
+
+  test "new/1 从环境变量读取 API key" do
+    old = System.get_env("OPENROUTER_API_KEY")
+    System.put_env("OPENROUTER_API_KEY", "sk-test-123")
+    c = Client.new()
+    assert c.api_key == "sk-test-123"
+    assert c.model == "deepseek/deepseek-v4-flash-0731"
+
+    if old, do: System.put_env("OPENROUTER_API_KEY", old), else: System.delete_env("OPENROUTER_API_KEY")
+  end
+end

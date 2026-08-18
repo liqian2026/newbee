@@ -1,0 +1,450 @@
+defmodule Newbee.LLM.Client do
+  @moduledoc """
+  OpenRouter 流式客户端 (DESIGN §4)。SSE 流式 + tool_calls 增量聚合。
+  API key 默认从 OPENROUTER_API_KEY 读取。
+  """
+
+  @default_base_url "https://openrouter.ai/api/v1"
+  @default_model "deepseek/deepseek-v4-flash-0731"
+
+  @overload_statuses [429, 500, 502, 503, 529]
+  @overload_retries 5
+  @overload_delay 1_000
+
+  @derive {Inspect, except: [:api_key]}
+  defstruct model: @default_model, api_key: nil, base_url: @default_base_url, reasoning_effort: nil
+
+  def new(opts \\ []) do
+    %__MODULE__{
+      model: Keyword.get(opts, :model, @default_model),
+      api_key: Keyword.get(opts, :api_key, System.get_env("OPENROUTER_API_KEY")),
+      base_url: Keyword.get(opts, :base_url, @default_base_url),
+      reasoning_effort: Keyword.get(opts, :reasoning_effort)
+    }
+  end
+
+  @doc """
+  流式聊天。`on_text.(delta)` 收到正文增量；`on_reasoning.(delta)`（DeepSeek 系）
+  收到思考增量。返回 {:ok, message, usage} | {:error, term}，
+  message 含 "content" 与 "tool_calls"（可能为空列表）。
+  """
+  def stream_chat(%__MODULE__{} = client, messages, on_text \\ fn _ -> :ok end, on_reasoning \\ fn _ -> :ok end) do
+    Newbee.DebugLog.log(:llm, "start model=#{client.model} messages=#{length(messages)}")
+    t0 = System.monotonic_time(:millisecond)
+
+    body = %{
+      model: client.model,
+      messages: messages,
+      tools: Newbee.Codec.tools(),
+      stream: true,
+      stream_options: %{include_usage: true}
+    }
+
+    body =
+      if client.reasoning_effort,
+        do: Map.put(body, :reasoning_effort, client.reasoning_effort),
+        else: body
+
+    # receive_timeout 是"相邻两块数据的间隔"。serverless 端点冷启动（唤醒实例）
+    # 实测 ~38s 才出首 token，30s 必然误超时再重试（等待翻倍）；120s 覆盖冷启动。
+    build_req = fn body ->
+      Req.new(
+        url: client.base_url <> "/chat/completions",
+        method: :post,
+        headers: [
+          {"authorization", "Bearer #{client.api_key}"},
+          {"content-type", "application/json"}
+        ],
+        json: body,
+        receive_timeout: 120_000,
+        finch: [pool_timeout: 30_000, conn_max_idle_time: 300_000, conn_opts: [transport_opts: [timeout: 30_000]]],
+        retry: false,
+        into: :self
+      )
+    end
+
+    result =
+      case do_request(build_req.(body), on_text, on_reasoning, @overload_retries) do
+        {:error, %Req.TransportError{reason: :timeout}} ->
+          # 池内连接可能已冷掉：后台重拨（慢握手）后重试一次
+          Newbee.DebugLog.log(:llm, "transport timeout, prewarming+retry")
+          prewarm(client)
+          do_request(build_req.(body), on_text, on_reasoning, @overload_retries)
+
+        other ->
+          other
+      end
+
+    # 各家 provider 接受的 reasoning_effort 档位不一（如 sensenova 无 "max"）：
+    # 400 且报错涉及 reasoning 时摘掉该字段重试一次，配置写错不硬死
+    result =
+      case result do
+        {:error, {:http_error, 400, msg}} = err ->
+          if client.reasoning_effort && is_binary(msg) && msg =~ "reasoning" do
+            Newbee.DebugLog.log(:llm, "400 on reasoning_effort=#{client.reasoning_effort}, retry without it")
+
+            do_request(
+              build_req.(Map.delete(body, :reasoning_effort)),
+              on_text,
+              on_reasoning,
+              @overload_retries
+            )
+          else
+            err
+          end
+
+        other ->
+          other
+      end
+
+    Newbee.DebugLog.log(:llm, "done in #{System.monotonic_time(:millisecond) - t0}ms result=#{elem(result, 0)}")
+    result
+  end
+
+  @doc """
+  非流式补全（verifier/轻量判分用）。`opts`：
+    - `logprobs`: true 时请求 token logprobs（部分模型支持，响应含 logprobs.content）
+    - `top_logprobs`: 配合 logprobs 使用的 top-N 分布（默认 20）
+    - `temperature`: 默认 0.2
+    - `extra`: 追加到请求体的任意字段
+  返回 {:ok, content, %{usage, logprobs}} | {:error, term}。logprobs 缺失时为 nil。
+  """
+  def complete(%__MODULE__{} = client, messages, opts \\ []) do
+    Newbee.DebugLog.log(:llm, "complete start model=#{client.model} messages=#{length(messages)}")
+
+    body =
+      %{
+        model: client.model,
+        messages: messages,
+        stream: false,
+        temperature: Keyword.get(opts, :temperature, 0.2)
+      }
+      |> maybe_put_body(:logprobs, Keyword.get(opts, :logprobs))
+      |> maybe_put_body(:top_logprobs, Keyword.get(opts, :top_logprobs, 20))
+      |> maybe_put_body(:reasoning_effort, client.reasoning_effort)
+      |> Map.merge(Keyword.get(opts, :extra, %{}))
+
+    t0 = System.monotonic_time(:millisecond)
+
+    req =
+      Req.new(
+        url: client.base_url <> "/chat/completions",
+        method: :post,
+        headers: [
+          {"authorization", "Bearer #{client.api_key}"},
+          {"content-type", "application/json"}
+        ],
+        json: body,
+        receive_timeout: 120_000,
+        retry: false
+      )
+
+    result =
+      case complete_req(req, @overload_retries) do
+        {:ok, %{status: 200} = resp} ->
+          case Jason.decode(resp.body) do
+            {:ok, %{"choices" => [choice | _]}} ->
+              content = get_in(choice, ["message", "content"]) || ""
+              logprobs = choice["logprobs"]
+              usage = normalize_usage(choice["usage"] || %{})
+              {:ok, content, %{usage: usage, logprobs: logprobs}}
+
+            {:ok, %{"error" => err}} ->
+              {:error, {:api_error, err}}
+
+            other ->
+              {:error, {:bad_response, other}}
+          end
+
+        {:ok, %{status: status} = resp} when status in @overload_statuses ->
+          {:error, {:http_error, status, resp.body}}
+
+        {:error, e} ->
+          {:error, e}
+      end
+
+    Newbee.DebugLog.log(
+      :llm,
+      "complete done in #{System.monotonic_time(:millisecond) - t0}ms result=#{elem(result, 0)}"
+    )
+
+    result
+  end
+
+  defp maybe_put_body(body, _k, nil), do: body
+  defp maybe_put_body(body, k, v), do: Map.put(body, k, v)
+
+  # 429/5xx 过载重试（非流式版，无 SSE drain 需求）
+  defp complete_req(req, 0), do: Req.request(req)
+  defp complete_req(req, left) do
+    case Req.request(req) do
+      {:ok, %{status: status}} when status in @overload_statuses ->
+        Process.sleep(@overload_delay)
+        complete_req(req, left - 1)
+
+      other ->
+        other
+    end
+  end
+
+  # 429/5xx 过载类错误是瞬态的：1 秒后重试，最多 5 次。
+  # 重试前必须 drain 掉错误响应体——into: :self 的异步消息残留会污染
+  # 下一次请求的 SSE 消费。Esc 中断时立即放弃重试。
+  defp do_request(req, on_text, on_reasoning, overload_left) do
+    case Req.request(req) do
+      {:ok, %{status: status} = resp}
+      when status in @overload_statuses and overload_left > 0 ->
+        _ = drain(resp)
+
+        if interrupted?() do
+          {:interrupted, ""}
+        else
+          Newbee.DebugLog.log(
+            :llm,
+            "http #{status} 过载，#{@overload_delay}ms 后重试（剩余 #{overload_left - 1} 次）"
+          )
+
+          Process.sleep(@overload_delay)
+          do_request(req, on_text, on_reasoning, overload_left - 1)
+        end
+
+      {:ok, %{status: 200} = resp} ->
+        consume_sse(resp, on_text, on_reasoning)
+
+      {:ok, resp} ->
+        {:error, {:http_error, resp.status, drain(resp)}}
+
+      {:error, e} ->
+        {:error, e}
+    end
+  end
+
+  @doc "预热连接池：建立 TLS 连接，后续请求复用。失败静默。"
+  def prewarm(%__MODULE__{} = client) do
+    # 假 IP 代理 TLS 握手 ~5.2s，预热必须容忍慢拨号；连接入池后请求级 5s 才有意义
+    Req.get(client.base_url <> "/models",
+      headers: [{"authorization", "Bearer #{client.api_key}"}],
+      receive_timeout: 30_000,
+      finch: [pool_timeout: 30_000, conn_max_idle_time: 300_000, conn_opts: [transport_opts: [timeout: 30_000]]],
+      retry: false
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # ── SSE 消费 ──
+
+  defp consume_sse(resp, on_text, on_reasoning) do
+    acc = %{content: "", reasoning: "", tool_calls: %{}, usage: %{}, error: nil}
+
+    case loop(resp, acc, on_text, on_reasoning, "", System.monotonic_time(:millisecond)) do
+      %{error: :interrupted} = a ->
+        Newbee.DebugLog.log(:sse, "interrupted content=#{byte_size(a.content)}")
+        {:interrupted, a.content}
+
+      %{error: err} = a when not is_nil(err) ->
+        Newbee.DebugLog.log(:sse, "error #{inspect(err)} content=#{byte_size(a.content)}")
+        {:error, {:stream_error, err, a.content}}
+
+      acc ->
+        Newbee.DebugLog.log(:sse, "done content=#{byte_size(acc.content)} reasoning=#{byte_size(acc.reasoning)} tool_calls=#{map_size(acc.tool_calls)}")
+
+        msg =
+          %{"role" => "assistant", "content" => acc.content}
+          |> maybe_put("tool_calls", assemble_tool_calls(acc.tool_calls))
+          |> maybe_put("reasoning", acc.reasoning)
+
+        {:ok, msg, acc.usage}
+    end
+  end
+
+  # DeepSeek 系拒绝空 tool_calls 数组（400）；空值不写字段
+  defp maybe_put(msg, _key, []), do: msg
+  defp maybe_put(msg, _key, ""), do: msg
+  defp maybe_put(msg, key, val), do: Map.put(msg, key, val)
+
+  # 中断标志：TUI 按 Esc 置位，流式循环 ≤100ms 内响应并取消连接。
+  # 用 persistent_term（读写都是原子操作，回合级频率可忽略其全局 GC 成本）。
+  @interrupt_key {__MODULE__, :interrupt}
+
+  @doc "请求中断当前流式调用（Esc）。"
+  def interrupt, do: :persistent_term.put(@interrupt_key, true)
+
+  @doc "清除中断标志（新一轮提交前）。"
+  def clear_interrupt, do: :persistent_term.erase(@interrupt_key)
+
+  @doc "中断标志是否已置位。"
+  def interrupted?, do: :persistent_term.get(@interrupt_key, false)
+
+  defp loop(resp, acc, on_text, on_reasoning, buf, t0) do
+    receive do
+      message ->
+        if interrupted?() do
+          Req.cancel_async_response(resp)
+          %{acc | error: :interrupted}
+        else
+          case Req.parse_message(resp, message) do
+            {:ok, [data: data]} ->
+              {events, rest} = split_sse(buf <> data)
+              acc = Enum.reduce(events, acc, &apply_event(&1, &2, on_text, on_reasoning))
+              loop(resp, acc, on_text, on_reasoning, rest, t0)
+
+            {:ok, [:done]} ->
+              acc
+
+            {:ok, [trailers: _]} ->
+              loop(resp, acc, on_text, on_reasoning, buf, t0)
+
+            {:error, e} ->
+              %{acc | error: inspect(e)}
+
+            :unknown ->
+              loop(resp, acc, on_text, on_reasoning, buf, t0)
+          end
+        end
+    after
+      100 ->
+        cond do
+          interrupted?() ->
+            Req.cancel_async_response(resp)
+            %{acc | error: :interrupted}
+
+          System.monotonic_time(:millisecond) - t0 > 300_000 ->
+            Newbee.DebugLog.log(:sse, "stream timeout, cancelling")
+            Req.cancel_async_response(resp)
+            %{acc | error: "stream timeout"}
+
+          true ->
+            loop(resp, acc, on_text, on_reasoning, buf, t0)
+        end
+    end
+  end
+
+  defp split_sse(buf) do
+    parts = String.split(buf, "\n\n")
+    {complete, [rest]} = Enum.split(parts, -1)
+
+    events =
+      complete
+      |> Enum.flat_map(&String.split(&1, "\n"))
+      |> Enum.filter(&String.starts_with?(&1, "data: "))
+      |> Enum.map(&String.trim_leading(&1, "data: "))
+
+    {events, rest}
+  end
+
+  defp apply_event("[DONE]", acc, _, _), do: acc
+
+  defp apply_event(data, acc, on_text, on_reasoning) do
+    case Jason.decode(data) do
+      {:ok, %{"choices" => [choice | _]} = chunk} ->
+        acc
+        |> apply_delta(choice["delta"] || %{}, on_text, on_reasoning)
+        |> maybe_usage(chunk)
+
+      {:ok, %{"usage" => usage}} ->
+        %{acc | usage: usage || acc.usage}
+
+      {:ok, %{"error" => err}} ->
+        %{acc | error: inspect(err)}
+
+      _ ->
+        acc
+    end
+  end
+
+  defp maybe_usage(acc, %{"usage" => usage}) when is_map(usage), do: %{acc | usage: normalize_usage(usage)}
+  defp maybe_usage(acc, _), do: acc
+
+  @doc false
+  def normalize_usage(usage) when is_map(usage) do
+    cache_read =
+      usage["cache_read_input_tokens"] || usage["cached_tokens"] ||
+        get_in(usage, ["prompt_tokens_details", "cached_tokens"]) ||
+        usage["prompt_cache_hit_tokens"]
+
+    cache_write = usage["cache_write_input_tokens"] || usage["cache_write_tokens"]
+
+    usage =
+      usage
+      |> maybe_put_usage("cache_read_tokens", cache_read)
+      |> maybe_put_usage("cache_write_tokens", cache_write)
+
+    case usage["prompt_tokens"] do
+      prompt_tokens when is_number(prompt_tokens) ->
+        Map.put(usage, "uncached_prompt_tokens", max(prompt_tokens - (cache_read || 0), 0))
+
+      _ ->
+        usage
+    end
+  end
+
+  defp maybe_put_usage(usage, _key, nil), do: usage
+  defp maybe_put_usage(usage, key, value), do: Map.put(usage, key, value)
+
+  defp apply_delta(acc, delta, on_text, on_reasoning) do
+    # 注意：OpenRouter 等在 reasoning 阶段常带 "content": ""——空串也是 binary，
+    # 不挡会让 TUI 每个思考块都翻转 stream_kind 开新行（"几个字一行"根因）
+    acc =
+      case delta["content"] do
+        text when is_binary(text) and text != "" ->
+          on_text.(text)
+          %{acc | content: acc.content <> text}
+
+        _ ->
+          acc
+      end
+
+    # DeepSeek 思考流：reasoning_content（delta 阶段与 content 分开发送）
+    acc =
+      case delta["reasoning_content"] || delta["reasoning"] do
+        text when is_binary(text) and text != "" ->
+          on_reasoning.(text)
+          %{acc | reasoning: acc.reasoning <> text}
+
+        _ ->
+          acc
+      end
+
+    Enum.reduce(delta["tool_calls"] || [], acc, fn tc, acc ->
+      idx = tc["index"] || 0
+      slot = Map.get(acc.tool_calls, idx, %{"id" => nil, "name" => "", "arguments" => ""})
+      fun = tc["function"] || %{}
+
+      slot = %{
+        "id" => tc["id"] || slot["id"],
+        "name" => slot["name"] <> (fun["name"] || ""),
+        "arguments" => slot["arguments"] <> (fun["arguments"] || "")
+      }
+
+      %{acc | tool_calls: Map.put(acc.tool_calls, idx, slot)}
+    end)
+  end
+
+  defp assemble_tool_calls(tool_calls) do
+    tool_calls
+    |> Enum.sort_by(fn {idx, _} -> idx end)
+    |> Enum.map(fn {_, slot} ->
+      %{
+        "id" => slot["id"],
+        "type" => "function",
+        "function" => %{"name" => slot["name"], "arguments" => slot["arguments"]}
+      }
+    end)
+  end
+
+  defp drain(resp) do
+    receive do
+      message ->
+        case Req.parse_message(resp, message) do
+          {:ok, [data: d]} -> d <> drain(resp)
+          {:ok, [:done]} -> ""
+          _ -> drain(resp)
+        end
+    after
+      15_000 -> ""
+    end
+  end
+end
