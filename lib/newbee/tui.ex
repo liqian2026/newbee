@@ -676,9 +676,13 @@ defmodule Newbee.TUI do
   end
 
   defp tty? do
-    case :file.read_link("/proc/self/fd/0") do
-      {:ok, target} -> not String.starts_with?(target, "/dev/null") and not String.starts_with?(target, "pipe")
-      _ -> true
+    case :file.read_link(~c"/proc/self/fd/0") do
+      {:ok, target} ->
+        target = List.to_string(target)
+        not String.starts_with?(target, "/dev/null") and not String.starts_with?(target, "pipe")
+
+      _ ->
+        true
     end
   end
 

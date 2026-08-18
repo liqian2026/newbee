@@ -67,6 +67,8 @@ defmodule Newbee.TUI.Key do
   defp next_event(<<9>> <> rest), do: {:event, {:key, :tab}, rest}
   defp next_event(<<12>> <> rest), do: {:event, {:key, :ctrl_l}, rest}
   defp next_event(<<13>> <> rest), do: {:event, {:key, :enter}, rest}
+  # LF 也视为 Enter（部分终端/模拟输入发 \n 而非 \r）
+  defp next_event(<<10>> <> rest), do: {:event, {:key, :enter}, rest}
   defp next_event(<<21>> <> rest), do: {:event, {:key, :ctrl_u}, rest}
   defp next_event(<<23>> <> rest), do: {:event, {:key, :ctrl_w}, rest}
   defp next_event(<<20>> <> rest), do: {:event, {:key, :ctrl_t}, rest}
