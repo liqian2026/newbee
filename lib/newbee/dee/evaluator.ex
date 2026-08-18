@@ -364,6 +364,10 @@ defmodule Newbee.DEE.Evaluator do
 
   # ── rpc ──
 
+  defp primary_target(%{mode: :local, worker: w}), do: %{mode: :local, worker: w}
+  defp primary_target(%{node: node, worker: w}) when is_pid(w), do: %{node: node, worker: w}
+  defp primary_target(_), do: nil
+
   defp remote_call(%{mode: :local, worker: w}, msg), do: {:ok, GenServer.call(w, msg, :infinity)}
 
   defp remote_call(nil, _msg) do

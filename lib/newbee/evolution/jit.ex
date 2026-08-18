@@ -140,83 +140,29 @@ defmodule Newbee.Evolution.JIT do
           {:ok, items} when is_list(items) ->
             Map.new(items, fn i ->
               {i["id"],
-               %{id: i["id"], level:
-… [compressed: 10017 bytes, 2 lines; 用 binding 变量或写文件后再局部读取] …
-"回放全部抗体（用独立求值器，互不污染）。返回 {passed, failed, details}。"
-  def replay(opts \\ []) do
-    evaluator = Keyword.get(opts, :evaluator, Newbee.DEE.Evaluator)
+               %{
+                 id: i["id"],
+                 level: String.to_atom(i["level"]),
+                 note: i["note"] || "",
+                 hits: i["hits"] || 0,
+                 fails: i["fails"] || 0,
+                 module: i["module"]
+               }}
+            end)
 
-    results =
-      antibodies()
-      |> Enum.map(fn a ->
-        {passed?, detail} = run_antibody(a, evaluator)
-        {a["id"], passed?, detail}
-      end)
+          _ ->
+            %{}
+        end
 
-    failed = Enum.filter(results, fn {_, ok, _} -> !ok end)
-    {length(results) - length(failed), length(failed), results}
+      _ ->
+        %{}
+    end
   end
 
-  defp run_antibody(%{"code" => code, "check" => %{"kind" => kind, "pattern" => pat}}, evaluator) do
-    result = Newbee.DEE.Evaluator.eval(evaluator, code)
-    rendered = Newbee.DEE.Result.render(result)
-
-    passed =
-      case kind do
-        "expect_ok" -> result.status == :ok and (pat == "" or rendered =~ pat)
-        "expect_error" -> result.status == :error and rendered =~ pat
-        _ -> false
-      end
-
-    {passed, String.slice(rendered, 0, 300)}
-  rescue
-    e -> {false, "replay crash: #{inspect(e)}"}
-  end
-
-  @doc "真实任务集（bench/tasks/*.json）：端到端验收。每项 {id, prompt, must_match}。"
-  def tasks do
-    Path.join(File.cwd!(), "bench/tasks")
-    |> Path.join("*.json")
-    |> Path.wildcard()
-    |> Enum.flat_map(fn f ->
-      case File.read(f) |> then(fn {:ok, b} -> Jason.decode(b) end) do
-        {:ok, t} -> [t]
-        _ -> []
-      end
-    end)
-  end
-
-  @doc "跑任务集（真实 LLM）。返回 %{passed, total, tokens, details}。"
-  def run_tasks(client) do
-    details =
-      tasks()
-      |> Enum.map(fn t ->
-        {:ok, ev} = Newbee.DEE.Evaluator.start(mode: :node)
-
-        {:ok, k} =
-          Newbee.DEE.Kernel.start_link(client: client, evaluator: ev, session: false, render: fn _ -> :ok end)
-
-        reply = Newbee.DEE.Kernel.submit(k, t["prompt"])
-        usage = Newbee.DEE.Kernel.usage(k)
-
-        passed =
-          case reply do
-            {:done, summary} -> summary =~ (t["must_match"] || "")
-            _ -> false
-          end
-
-        GenServer.stop(k)
-        GenServer.stop(ev)
-
-        %{id: t["id"], passed: passed, tokens: usage["total_tokens"] || 0, reply: inspect(reply) |> String.slice(0, 200)}
-      end)
-
-    %{
-      passed: Enum.count(details, & &1.passed),
-      total: length(details),
-      tokens: Enum.sum(Enum.map(details, & &1.tokens)),
-      details: details
-    }
+  defp persist(items) do
+    File.mkdir_p!(Path.dirname(@path))
+    body = items |> Map.values() |> Jason.encode!()
+    File.write!(@path, body)
+    :ok
   end
 end
-", "

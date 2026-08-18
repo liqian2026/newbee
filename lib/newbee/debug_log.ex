@@ -50,6 +50,14 @@ defmodule Newbee.DebugLog do
     end
   end
 
+  @doc "读取日志尾部 n 行（/log 命令用）。"
+  def tail(n \\ 50) do
+    case File.read(@path) do
+      {:ok, body} -> body |> String.split("\n", trim: true) |> Enum.take(-n)
+      _ -> []
+    end
+  end
+
   # 超过上限截断到一半（保留最新）
   defp trim do
     case File.stat(@path) do

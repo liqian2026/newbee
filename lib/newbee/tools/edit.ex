@@ -42,16 +42,28 @@ defmodule Newbee.Tools.Edit do
 
   # ── 改 ──
 
-  @doc "应用锚点补丁。成功返回 %{applied, path}；锚点/快照过期抛 Newbee.Tools.Edit.StaleError。"
+  @doc """
+  应用锚点补丁。成功返回 %{applied, paths, warnings}。
+  快照 tag 过期只警告不拒绝（锚点对才是新鲜度检查，DESIGN §3.2）；
+  锚点不匹配抛 Newbee.Tools.Edit.AnchorError。多节补丁全部验证通过才统一落盘（原子）。
+  """
   def patch(patch_text) do
     sections = parse_sections(patch_text)
 
-    Enum.each(sections, &apply_section/1)
+    {warnings, writes} =
+      Enum.reduce(sections, {[], []}, fn section, {warns, acc} ->
+        {new_lines, sec_warns} = prepare_section(section)
+        {warns ++ sec_warns, acc ++ [{section.path, new_lines}]}
+      end)
 
-    %{applied: length(sections), paths: Enum.map(sections, & &1.path)}
+    Enum.each(writes, fn {path, lines} ->
+      File.write!(path, Enum.join(lines, "\n"))
+    end)
+
+    %{applied: length(sections), paths: Enum.map(sections, & &1.path), warnings: warnings}
   end
 
-  defmodule StaleError do
+  defmodule AnchorError do
     defexception [:message]
   end
 
@@ -157,14 +169,16 @@ defmodule Newbee.Tools.Edit do
 
   # ── 应用 ──
 
-  defp apply_section(%{path: path, tag: tag, ops: ops}) do
+  defp prepare_section(%{path: path, tag: tag, ops: ops}) do
     content = File.read!(path)
     current_tag = file_tag(content)
 
-    if current_tag != tag do
-      raise StaleError,
-        message: "快照过期: #{path} (期望 #{tag}, 实际 #{current_tag})——请重新 show 后再 patch"
-    end
+    warnings =
+      if current_tag != tag do
+        ["快照过期: #{path} (期望 #{tag}, 实际 #{current_tag})——锚点对仍生效，已照常应用"]
+      else
+        []
+      end
 
     lines = String.split(content, "\n", trim: false)
 
@@ -174,7 +188,7 @@ defmodule Newbee.Tools.Edit do
       |> Enum.sort_by(&op_line/1, :desc)
       |> Enum.reduce(lines, &apply_op(&2, &1))
 
-    File.write!(path, Enum.join(new_lines, "\n"))
+    {new_lines, warnings}
   end
 
   defp op_line({:replace, a, _, _, _}), do: a
@@ -209,7 +223,7 @@ defmodule Newbee.Tools.Edit do
     actual = lines |> Enum.at(n - 1, "") |> line_hash()
 
     if actual != expected do
-      raise StaleError,
+      raise AnchorError,
         message: "锚点不匹配: 第 #{n} 行期望 ##{expected} 实际 ##{actual}——模型可能数错了行，请重新 show"
     end
   end

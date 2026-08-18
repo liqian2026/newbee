@@ -1,55 +1,75 @@
 defmodule Newbee.CommandsTest do
-   test "空输入 :ok" do
-     assert :ok = Commands.handle("   ", %{say: fn _ -> :ok end})
-   end
-+
-+  test "/resume 无参数返回 {:resume_picker, metas} 且含最新会话" do
-+    s = Newbee.Session.open("test_resume_#{:erlang.unique_integer([:positive])}")
-+    Newbee.Session.append(s, %{"role" => "user", "content" => "帮我做个功能"})
-+
-+    assert {:resume_picker, metas} = Commands.handle("/resume", %{say: fn _ -> :ok end})
-+    assert Enum.any?(metas, &(&1.id == s.id))
-+  end
-+
-+  test "/resume 精确 id 与前缀都返回 {:resume, id}" do
-+    s = Newbee.Session.open("test_resume_#{:erlang.unique_integer([:positive])}")
-+    Newbee.Session.append(s, %{"role" => "user", "content" => "hi"})
-+    pref = String.slice(s.id, 0, String.length(s.id) - 1)
-+
-+    assert {:resume, resumed} = Commands.handle("/resume #{s.id}", %{say: fn _ -> :ok end})
-+    assert resumed == s.id
-+    assert {:resume, resumed2} = Commands.handle("/resume #{pref}", %{say: fn _ -> :ok end})
-+    assert resumed2 == s.id
-+  en
-… [compressed: 9481 bytes, 235 lines; 用 binding 变量或写文件后再局部读取] …
-t.first(messages)["role"] == "system"
-+          {:ok, %{"role" => "assistant", "content" => "one", "tool_calls" => []}, %{}}
-+        end
-+      )
-+
-+    assert {:text, "one"} = Kernel.submit(first, "first")
-+    first_prompt = :sys.get_state(first).messages |> List.first() |> Map.fetch!("content")
-+    GenServer.stop(first)
-+
-+    {:ok, resumed} =
-+      Kernel.start_link(
-+        client: %{},
-+        evaluator: ev,
-+        session_id: sid,
-+        client_fun: fn messages, _on_text ->
-+          assert List.first(messages)["content"] == first_prompt
-+          {:ok, %{"role" => "assistant", "content" => "two", "tool_calls" => []}, %{}}
-+        end
-+      )
-+
-+    assert {:text, "two"} = Kernel.submit(resumed, "second")
-+  end
-+
-   test "Esc 中断：client 返回 {:interrupted, content} 时 turn 立即终止" do
-     {:ok, ev} = Evaluator.start(mode: :local)
- 
-diff --git a/test/newbee/evolution/metrics_test.exs b/test/newbee/evolution/metrics_test.exs
-index d4b5249..9085cd8 100644
---- a/test/newbee/evolution/metrics_test.exs
-+++ b/test/newbee/evolution/metrics_test.exs
-@@ -6,6 +6,7 @@ 
+  use ExUnit.Case, async: true
+  alias Newbee.Commands
+
+  setup do
+    say = fn _ -> :ok end
+    %{ctx: %{say: say, kernel: nil}}
+  end
+
+  test "空输入 :ok" do
+    assert :ok = Commands.handle("   ", %{say: fn _ -> :ok end})
+  end
+
+  test "普通文本返回 {:submit, text}" do
+    assert {:submit, "hello"} = Commands.handle("hello", %{say: fn _ -> :ok end})
+  end
+
+  test "/quit 返回 :quit" do
+    assert :quit = Commands.handle("/quit", %{say: fn _ -> :ok end})
+  end
+
+  test "/resume 无参数返回 {:resume_picker, metas} 且含最新会话" do
+    s = Newbee.Session.open("test_resume_#{:erlang.unique_integer([:positive])}")
+    Newbee.Session.append(s, %{"role" => "user", "content" => "帮我做个功能"})
+
+    assert {:resume_picker, metas} = Commands.handle("/resume", %{say: fn _ -> :ok end})
+    assert Enum.any?(metas, &(&1.id == s.id))
+  end
+
+  test "/resume 精确 id 与前缀都返回 {:resume, id}" do
+    s = Newbee.Session.open("test_resume_#{:erlang.unique_integer([:positive])}")
+    Newbee.Session.append(s, %{"role" => "user", "content" => "hi"})
+    pref = String.slice(s.id, 0, String.length(s.id) - 1)
+
+    assert {:resume, resumed} = Commands.handle("/resume #{s.id}", %{say: fn _ -> :ok end})
+    assert resumed == s.id
+    assert {:resume, resumed2} = Commands.handle("/resume #{pref}", %{say: fn _ -> :ok end})
+    assert resumed2 == s.id
+  end
+
+  test "@文件 展开为内容块（不存在则原样保留）" do
+    tmp = Path.join(System.tmp_dir!(), "newbee_at_#{:erlang.unique_integer([:positive])}.txt")
+    File.write!(tmp, "file-body")
+
+    assert {:submit, text} = Commands.handle("@#{tmp}", %{say: fn _ -> :ok end})
+    assert text =~ "file-body"
+
+    assert {:submit, text2} = Commands.handle("@no/such/file.txt", %{say: fn _ -> :ok end})
+    assert text2 == "@no/such/file.txt"
+    File.rm(tmp)
+  end
+
+  test "/bindings 输出绑定清单" do
+    said = self()
+    say = fn line -> send(said, {:said, line}) end
+    assert :handled = Commands.handle("/bindings", %{say: say, kernel: nil})
+    assert_received {:said, _msg}
+  end
+
+  test "/rules 输出规则而非未知命令" do
+    said = self()
+    say = fn line -> send(said, {:said, line}) end
+    assert :handled = Commands.handle("/rules", %{say: say})
+    assert_received {:said, msg}
+    refute msg =~ "未知命令"
+  end
+
+  test "未知命令提示" do
+    said = self()
+    say = fn line -> send(said, {:said, line}) end
+    assert :handled = Commands.handle("/nonsense-cmd", %{say: say})
+    assert_received {:said, msg}
+    assert msg =~ "未知命令"
+  end
+end

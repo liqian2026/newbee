@@ -48,7 +48,7 @@ defmodule Newbee.DEE.KernelProgressTest do
 
     assert {:done, "ok"} = Kernel.submit(kernel, "task")
 
-    assert_received {:newbee_event, :progress, {:progress, s1, scores1}}
+    assert_received {:newbee_event, :progress, {:progress, s1, _scores1}}
     assert s1 > 0
     assert_received {:newbee_event, :progress, {:progress, _s2, scores2}}
     assert length(scores2) == 2

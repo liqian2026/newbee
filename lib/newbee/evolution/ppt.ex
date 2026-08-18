@@ -152,7 +152,7 @@ defmodule Newbee.Evolution.PPT do
       {:ok, content, %{logprobs: %{"content" => lp}}} when is_list(lp) and lp != [] ->
         # 双槽 logprob 提取
         case pair_logprob_expectation(lp, scale) do
-          {:ok, sa, sb} -> {:ok, sa, sb}
+          {:ok, sa, sb, _va, _vb} -> {:ok, sa, sb}
           :error -> pair_sample(content, scale)
         end
 

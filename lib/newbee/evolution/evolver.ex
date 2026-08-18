@@ -179,15 +179,13 @@ defmodule Newbee.Evolution.Evolver do
     client = Keyword.get(opts, :client, Newbee.LLM.Config.client_for("verifier"))
     task = "选择最佳的工具实现（可用性、健壮性、Elixir 惯用法）"
 
-    case Newbee.Evolution.PPT.select(client, task, Enum.map(cands, & &1["source"]),
-           complete_fn: complete_fn
-         ) do
-      %{best: idx, ranking: ranking, scores: scores} ->
-        %{best: Enum.at(cands, idx), idx: idx, ranking: ranking, scores: scores}
+    result =
+      Newbee.Evolution.PPT.select(client, task, Enum.map(cands, & &1["source"]),
+        complete_fn: complete_fn
+      )
 
-      _ ->
-        %{best: hd(cands), idx: 0, ranking: [], scores: []}
-    end
+    %{best: idx, ranking: ranking, scores: scores} = result
+    %{best: Enum.at(cands, idx), idx: idx, ranking: ranking, scores: scores}
   end
 
   defp publish_tool(%{"id" => id, "name" => name, "source" => source} = proposal) do
@@ -234,13 +232,13 @@ defmodule Newbee.Evolution.Evolver do
   end
 
   # bench 门：反事实回放全部失败抗体，任何回归即否决（DESIGN §6.3）
-  defp bench_gate(proposal) do
-    {passed, failed, _details} = Newbee.Evolution.Bench.replay()
+  defp bench_gate(_proposal) do
+    {_passed, failed, details} = Newbee.Evolution.Bench.replay()
 
-    if failed == [] do
-      :ok
+    if failed > 0 do
+      {:error, {:antibody_regression, Enum.take(details, 3)}}
     else
-      {:error, {:antibody_regression, failed}}
+      :ok
     end
   rescue
     _ -> :ok

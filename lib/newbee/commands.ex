@@ -9,7 +9,9 @@ defmodule Newbee.Commands do
 
   def commands, do: @commands
 
-  @doc "处理输入。返回 :ok | :handled | :quit | {:submit, text} | {:resume, id}。"
+  @doc "处理输入。返回 :ok | :handled | :quit | {:submit, text} | {:resume, id} | {:resume_picker, metas}。"
+  @spec handle(String.t(), map()) ::
+          :ok | :handled | :quit | {:submit, String.t()} | {:resume, String.t()} | {:resume_picker, list(map())}
   def handle(input, ctx) do
     case String.trim(input) do
       "" -> :ok
@@ -29,6 +31,25 @@ defmodule Newbee.Commands do
         "@" <> path
       end
     end)
+  end
+
+  @doc "/resume 选择解析：数字编号（1 起，对应最近会话）或会话 id 精确/前缀。
+  返回 {:ok, id} | {:candidates, ids} | :none。"
+  def resolve(sel) do
+    case Integer.parse(sel) do
+      {n, ""} when n >= 1 ->
+        case Newbee.Session.list_with_meta(20) |> Enum.at(n - 1) do
+          nil -> :none
+          meta -> {:ok, meta.id}
+        end
+
+      _ ->
+        case Newbee.Session.find(sel) do
+          [id] -> {:ok, id}
+          ids when ids != [] -> {:candidates, ids}
+          [] -> :none
+        end
+    end
   end
 
   defp run_command(cmd, ctx) do
@@ -90,10 +111,8 @@ defmodule Newbee.Commands do
     :handled
   end
 
-  defp run("resume", "", ctx) do
-    ctx.say.("最近会话: #{inspect(Newbee.Session.list() |> Enum.take(8))}")
-    ctx.say.("用法: /resume <id>")
-    :handled
+  defp run("resume", "", _ctx) do
+    {:resume_picker, Newbee.Session.list_with_meta(20)}
   end
 
   defp run("resume", id, _ctx), do: {:resume, String.trim(id)}
@@ -104,9 +123,45 @@ defmodule Newbee.Commands do
     case Newbee.Staging.approve(id) do
       {:ok, []} -> ctx.say.("（无暂存改动）")
       {:ok, written} -> ctx.say.("已落盘: #{Enum.join(written, ", ")}")
-      {:error, :not_staged} ->
-… [compressed: 8890 bytes, 2 lines; 用 binding 变量或写文件后再局部读取] …
-n132#9d72|   defp run("rollback", arg, ctx) do
+      {:error, :not_staged} -> ctx.say.("没有对应暂存项")
+    end
+
+    :handled
+  end
+
+  defp run("reject", arg, ctx) do
+    id = if arg == "", do: :all, else: String.to_integer(arg)
+
+    case Newbee.Staging.reject(id) do
+      {:ok, []} -> ctx.say.("（无暂存改动）")
+      {:ok, dropped} -> ctx.say.("已丢弃: #{Enum.join(dropped, ", ")}")
+      {:error, :not_staged} -> ctx.say.("没有对应暂存项")
+    end
+
+    :handled
+  end
+
+  defp run("log", arg, ctx) do
+    lines = Newbee.DebugLog.tail(if arg == "", do: 50, else: String.to_integer(arg))
+    Enum.each(lines, &ctx.say.("  " <> &1))
+    :handled
+  end
+
+  defp run("snapshot", arg, ctx) do
+    if arg == "" do
+      ctx.say.("快照: #{inspect(Newbee.Evolution.Snapshot.list())}")
+      ctx.say.("用法: /snapshot <name> 创建快照")
+    else
+      case Newbee.Evolution.Snapshot.create(arg) do
+        {:ok, name} -> ctx.say.("已创建快照: #{name}")
+        {:error, reason} -> ctx.say.("快照失败: #{inspect(reason)}")
+      end
+    end
+
+    :handled
+  end
+
+defp run("rollback", arg, ctx) do
     if arg == "" do
       ctx.say.("快照: #{inspect(Newbee.Evolution.Snapshot.list())}")
       ctx.say.("用法: /rollback <name>")
@@ -179,4 +234,3 @@ n132#9d72|   defp run("rollback", arg, ctx) do
     :handled
   end
 end
-", lines: 205}

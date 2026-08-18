@@ -175,7 +175,7 @@ defmodule Newbee.DEE.KernelTest do
     assert Newbee.LLM.Client.interrupted?()
 
     {:ok, ev} = Evaluator.start(mode: :local)
-    script = [fn _messages, on_text -> {:ok, %{"role" => "assistant", "content" => "ok", "tool_calls" => []}, %{}} end]
+    script = [fn _messages, _on_text -> {:ok, %{"role" => "assistant", "content" => "ok", "tool_calls" => []}, %{}} end]
     {:ok, kernel} = Kernel.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
     assert {:text, "ok"} = Kernel.submit(kernel, "hi")
     refute Newbee.LLM.Client.interrupted?()

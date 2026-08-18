@@ -107,6 +107,81 @@ defmodule Newbee.TUI.Line do
 
   def hist_next(l), do: l
 
+  @doc """
+  Tab 补全：光标前 token 以 @ 开头 → 补全文件/目录路径；
+  以 / 开头且光标在行首 → 补全命令；否则不变。
+  补全候选取"最长公共前缀"；无候选原样返回。
+  """
+  def complete(%__MODULE__{text: t, cur: c} = l) do
+    {prefix, rest} = split_at(t, c)
+    {candidates, base} = complete_candidates(prefix)
+
+    case candidates do
+      [] ->
+        l
+
+      cands ->
+        common = longest_common_prefix(cands)
+
+        if String.length(common) > String.length(base) do
+          %{l | text: prefix <> common <> rest, cur: c + (String.length(common) - String.length(base))}
+        else
+          l
+        end
+    end
+  end
+
+  defp split_at(t, c) do
+    {String.slice(t, 0, c), String.slice(t, c..-1//1)}
+  end
+
+  defp complete_candidates(prefix) do
+    cond do
+      # @ 路径补全
+      String.starts_with?(prefix, "@") ->
+        base = String.trim_leading(prefix, "@")
+        dir = Path.dirname(base)
+        stem = Path.basename(base)
+
+        entries =
+          case File.ls(dir) do
+            {:ok, list} -> list
+            _ -> []
+          end
+
+        cands =
+          Enum.filter(entries, &String.starts_with?(&1, stem))
+          |> Enum.map(fn e ->
+            p = Path.join(dir, e)
+            if File.dir?(p), do: "@" <> p <> "/", else: "@" <> p
+          end)
+
+        {cands, prefix}
+
+      # 命令补全：行首 / 
+      Regex.match?(~r{^/[a-z]*$}, prefix) and String.starts_with?(prefix, "/") ->
+        cmds = Newbee.Commands.commands()
+        cands = Enum.filter(cmds, &String.starts_with?(&1, prefix))
+        {cands, prefix}
+
+      true ->
+        {[], prefix}
+    end
+  end
+
+  defp longest_common_prefix([first | rest]) do
+    Enum.reduce(rest, first, fn s, acc -> common_prefix(acc, s) end)
+  end
+
+  defp common_prefix(a, b) do
+    a
+    |> String.to_charlist()
+    |> Enum.zip(String.to_charlist(b))
+    |> Enum.take_while(fn {x, y} -> x == y end)
+    |> Enum.map(&elem(&1, 0))
+    |> List.to_string()
+  end
+
   # ── 宽度（CJK 双宽 / 组合符 0 / 其余 1）──
 
   @doc "字符显示宽度。"

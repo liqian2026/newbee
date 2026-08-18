@@ -184,7 +184,7 @@ defmodule Newbee.Evolution.Progress do
     text = Enum.join(tokens, "")
 
     case Regex.run(~r/<score>(.*?)<\/score>/s, text) do
-      [_, inner] ->
+      [_, _inner] ->
         # 评分 token 在 content 中的 char 位置
         pos = String.length(String.split(text, ~r/<score>/) |> hd()) + String.length("<score>")
         # 找到覆盖该位置的 token 索引
@@ -224,7 +224,7 @@ defmodule Newbee.Evolution.Progress do
   end
 
   defp token_at(tokens, pos) do
-    Enum.reduce_while(Enum.with_index(tokens), :error, fn {t, i}, _ ->
+    Enum.reduce_while(Enum.with_index(tokens), :error, fn {t, _i}, _ ->
       if String.length(t) >= 1 do
         {:cont, :error}
       else

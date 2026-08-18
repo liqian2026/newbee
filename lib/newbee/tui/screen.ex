@@ -157,9 +157,13 @@ defmodule Newbee.TUI.Screen do
 
   @doc """
   全量重画（首帧 / resize / 翻页跳变）。
+
+  布局（自底向上）：第 rows 行 = 输入行，rows-1 = 分隔线，rows-2 = 状态栏，
+  1..rows-3 = 正文输出区。status 为 {status_text, {line_no, cursor_col}}。
   """
   def paint_full(lines, input_view, status, cols, rows) do
-    body = wrap(lines, cols) |> Enum.take(max(rows - 2, 1))
+    {status_text, {line_no, cursor_col}} = status
+    body = wrap(lines, cols) |> Enum.take(max(rows - 3, 1))
     out = ["\e[H\e[2J"]
 
     out =
@@ -168,7 +172,7 @@ defmodule Newbee.TUI.Screen do
           "\e[#{i};1H" <> l <> "\e[K"
         end)
 
-    {line_no, cursor_col} = status
+    out = out ++ ["\e[#{rows - 2};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
     out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
     out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
     out = out ++ ["\e[#{line_no};#{cursor_col}H"]
@@ -180,13 +184,14 @@ defmodule Newbee.TUI.Screen do
   增量重画：只重写与上一帧不同的行。
   """
   def paint_delta(screen, lines, input_view, status, cols, rows) do
-    body = wrap(lines, cols) |> Enum.take(max(rows - 2, 1))
+    {status_text, {line_no, cursor_col}} = status
+    body = wrap(lines, cols) |> Enum.take(max(rows - 3, 1))
     # 屏幕上第 i 行（1 起）
     out =
       diff_rows(screen.prev, body)
       |> Enum.map(fn {i, l} -> "\e[#{i + 1};1H" <> l <> "\e[K" end)
 
-    {line_no, cursor_col} = status
+    out = out ++ ["\e[#{rows - 2};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
     out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
     out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
     out = out ++ ["\e[#{line_no};#{cursor_col}H"]
