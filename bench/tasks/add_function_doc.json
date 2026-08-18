@@ -1,0 +1,5 @@
+{
+  "id": "add_function_doc",
+  "prompt": "给 lib/demo.ex 的每个公开函数补 @doc 注释（中文，说明参数与返回值），并确保 mix compile 通过。",
+  "must_match": "@doc"
+}

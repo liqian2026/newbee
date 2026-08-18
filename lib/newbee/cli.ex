@@ -138,6 +138,15 @@ defmodule Newbee.CLI do
     end
   end
 
+  @doc "恢复会话并进入交互循环（mix newbee -r <id>）。"
+  def resume(id) do
+    client = Newbee.LLM.Config.client_for()
+    Newbee.Bus.subscribe()
+    spawn_link(fn -> printer() end)
+    {:ok, kernel} = resume_kernel(client, id)
+    loop(kernel, client)
+  end
+
   defp resume_kernel(client, id) do
     {:ok, kernel} = Newbee.DEE.Kernel.start_link(client: client, session_id: id, render: fn _ -> :ok end)
     meta = Newbee.Session.meta(id)

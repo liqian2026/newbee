@@ -1,1 +1,57 @@
+defmodule Newbee.Tools.Run do
+  @moduledoc "命令执行工具 (DESIGN §3.2)：超时 + 输出上限，结果返回 exit code 与输出。"
 
+  @default_timeout 120_000
+  @max_output 32_000
+
+  @doc "在工程根下执行 shell 命令。返回 %{exit, output}。"
+  def sh(cmd, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
+
+    task =
+      Task.async(fn ->
+        System.cmd("sh", ["-c", cmd],
+          cd: File.cwd!(),
+          stderr_to_stdout: true,
+          env: [{"MIX_ENV", "test"}]
+        )
+      end)
+
+    case Task.yield(task, timeout) do
+      {:ok, {out, code}} ->
+        %{exit: code, output: truncate(out)}
+
+      nil ->
+        Task.shutdown(task, :brutal_kill)
+        %{exit: :timeout, output: ""}
+    end
+  end
+
+  @doc "跑 mix compile。返回 {:ok, output} | {:error, output}。"
+  def mix_compile(opts \\ []) do
+    result = sh("mix compile", opts)
+    if result.exit == 0, do: {:ok, result.output}, else: {:error, result.output}
+  end
+
+  @doc "跑 mix test（可传文件列表）。返回 {:ok, output} | {:error, output}。"
+  def mix_test(files \\ [], opts \\ []) do
+    cmd = "mix test " <> Enum.join(files, " ")
+    result = sh(cmd, opts)
+    if result.exit == 0, do: {:ok, result.output}, else: {:error, result.output}
+  end
+
+  @doc "跑 mix format 检查。返回 {:ok, output} | {:error, output}。"
+  def mix_format(files \\ []) do
+    cmd = "mix format --check-formatted " <> Enum.join(files, " ")
+    result = sh(cmd)
+    if result.exit == 0, do: {:ok, result.output}, else: {:error, result.output}
+  end
+
+  defp truncate(s) when byte_size(s) <= @max_output, do: s
+
+  defp truncate(s) do
+    head = binary_part(s, 0, div(@max_output, 2))
+    tail = binary_part(s, byte_size(s) - div(@max_output, 2), div(@max_output, 2))
+    head <> "\n… [输出截断: #{byte_size(s)} bytes] …\n" <> tail
+  end
+end

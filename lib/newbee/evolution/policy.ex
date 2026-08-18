@@ -11,7 +11,7 @@ defmodule Newbee.Evolution.Policy do
   """
 
   @levels [:off, :hint, :background, :auto]
-  @default :hint
+  @default :background
   @config Path.join(System.user_home!(), ".newbee/config.json")
 
   @doc "合法档位列表。"
