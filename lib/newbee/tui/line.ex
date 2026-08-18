@@ -6,7 +6,7 @@ defmodule Newbee.TUI.Line do
   光标屏幕列 = 前缀可见宽 + 2，避免旧实现"光标飘进半个字"的错位。
   """
 
-  defstruct text: "", cur: 0, hist: [], hcur: 0, draft: nil
+  defstruct text: "", cur: 0, hist: [], hcur: 0, draft: nil, kill: ""
 
   @type t :: %__MODULE__{}
 
@@ -14,9 +14,25 @@ defmodule Newbee.TUI.Line do
 
   @doc "插入文本（粘贴同路径），光标落到插入内容之后。"
   def insert(%__MODULE__{text: t, cur: c} = l, ins) do
+    # 粘贴/输入含换行时折成单行（单行输入框；多行需求走 paste 分段或编辑器）
+    ins = String.replace(ins, "\n", " ")
     {pre, post} = String.split_at(t, c)
     %{l | text: pre <> ins <> post, cur: c + String.length(ins)}
   end
+
+  @doc "Ctrl-K：剪切到行尾（kill-ring 单槽）。"
+  def cut_to_end(%__MODULE__{text: t, cur: c} = l) do
+    {pre, post} = String.split_at(t, c)
+    %{l | text: pre, cur: c, kill: post}
+  end
+
+  @doc "Ctrl-Y：粘贴 kill-ring 内容到光标处。"
+  def yank(%__MODULE__{text: t, cur: c, kill: k} = l) when is_binary(k) do
+    {pre, post} = String.split_at(t, c)
+    %{l | text: pre <> k <> post, cur: c + String.length(k)}
+  end
+
+  def yank(l), do: l
 
   @doc "退格：删光标前一字符；行首不动。"
   def backspace(%__MODULE__{cur: 0} = l), do: l

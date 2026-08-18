@@ -20,13 +20,14 @@ defmodule Mix.Tasks.Newbee.Doctor do
 
     IO.puts("OTP: #{otp_v}")
 
-    case Newbee.LLM.Config.load() do
-      {:ok, config} ->
-        IO.puts("模型配置: #{config["model"] || "（未设置）"}")
+    cfg = Newbee.LLM.Config.load()
+    default = cfg["roles"]["default"] || %{}
+    provider = cfg["providers"][default["provider"]] || %{}
+    IO.puts("模型配置: #{default["provider"]}/#{default["model"]} @ #{provider["baseUrl"]}")
 
-      {:error, reason} ->
-        IO.puts("模型配置: 缺失 (#{inspect(reason)}) —— 创建 ~/.newbee/model.json")
-    end
+    client = Newbee.LLM.Config.client_for("default")
+    key_hint = if client.api_key, do: "已配置", else: "缺失!"
+    IO.puts("API key: #{key_hint}（#{String.slice(client.api_key || "", 0, 8)}…）")
 
     IO.puts("工具目录: #{Newbee.DEE.Tools.HotLoader.global_dir()} (#{length(Newbee.DEE.Tools.HotLoader.tool_files())} 个工具)")
     IO.puts("会话: #{length(Newbee.Session.list())} 个")

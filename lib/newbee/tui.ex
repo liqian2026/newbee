@@ -35,8 +35,10 @@ defmodule Newbee.TUI do
             stream_kind: nil,
             render_pending: false,
             tool_blocks: %{},
+            last_block_id: nil,
             tool_open: %{},
             usage: %{},
+            pane: nil,
             last_paint: 0
 
   @scrollback 5_000
@@ -206,6 +208,21 @@ defmodule Newbee.TUI do
         paint(state)
         loop(state, reader)
 
+      {:key, :ctrl_k} ->
+        state = %{state | line_ed: Line.cut_to_end(state.line_ed)}
+        paint(state)
+        loop(state, reader)
+
+      {:key, :ctrl_y} ->
+        state = %{state | line_ed: Line.yank(state.line_ed)}
+        paint(state)
+        loop(state, reader)
+
+      {:key, :ctrl_t} ->
+        state = %{state | pane: toggle_pane(state.pane)}
+        paint(state, true)
+        loop(state, reader)
+
       {:key, :ctrl_w} ->
         state = %{state | line_ed: Line.cut_word(state.line_ed)}
         paint(state)
@@ -309,6 +326,11 @@ defmodule Newbee.TUI do
           %{state | busy: false}
 
         :handled ->
+          %{state | busy: false}
+
+        {:shell, cmd} ->
+          output = Newbee.Commands.run_shell(cmd)
+          state = Enum.reduce(String.split(output, "\n"), state, &push_line(&2, &1))
           %{state | busy: false}
 
         {:submit, text} ->
@@ -416,11 +438,25 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :tool_start, {:tool_start, name, title, code}) do
-    {block, line} = tool_block(name, title, code)
-    push_line(state, line) |> Map.put(:last_block, block)
+    id = :erlang.unique_integer([:positive])
+    block = %{id: id, name: name, title: title, code: code, result: nil}
+    line = tool_block_line(block)
+    %{push_line(state, line) | tool_blocks: Map.put(state.tool_blocks, id, block), last_block_id: id}
   end
 
   def render_event(%__MODULE__{} = state, :tool_result, {:tool_result, name, text}) do
+    id = Map.get(state, :last_block_id)
+
+    state =
+      if id do
+        case Map.get(state.tool_blocks, id) do
+          nil -> state
+          block -> %{state | tool_blocks: Map.put(state.tool_blocks, id, %{block | result: text})}
+        end
+      else
+        state
+      end
+
     line = tool_result_line(name, text)
     push_line(state, line)
   end
@@ -460,6 +496,7 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :turn_done, _) do
+    notify("newbee", "回合完成")
     %{state | busy: false}
   end
 
@@ -513,10 +550,10 @@ defmodule Newbee.TUI do
 
   # ── 工具块 ──
 
-  defp tool_block(name, title, code) do
-    preview = code |> String.split("\n") |> Enum.take(3) |> Enum.join("\n")
-    ellipsis = if String.contains?(code, "\n"), do: " …", else: ""
-    {code, "\e[36m⏺\e[0m \e[1m#{name}\e[0m \e[2m#{title}\e[0m\n\e[2m  #{preview}#{ellipsis}\e[0m"}
+  defp tool_block_line(block) do
+    preview = block.code |> String.split("\n") |> Enum.take(3) |> Enum.join("\n")
+    ellipsis = if String.contains?(block.code, "\n"), do: " …", else: ""
+    "\e[36m⏺\e[0m \e[1m#{block.name}\e[0m \e[2m#{block.title}\e[0m\n\e[2m  #{preview}#{ellipsis}\e[0m"
   end
 
   defp tool_result_line(_name, text) do
@@ -548,15 +585,55 @@ defmodule Newbee.TUI do
     {cols, rows} = terminal_size()
     status = {status_line(state), {rows, Line.cursor_col(state.line_ed)}}
     input_view = input_view(state)
+    lines = state.lines ++ pane_lines(state.pane, state)
 
     screen =
       if state.screen == nil or force or state.screen.cols != cols do
-        Screen.paint_full(state.lines, input_view, status, cols, rows)
+        Screen.paint_full(lines, input_view, status, cols, rows)
       else
-        Screen.paint_delta(state.screen, state.lines, input_view, status, cols, rows)
+        Screen.paint_delta(state.screen, lines, input_view, status, cols, rows)
       end
 
     %{state | screen: screen, render_pending: false}
+  end
+
+  # Ctrl-T 窗格：绑定清单 / 事件日志 / 工具块
+  defp toggle_pane(nil), do: :bindings
+  defp toggle_pane(:bindings), do: :events
+  defp toggle_pane(:events), do: :tools
+  defp toggle_pane(:tools), do: nil
+
+  defp pane_lines(:bindings, _state) do
+    bs =
+      if Process.whereis(Newbee.DEE.Evaluator) do
+        Newbee.DEE.Evaluator.bindings_summary()
+      else
+        []
+      end
+
+    ["\e[1;36m[窗格] 绑定 (#{length(bs)})\e[0m" | Enum.map(bs, &"  #{&1.name} : #{&1.type} (#{&1.size} bytes)")]
+  end
+
+  defp pane_lines(:events, _state) do
+    events = Newbee.EventLog.read(20)
+    ["\e[1;36m[窗格] 事件日志 (最近 20)\e[0m" | Enum.map(events, &"  [#{&1["topic"]}] #{inspect(&1["event"]) |> String.slice(0, 60)}")]
+  end
+
+  defp pane_lines(:tools, state) do
+    blocks = Map.values(state.tool_blocks)
+    ["\e[1;36m[窗格] 工具块 (#{length(blocks)})\e[0m" | Enum.map(blocks, &"  #{&1}")]
+  end
+
+  defp pane_lines(nil, _state), do: []
+
+  defp notify(title, msg) do
+    # 桌面通知（可选）：长任务完成提醒，失败静默
+    case System.find_executable("notify-send") do
+      nil -> :ok
+      _ -> spawn(fn -> System.cmd("notify-send", [title, msg], stderr_to_stdout: true) end)
+    end
+
+    :ok
   end
 
   defp status_line(state) do

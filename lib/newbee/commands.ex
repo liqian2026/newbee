@@ -9,15 +9,38 @@ defmodule Newbee.Commands do
 
   def commands, do: @commands
 
-  @doc "处理输入。返回 :ok | :handled | :quit | {:submit, text} | {:resume, id} | {:resume_picker, metas}。"
+  @doc "处理输入。返回 :ok | :handled | :quit | {:submit, text} | {:resume, id} | {:resume_picker, metas} | {:shell, cmd}。"
   @spec handle(String.t(), map()) ::
-          :ok | :handled | :quit | {:submit, String.t()} | {:resume, String.t()} | {:resume_picker, list(map())}
+          :ok | :handled | :quit | {:submit, String.t()} | {:resume, String.t()}
+          | {:resume_picker, list(map())} | {:shell, String.t()}
   def handle(input, ctx) do
     case String.trim(input) do
-      "" -> :ok
-      "/quit" -> :quit
-      "/" <> _ = cmd -> run_command(cmd, ctx)
-      text -> {:submit, expand_at_files(text)}
+      "" ->
+        :ok
+
+      "/quit" ->
+        :quit
+
+      "!" <> cmd when cmd != "" ->
+        # codex 式 !shell：直接在 DEE 里执行 shell 命令（DESIGN §5.3）
+        {:shell, cmd}
+
+      "/" <> _ = cmd ->
+        run_command(cmd, ctx)
+
+      text ->
+        {:submit, expand_at_files(text)}
+    end
+  end
+
+  @doc "执行 !shell 命令并渲染结果（CLI/TUI 共用）。返回输出文本。"
+  def run_shell(cmd) do
+    result = Newbee.Tools.Run.sh(cmd, timeout: 300_000)
+    output = String.slice(result.output, 0, 8_000)
+
+    case result.exit do
+      0 -> "⎿ $ #{cmd}\n" <> output
+      code -> "⎿ $ #{cmd} (exit #{code})\n" <> output
     end
   end
 
@@ -145,6 +168,21 @@ defmodule Newbee.Commands do
       {:ok, []} -> ctx.say.("（无暂存改动）")
       {:ok, dropped} -> ctx.say.("已丢弃: #{Enum.join(dropped, ", ")}")
       {:error, :not_staged} -> ctx.say.("没有对应暂存项")
+    end
+
+    :handled
+  end
+
+  defp run("diff", arg, ctx) do
+    range = if arg == "", do: "HEAD", else: String.trim(arg)
+
+    case System.cmd("git", ["diff", "--stat", range, "HEAD"], stderr_to_stdout: true) do
+      {out, 0} ->
+        ctx.say.("会话累计 diff（#{range}..HEAD）:")
+        ctx.say.(String.trim(out) |> String.slice(0, 2_000))
+
+      _ ->
+        ctx.say.("git diff 不可用（非 git 仓库？）")
     end
 
     :handled

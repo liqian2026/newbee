@@ -278,8 +278,16 @@ defmodule Newbee.DEE.Kernel do
 
         case Newbee.Codec.extract_tool_calls(msg) do
           [] ->
-            Newbee.DebugLog.log(:turn, "step #{step} no tool calls, turn end")
-            {{:text, msg["content"]}, state}
+            # 降级通道 (§4.2)：模型偶发在正文输出 ```elixir 代码块时容错执行
+            case Newbee.Codec.FallbackParser.extract(msg["content"] || "") do
+              {[], _cleaned} ->
+                Newbee.DebugLog.log(:turn, "step #{step} no tool calls, turn end")
+                {{:text, msg["content"]}, state}
+
+              {blocks, cleaned} ->
+                Newbee.DebugLog.log(:turn, "step #{step} fallback: #{length(blocks)} elixir blocks")
+                execute_fallback(blocks, cleaned, state, step)
+            end
 
           calls ->
             case execute_calls(calls, state) do
@@ -300,6 +308,39 @@ defmodule Newbee.DEE.Kernel do
         emit(state, {:error, e})
         {{:error, e}, state}
     end
+  end
+
+  # 降级通道：执行正文里的 elixir 块（按 run_elixir 语义），结果回填后继续循环 + 温和纠偏
+  defp execute_fallback(blocks, cleaned, state, step) do
+    {state, results} =
+      Enum.reduce(blocks, {state, []}, fn code, {st, acc} ->
+        emit(st, {:tool_start, "run_elixir(fallback)", "", code})
+        result = Newbee.DEE.Evaluator.eval(st.evaluator, code)
+        rendered = Newbee.DEE.Result.render(result)
+        emit(st, {:tool_result, "run_elixir", rendered})
+        tool_msg = %{"role" => "tool", "tool_call_id" => "fallback-#{step}", "content" => rendered}
+        {push_msg(st, tool_msg), acc ++ [result]}
+      end)
+
+    all_ok? = Enum.all?(results, &(&1.status == :ok))
+
+    # 温和纠偏：提示模型用 run_elixir 工具（DESIGN §4.2）
+    reminder = %{"role" => "system", "content" => Newbee.Codec.FallbackParser.correction_reminder()}
+
+    state =
+      if all_ok? do
+        # 全部成功：清理后的正文继续（块已执行）
+        if String.trim(cleaned) == "" do
+          push_msg(state, reminder)
+        else
+          state |> push_msg(%{"role" => "assistant", "content" => cleaned}) |> push_msg(reminder)
+        end
+      else
+        # 有失败：保留原文 + 错误已在 tool 消息里
+        state |> push_msg(%{"role" => "assistant", "content" => cleaned}) |> push_msg(reminder)
+      end
+
+    run_turn(state, step + 1)
   end
 
   defp call_client(fun, messages, on_text, on_reasoning) do
