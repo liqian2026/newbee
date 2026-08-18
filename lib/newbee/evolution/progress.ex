@@ -13,7 +13,6 @@ defmodule Newbee.Evolution.Progress do
   不可用 → 自动降级采样模式。两者都产出 1..G 连续分数。
   """
 
-  alias Newbee.LLM.Client
 
   @scales %{
     # 字母 A..T = 1..20：单 token，logprob 提取最稳（论文 G=20）
@@ -73,10 +72,11 @@ defmodule Newbee.Evolution.Progress do
     k = Keyword.get(opts, :k, 1)
     want_logprobs = Keyword.get(opts, :logprobs, true)
     temperature = Keyword.get(opts, :temperature, 0.2)
+    complete_fn = Keyword.get(opts, :complete_fn, &Newbee.LLM.Client.complete/3)
 
     per =
       Enum.map(criteria, fn c ->
-        crit_score(client, task, traj, c, scale, k, want_logprobs, temperature)
+        crit_score(client, task, traj, c, scale, k, want_logprobs, temperature, complete_fn)
       end)
 
     scores = Enum.map(per, & &1.score)
@@ -115,8 +115,9 @@ defmodule Newbee.Evolution.Progress do
 
     recent = Enum.take(Enum.reverse(scores), window) |> Enum.reverse()
 
+    # 停滞 = 窗口内无净增长（最新分相对窗口起点没有超过 threshold 的进步）
     length(recent) >= min_steps and
-      (Enum.max(recent) - List.last(recent)) <= threshold
+      (List.last(recent) - hd(recent)) <= threshold
   end
 
   @doc "分数序列的人类可读摘要（给干预消息/日志用）。"
@@ -131,10 +132,10 @@ defmodule Newbee.Evolution.Progress do
 
   # ── internals ──
 
-  defp crit_score(client, task, traj, criterion, scale, k, want_logprobs, temperature) do
+  defp crit_score(client, task, traj, criterion, scale, k, want_logprobs, temperature, complete_fn) do
     {scores, variances, methods} =
       Enum.reduce(1..k, {[], [], []}, fn _, {ss, vs, ms} ->
-        case ask_score(client, task, traj, criterion, scale, want_logprobs, temperature) do
+        case ask_score(client, task, traj, criterion, scale, want_logprobs, temperature, complete_fn) do
           {:ok, s, v, m} -> {[s | ss], [v | vs], [m | ms]}
           {:error, _} -> {ss, vs, ms}
         end
@@ -155,10 +156,10 @@ defmodule Newbee.Evolution.Progress do
   end
 
   # 单次判分。返回 {:ok, score, variance, method} | {:error, reason}
-  defp ask_score(client, task, traj, criterion, scale, want_logprobs, temperature) do
+  defp ask_score(client, task, traj, criterion, scale, want_logprobs, temperature, complete_fn) do
     prompt = score_prompt(task, traj, criterion, scale)
 
-    case Client.complete(client, [%{"role" => "user", "content" => prompt}],
+    case complete_fn.(client, [%{"role" => "user", "content" => prompt}],
            logprobs: want_logprobs,
            top_logprobs: scale_size(scale),
            temperature: temperature

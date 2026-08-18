@@ -401,10 +401,10 @@ defmodule Newbee.TUI do
 
   def render_event(%__MODULE__{} = state, :reasoning, {:reasoning, delta}) do
     if state.streaming and state.stream_kind == :reasoning do
-      append_text(state, delta, "\e[2m")
+      append_text(state, delta)
     else
       state
-      |> push_line("\e[2m")
+      |> push_line("")
       |> Map.put(:streaming, true)
       |> Map.put(:stream_kind, :reasoning)
       |> append_text(delta, "\e[2m")
