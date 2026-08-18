@@ -25,8 +25,8 @@ defmodule Newbee.DEE.Tools.HotLoaderTest do
     assert File.exists?(path)
     assert path =~ ".newbee/tools"
 
-    # git 版本化
-    {log, 0} = System.cmd("git", ["-C", HotLoader.global_dir(), "log", "--oneline", "-1"], stderr_to_stdout: true)
+    # git 版本化（历史可能含其他测试的发布提交，用近 10 条查找本次）
+    {log, 0} = System.cmd("git", ["-C", HotLoader.global_dir(), "log", "--oneline", "-10"], stderr_to_stdout: true)
     assert log =~ "test tool"
 
     # 节点内可调用

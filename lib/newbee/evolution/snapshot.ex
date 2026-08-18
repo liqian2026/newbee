@@ -13,7 +13,9 @@ defmodule Newbee.Evolution.Snapshot do
 
   @doc "创建快照。name 缺省用时间戳。返回 {:ok, name}。"
   def create(name \\ nil) do
-    name = name || DateTime.utc_now() |> DateTime.to_iso8601(:basic) |> String.replace(~r/[^\d]/, "") |> then(&"snap_#{&1}")
+    name =
+      name || DateTime.utc_now() |> DateTime.to_iso8601(:basic) |> String.replace(~r/[^\d]/, "") |> then(&"snap_#{&1}")
+
     dir = Path.join(@root, name)
 
     if File.exists?(dir) do

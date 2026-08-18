@@ -81,5 +81,4 @@ defmodule Newbee.DebugLog do
   defp format_tag(tag), do: inspect(tag)
 end
 
-
 :ok

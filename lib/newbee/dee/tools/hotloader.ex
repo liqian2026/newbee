@@ -113,10 +113,11 @@ defmodule Newbee.DEE.Tools.HotLoader do
     :ok
   end
 
-  defp git_commit(path, message) do
+  defp git_commit(_path, message) do
     dir = global_dir()
 
-    with {_, 0} <- System.cmd("git", ["-C", dir, "add", path], stderr_to_stdout: true) do
+    # add -A：一并带上工作区的删除/移动（工具目录整体是版本化单元）
+    with {_, 0} <- System.cmd("git", ["-C", dir, "add", "-A"], stderr_to_stdout: true) do
       case System.cmd("git", ["-C", dir, "commit", "-q", "-m", message], stderr_to_stdout: true) do
         {_, 0} ->
           :ok

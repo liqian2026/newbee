@@ -8,8 +8,17 @@ defmodule Newbee.Evolution.Metrics do
 
   @path Path.join(System.user_home!(), ".newbee/metrics.jsonl")
 
-  defstruct turns: 0, tokens_in: 0, tokens_out: 0, cache_read_tokens: 0, cache_write_tokens: 0,
-            tool_calls: 0, errors: 0, rule_hits: 0, dones: 0, asks: 0, latencies: []
+  defstruct turns: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            tool_calls: 0,
+            errors: 0,
+            rule_hits: 0,
+            dones: 0,
+            asks: 0,
+            latencies: []
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
 
@@ -58,13 +67,14 @@ defmodule Newbee.Evolution.Metrics do
   end
 
   defp ingest(state, :usage, {:usage, usage}) when is_map(usage) do
-    %{state |
-      tokens_in: state.tokens_in + input_tokens(usage),
-      tokens_out: state.tokens_out + token(usage, "completion_tokens"),
-      cache_read_tokens: state.cache_read_tokens + token(usage, "cache_read_tokens"),
-      cache_write_tokens: state.cache_write_tokens + token(usage, "cache_write_tokens")}
+    %{
+      state
+      | tokens_in: state.tokens_in + input_tokens(usage),
+        tokens_out: state.tokens_out + token(usage, "completion_tokens"),
+        cache_read_tokens: state.cache_read_tokens + token(usage, "cache_read_tokens"),
+        cache_write_tokens: state.cache_write_tokens + token(usage, "cache_write_tokens")
+    }
   end
-
 
   defp ingest(state, :tool_start, _), do: %{state | tool_calls: state.tool_calls + 1}
   defp ingest(state, :tool_error, _), do: %{state | errors: state.errors + 1}

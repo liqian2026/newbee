@@ -20,9 +20,21 @@ defmodule Newbee.TUI.Key do
 
   @type key ::
           char()
-          | :enter | :backspace | :esc | :tab | :unknown
-          | :up | :down | :left | :right | :home | :end
-          | :delete | :insert | :page_up | :page_down
+          | :enter
+          | :backspace
+          | :esc
+          | :tab
+          | :unknown
+          | :up
+          | :down
+          | :left
+          | :right
+          | :home
+          | :end
+          | :delete
+          | :insert
+          | :page_up
+          | :page_down
 
   @csi_final ~c"ABCDHFMPQR~abcdefghijklnopqsu@`|}{"
 
@@ -141,6 +153,7 @@ defmodule Newbee.TUI.Key do
   # 参数超长：序列作废，余下从零解析
   defp parse_csi(buf, params) when byte_size(params) > 16,
     do: {:seq, {:key, :unknown}, buf}
+
   # 参数位置出现怪字节：吞一字节继续吞序列
   defp parse_csi(<<_::binary-size(1), rest::binary>>, params),
     do: parse_csi(rest, params <> "?")

@@ -21,9 +21,7 @@ defmodule Newbee.SessionTest do
         Regex.match?(~r{/test_\d+\.jsonl$}, f) do
       File.rm(f)
 
-      File.rm_rf(
-        Path.join(System.user_home!(), ".newbee/session-artifacts/#{Path.basename(f, ".jsonl")}")
-      )
+      File.rm_rf(Path.join(System.user_home!(), ".newbee/session-artifacts/#{Path.basename(f, ".jsonl")}"))
     end
   end
 
@@ -40,12 +38,12 @@ defmodule Newbee.SessionTest do
   test "绑定快照：可序列化保留，PID/函数 tombstone" do
     s = Session.open("test_#{:erlang.unique_integer([:positive])}")
 
-    Session.save_bindings(s, [
+    Session.save_bindings(s,
       good: "hello",
       num: 42,
       bad_pid: self(),
       bad_fun: fn -> 1 end
-    ])
+    )
 
     restored = Session.load_bindings(s)
     assert restored[:good] == "hello"

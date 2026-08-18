@@ -213,5 +213,4 @@ defmodule Newbee.DEE.KernelTest do
   end
 end
 
-
 :ok

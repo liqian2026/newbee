@@ -73,5 +73,4 @@ defmodule Newbee.Codec do
   def extract_tool_calls(_), do: []
 end
 
-
 :ok

@@ -27,7 +27,9 @@ defmodule Newbee.Evolution.PPTTest do
         %{"token" => sym_of(sb), "logprob" => 0.0, "top_logprobs" => [%{"token" => sym_of(sb), "logprob" => 0.0}]},
         %{"token" => "</score_B>", "logprob" => -1.0, "top_logprobs" => []}
       ]
-      {:ok, "<score_A>#{sym_of(sa)}</score_A><score_B>#{sym_of(sb)}</score_B>", %{usage: %{}, logprobs: %{"content" => content}}}
+
+      {:ok, "<score_A>#{sym_of(sa)}</score_A><score_B>#{sym_of(sb)}</score_B>",
+       %{usage: %{}, logprobs: %{"content" => content}}}
     else
       {:ok, "<score_A>#{sym_of(sa)}</score_A><score_B>#{sym_of(sb)}</score_B>", %{usage: %{}, logprobs: nil}}
     end
@@ -47,13 +49,15 @@ defmodule Newbee.Evolution.PPTTest do
   test "从 N 个候选中选出最佳（logprob 路径）" do
     cands = ["BAD candidate", "MID candidate", "GOOD candidate", "MID2 candidate"]
 
-    r = PPT.select(:fake, "task", cands,
-      complete_fn: &quality_completer/3,
-      k: 2,
-      logprobs: true
-    )
+    r =
+      PPT.select(:fake, "task", cands,
+        complete_fn: &quality_completer/3,
+        k: 2,
+        logprobs: true
+      )
 
-    assert r.best == 2  # GOOD
+    # GOOD
+    assert r.best == 2
     assert hd(r.ranking) == 2
     assert r.scores[2] > r.scores[0]
     assert r.method == :ppt
@@ -62,11 +66,12 @@ defmodule Newbee.Evolution.PPTTest do
   test "采样路径同样选出最佳" do
     cands = ["GOOD candidate", "BAD candidate"]
 
-    r = PPT.select(:fake, "task", cands,
-      complete_fn: &quality_completer/3,
-      logprobs: false,
-      k: 1
-    )
+    r =
+      PPT.select(:fake, "task", cands,
+        complete_fn: &quality_completer/3,
+        logprobs: false,
+        k: 1
+      )
 
     assert r.best == 0
     assert r.scores[0] > r.scores[1]
@@ -82,11 +87,12 @@ defmodule Newbee.Evolution.PPTTest do
   test "比较次数受 k 控制（O(Nk)）" do
     cands = Enum.map(1..10, &"candidate #{&1}")
 
-    r = PPT.select(:fake, "task", cands,
-      complete_fn: &quality_completer/3,
-      k: 3,
-      logprobs: false
-    )
+    r =
+      PPT.select(:fake, "task", cands,
+        complete_fn: &quality_completer/3,
+        k: 3,
+        logprobs: false
+      )
 
     # ring pass: 10 次；tournament: (10-3)*3 + C(3,2) = 21+3 = 24；共 34
     assert r.comparisons == 34

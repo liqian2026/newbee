@@ -42,6 +42,7 @@ defmodule Newbee.Session do
         []
     end
   end
+
   @doc "读取会话首次请求的稳定 system prompt；旧会话没有时返回 nil。"
   def system_prompt(%__MODULE__{dir: dir}) do
     case File.read(Path.join(dir, "system-prompt.md")) do
@@ -170,7 +171,7 @@ defmodule Newbee.Session do
   # 文件 mtime 为本地时间。相对化：今天/昨天显示时段，跨年显示日期。
   defp when_str({{y, m, d}, {h, mi, _}}) do
     {{ny, nm, nd}, _} = :calendar.local_time()
-    yesterday = :calendar.date_to_gregorian_days({ny, nm, nd}) - 1 |> :calendar.gregorian_days_to_date()
+    yesterday = (:calendar.date_to_gregorian_days({ny, nm, nd}) - 1) |> :calendar.gregorian_days_to_date()
     pad = &String.pad_leading(Integer.to_string(&1), 2, "0")
 
     cond do
@@ -180,6 +181,7 @@ defmodule Newbee.Session do
       true -> "#{y}-#{pad.(m)}-#{pad.(d)}"
     end
   end
+
   defp serializable?(v) do
     try do
       Jason.encode!(v)

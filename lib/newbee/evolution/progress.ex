@@ -13,7 +13,6 @@ defmodule Newbee.Evolution.Progress do
   不可用 → 自动降级采样模式。两者都产出 1..G 连续分数。
   """
 
-
   @scales %{
     # 字母 A..T = 1..20：单 token，logprob 提取最稳（论文 G=20）
     letters: %{symbols: ~w(A B C D E F G H I J K L M N O P Q R S T)},
@@ -117,7 +116,7 @@ defmodule Newbee.Evolution.Progress do
 
     # 停滞 = 窗口内无净增长（最新分相对窗口起点没有超过 threshold 的进步）
     length(recent) >= min_steps and
-      (List.last(recent) - hd(recent)) <= threshold
+      List.last(recent) - hd(recent) <= threshold
   end
 
   @doc "分数序列的人类可读摘要（给干预消息/日志用）。"
@@ -125,7 +124,11 @@ defmodule Newbee.Evolution.Progress do
     scores
     |> Enum.with_index(1)
     |> Enum.map_join(" ", fn {s, i} ->
-      dir = if i > 1 and s > Enum.at(scores, i - 2), do: "↑", else: if(i > 1 and s < Enum.at(scores, i - 2), do: "↓", else: "→")
+      dir =
+        if i > 1 and s > Enum.at(scores, i - 2),
+          do: "↑",
+          else: if(i > 1 and s < Enum.at(scores, i - 2), do: "↓", else: "→")
+
       "步#{i}:#{Float.round(s, 2)}#{dir}"
     end)
   end
@@ -262,7 +265,9 @@ defmodule Newbee.Evolution.Progress do
           end
 
         case val do
-          nil -> {:error, :parse}
+          nil ->
+            {:error, :parse}
+
           v ->
             g = scale_size(scale)
             # 单次采样方差近似：均匀分布方差作为不确定性估计的下界
@@ -285,21 +290,21 @@ defmodule Newbee.Evolution.Progress do
     g = scale_size(scale)
 
     """
-You are an expert software engineering reviewer. You will see a task description and an agent's trajectory so far.
+    You are an expert software engineering reviewer. You will see a task description and an agent's trajectory so far.
 
-Evaluation Criteria: #{criterion[:name]} — #{criterion[:desc]}
+    Evaluation Criteria: #{criterion[:name]} — #{criterion[:desc]}
 
-Task:
-#{task}
+    Task:
+    #{task}
 
-Trajectory (so far):
-#{traj}
+    Trajectory (so far):
+    #{traj}
 
-Carefully analyze the trajectory, then provide your final score:
-<score>SYMBOL</score>
+    Carefully analyze the trajectory, then provide your final score:
+    <score>SYMBOL</score>
 
-Rating Rules: Rate progress on a 1..#{g} scale based on the criterion (1 = no progress / incorrect, #{div(g, 2)} = borderline, #{g} = fully correct).
-"""
+    Rating Rules: Rate progress on a 1..#{g} scale based on the criterion (1 = no progress / incorrect, #{div(g, 2)} = borderline, #{g} = fully correct).
+    """
   end
 
   defp mean([]), do: 0.0

@@ -11,8 +11,13 @@ defmodule Newbee.Commands do
 
   @doc "处理输入。返回 :ok | :handled | :quit | {:submit, text} | {:resume, id} | {:resume_picker, metas} | {:shell, cmd}。"
   @spec handle(String.t(), map()) ::
-          :ok | :handled | :quit | {:submit, String.t()} | {:resume, String.t()}
-          | {:resume_picker, list(map())} | {:shell, String.t()}
+          :ok
+          | :handled
+          | :quit
+          | {:submit, String.t()}
+          | {:resume, String.t()}
+          | {:resume_picker, list(map())}
+          | {:shell, String.t()}
   def handle(input, ctx) do
     case String.trim(input) do
       "" ->
@@ -208,7 +213,7 @@ defmodule Newbee.Commands do
     :handled
   end
 
-defp run("rollback", arg, ctx) do
+  defp run("rollback", arg, ctx) do
     if arg == "" do
       ctx.say.("快照: #{inspect(Newbee.Evolution.Snapshot.list())}")
       ctx.say.("用法: /rollback <name>")
@@ -226,7 +231,9 @@ defp run("rollback", arg, ctx) do
     ctx.say.("evolver 开始合成（线索+热教训+指标）…")
 
     case Newbee.Evolution.Evolver.run_once() do
-      {:skipped, reason} -> ctx.say.("跳过: #{reason}")
+      {:skipped, reason} ->
+        ctx.say.("跳过: #{reason}")
+
       results ->
         Enum.each(results, fn
           {:published, what} -> ctx.say.("  ✅ 已发布: #{inspect(what)}")
@@ -256,8 +263,11 @@ defp run("rollback", arg, ctx) do
 
   defp run("genes", _, ctx) do
     case Newbee.Evolution.Gene.list() do
-      [] -> ctx.say.("（基因库为空；/evolve 产出后可 export 打包）")
-      genes -> Enum.each(genes, &ctx.say.("  #{&1.name}@#{&1.version} fitness=#{inspect(&1.fitness)} from=#{&1.provenance}"))
+      [] ->
+        ctx.say.("（基因库为空；/evolve 产出后可 export 打包）")
+
+      genes ->
+        Enum.each(genes, &ctx.say.("  #{&1.name}@#{&1.version} fitness=#{inspect(&1.fitness)} from=#{&1.provenance}"))
     end
 
     :handled

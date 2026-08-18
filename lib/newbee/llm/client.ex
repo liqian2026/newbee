@@ -176,6 +176,7 @@ defmodule Newbee.LLM.Client do
 
   # 429/5xx 过载重试（非流式版，无 SSE drain 需求）
   defp complete_req(req, 0), do: Req.request(req)
+
   defp complete_req(req, left) do
     case Req.request(req) do
       {:ok, %{status: status}} when status in @overload_statuses ->
@@ -249,7 +250,10 @@ defmodule Newbee.LLM.Client do
         {:error, {:stream_error, err, a.content}}
 
       acc ->
-        Newbee.DebugLog.log(:sse, "done content=#{byte_size(acc.content)} reasoning=#{byte_size(acc.reasoning)} tool_calls=#{map_size(acc.tool_calls)}")
+        Newbee.DebugLog.log(
+          :sse,
+          "done content=#{byte_size(acc.content)} reasoning=#{byte_size(acc.reasoning)} tool_calls=#{map_size(acc.tool_calls)}"
+        )
 
         msg =
           %{"role" => "assistant", "content" => acc.content}

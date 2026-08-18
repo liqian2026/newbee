@@ -92,4 +92,3 @@ defmodule Newbee.History do
     if preview == "", do: [mark], else: [mark <> " " <> preview]
   end
 end
-

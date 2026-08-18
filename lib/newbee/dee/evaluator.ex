@@ -134,13 +134,19 @@ defmodule Newbee.DEE.Evaluator do
               s = maybe_reboot(state)
 
               case remote_call(primary_target(s), {:eval, code, opts}) do
-                {:ok, result} -> {:reply, Map.put(result, :node_restarted, true), s}
-                {:timeout, result} -> {:reply, result, s}
+                {:ok, result} ->
+                  {:reply, Map.put(result, :node_restarted, true), s}
+
+                {:timeout, result} ->
+                  {:reply, result, s}
 
                 :dead ->
                   {:reply,
-                   %{status: :error, error: "evaluator node unavailable (restarts=#{s.restarts} boot_error=#{inspect(s.boot_error)})", output: ""},
-                   s}
+                   %{
+                     status: :error,
+                     error: "evaluator node unavailable (restarts=#{s.restarts} boot_error=#{inspect(s.boot_error)})",
+                     output: ""
+                   }, s}
               end
           end
       end
@@ -222,7 +228,11 @@ defmodule Newbee.DEE.Evaluator do
       # 的 :dead 回退路径（这样调用方能观察到 node_restarted=true 与
       # 新节点绑定丢失语义，见 evaluatornodetest/双节点冗余）。
       state.worker != nil and pid == state.peer ->
-        Newbee.DebugLog.log(:node, "primary exited reason=#{inspect(reason)} node=#{inspect(state.node)} restarts=#{state.restarts}")
+        Newbee.DebugLog.log(
+          :node,
+          "primary exited reason=#{inspect(reason)} node=#{inspect(state.node)} restarts=#{state.restarts}"
+        )
+
         Logger.warning("evaluator primary node exited; standby will take over on next call")
         {:noreply, %{state | peer: nil, node: nil, worker: nil}}
 
@@ -243,8 +253,15 @@ defmodule Newbee.DEE.Evaluator do
   def handle_info(:ensure_standby, state) do
     if state.mode == :node and state.standby == nil and state.standby_boot == nil do
       boot =
-        spawn_standby_boot(%{state | peer: nil, node: nil, worker: nil, standby: nil, standby_boot: nil,
-                                   last_boot_attempt: System.monotonic_time(:millisecond)})
+        spawn_standby_boot(%{
+          state
+          | peer: nil,
+            node: nil,
+            worker: nil,
+            standby: nil,
+            standby_boot: nil,
+            last_boot_attempt: System.monotonic_time(:millisecond)
+        })
 
       {:noreply, %{state | standby_boot: boot}}
     else
@@ -280,7 +297,6 @@ defmodule Newbee.DEE.Evaluator do
   end
 
   # ── boot ──
-
 
   # 启动失败返回 {:error, reason}，绝不抛异常：抛异常会触发 supervisor
   # 无限重启循环（one_for_one），CPU 打满且 eval call 永久挂起（实际事故）。
@@ -397,13 +413,15 @@ defmodule Newbee.DEE.Evaluator do
 
   # standby 顶替 primary
   defp promote_standby(state) do
-    %{state |
-      peer: state.standby.peer,
-      node: state.standby.node,
-      worker: state.standby.worker,
-      standby: nil,
-      restarts: state.restarts + 1,
-      boot_error: nil}
+    %{
+      state
+      | peer: state.standby.peer,
+        node: state.standby.node,
+        worker: state.standby.worker,
+        standby: nil,
+        restarts: state.restarts + 1,
+        boot_error: nil
+    }
   end
 
   # primary 死后解析 standby：已就绪直接用；在途 boot 则等它完成（不 reboot）。

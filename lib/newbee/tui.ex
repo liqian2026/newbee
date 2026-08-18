@@ -399,7 +399,7 @@ defmodule Newbee.TUI do
 
   @doc "追加一行到 transcript；重置 streaming 状态。"
   def push_line(%__MODULE__{} = state, line) do
-    lines = state.lines ++ [line] |> Enum.take(-@scrollback)
+    lines = (state.lines ++ [line]) |> Enum.take(-@scrollback)
     %{state | lines: lines, streaming: false, stream_kind: nil, render_pending: false}
   end
 
@@ -616,7 +616,11 @@ defmodule Newbee.TUI do
 
   defp pane_lines(:events, _state) do
     events = Newbee.EventLog.read(20)
-    ["\e[1;36m[窗格] 事件日志 (最近 20)\e[0m" | Enum.map(events, &"  [#{&1["topic"]}] #{inspect(&1["event"]) |> String.slice(0, 60)}")]
+
+    [
+      "\e[1;36m[窗格] 事件日志 (最近 20)\e[0m"
+      | Enum.map(events, &"  [#{&1["topic"]}] #{inspect(&1["event"]) |> String.slice(0, 60)}")
+    ]
   end
 
   defp pane_lines(:tools, state) do
@@ -679,7 +683,8 @@ defmodule Newbee.TUI do
   end
 
   defp session_id(kernel) do
-    :sys.get_state(kernel).session |> case do
+    :sys.get_state(kernel).session
+    |> case do
       nil -> "(off)"
       s -> s.id
     end

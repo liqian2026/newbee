@@ -53,7 +53,11 @@ defmodule Newbee.Tools.Edit do
         {a, b} -> Enum.slice(lines, (a - 1)..(b - 1)//1)
       end
 
-    start = case range do :all -> 1; {a, _} -> a end
+    start =
+      case range do
+        :all -> 1
+        {a, _} -> a
+      end
 
     # 行 hash -> 行号组（dup 标记用；与 show_line 的 clean 一致）
     by_hash =
@@ -160,8 +164,9 @@ defmodule Newbee.Tools.Edit do
 
       true ->
         raise ParseError,
-          message: "内容行必须以 + 开头（第 #{length(cur.ops) + 1} 个操作附近）；" <>
-            "若这是新节头请检查 [path#tag] 格式"
+          message:
+            "内容行必须以 + 开头（第 #{length(cur.ops) + 1} 个操作附近）；" <>
+              "若这是新节头请检查 [path#tag] 格式"
     end
   end
 
@@ -178,13 +183,17 @@ defmodule Newbee.Tools.Edit do
   end
 
   defp put_in_ops(%{ops: ops} = cur, new) do
-    %{cur | ops: List.update_at(ops, -1, fn
-      {:replace, a, b, lines, {h, ctx, hb, ctx_b}} -> {:replace, a, b, lines ++ [new], {h, ctx, hb, ctx_b}}
-      {:insert_before, n, lines, h, ctx} -> {:insert_before, n, lines ++ [new], h, ctx}
-      {:insert_after, n, lines, h, ctx} -> {:insert_after, n, lines ++ [new], h, ctx}
-      {:delete, a, b, {h, ctx, hb, ctx_b}} -> {:delete, a, b, {h, ctx, hb, ctx_b}}
-      op -> op
-    end)}
+    %{
+      cur
+      | ops:
+          List.update_at(ops, -1, fn
+            {:replace, a, b, lines, {h, ctx, hb, ctx_b}} -> {:replace, a, b, lines ++ [new], {h, ctx, hb, ctx_b}}
+            {:insert_before, n, lines, h, ctx} -> {:insert_before, n, lines ++ [new], h, ctx}
+            {:insert_after, n, lines, h, ctx} -> {:insert_after, n, lines ++ [new], h, ctx}
+            {:delete, a, b, {h, ctx, hb, ctx_b}} -> {:delete, a, b, {h, ctx, hb, ctx_b}}
+            op -> op
+          end)
+    }
   end
 
   # 锚点对: N.#h|M.#ch （a 目标, b 上下文；必须相邻）

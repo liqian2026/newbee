@@ -44,5 +44,4 @@ defmodule Newbee.TestScripted do
   end
 end
 
-
 :ok

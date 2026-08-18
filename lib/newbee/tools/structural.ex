@@ -115,7 +115,7 @@ defmodule Newbee.Tools.Structural do
 
   defp module_body([{{_, _, [:do]}, body}]), do: body
   defp module_body([{{_, _, ["do"]}, body}]), do: body
-  defp module_body([do: body]), do: body
+  defp module_body(do: body), do: body
   defp module_body(_), do: nil
 
   defp find_module(quoted, module) do
@@ -139,7 +139,9 @@ defmodule Newbee.Tools.Structural do
       {:defmodule, meta, _} ->
         end_line =
           cond do
-            is_list(meta[:end]) and is_integer(meta[:end][:line]) -> meta[:end][:line]
+            is_list(meta[:end]) and is_integer(meta[:end][:line]) ->
+              meta[:end][:line]
+
             is_list(meta[:end_of_expression]) and is_integer(meta[:end_of_expression][:line]) ->
               meta[:end_of_expression][:line]
 
@@ -167,7 +169,9 @@ defmodule Newbee.Tools.Structural do
 
               end_line =
                 cond do
-                  is_list(meta[:end]) and is_integer(meta[:end][:line]) -> meta[:end][:line]
+                  is_list(meta[:end]) and is_integer(meta[:end][:line]) ->
+                    meta[:end][:line]
+
                   is_list(meta[:end_of_expression]) and is_integer(meta[:end_of_expression][:line]) ->
                     meta[:end_of_expression][:line]
 
@@ -185,7 +189,7 @@ defmodule Newbee.Tools.Structural do
   end
 
   defp splice_lines(lines, from_idx, to_idx, replacement) do
-    Enum.take(lines, from_idx) ++ replacement ++ Enum.drop(lines, to_idx + 1)
+    (Enum.take(lines, from_idx) ++ replacement ++ Enum.drop(lines, to_idx + 1))
     |> Enum.join("\n")
   end
 
@@ -197,6 +201,5 @@ defmodule Newbee.Tools.Structural do
     _ -> File.write!(path, src)
   end
 end
-
 
 :ok

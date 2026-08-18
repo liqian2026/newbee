@@ -31,6 +31,7 @@ defmodule Newbee.Evolution.PPT do
   """
   def select(client, task, candidates, opts \\ []) do
     n = length(candidates)
+
     if n < 2 do
       %{best: 0, ranking: [0], scores: %{0 => 1.0}, comparisons: 0, method: :trivial}
     else
@@ -118,10 +119,10 @@ defmodule Newbee.Evolution.PPT do
     pivot_set = MapSet.new(pivots)
     n = length(cands)
 
+    # non-pivot vs 每个 pivot
+    # pivot 内部全配（一次方向即可，A/B 槽抵消偏置）
     pairs =
-      # non-pivot vs 每个 pivot
       for(i <- 0..(n - 1), not MapSet.member?(pivot_set, i), p <- pivots, i != p, do: {i, p}) ++
-        # pivot 内部全配（一次方向即可，A/B 槽抵消偏置）
         for({p1, p2} <- pair_combinations(pivots), do: {p1, p2})
 
     pairs = Enum.uniq(pairs)

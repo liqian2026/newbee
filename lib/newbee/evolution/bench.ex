@@ -76,8 +76,11 @@ defmodule Newbee.Evolution.Bench do
 
     passed =
       case kind do
-        "expect_ok" -> result.status == :ok and (pat == "" or rendered =~ pat)
-        "expect_error" -> result.status == :error and rendered =~ pat
+        "expect_ok" ->
+          result.status == :ok and (pat == "" or rendered =~ pat)
+
+        "expect_error" ->
+          result.status == :error and rendered =~ pat
 
         "score_ge" ->
           min = parse_min(pat)
@@ -145,7 +148,12 @@ defmodule Newbee.Evolution.Bench do
         GenServer.stop(k)
         GenServer.stop(ev)
 
-        %{id: t["id"], passed: passed, tokens: usage["total_tokens"] || 0, reply: inspect(reply) |> String.slice(0, 200)}
+        %{
+          id: t["id"],
+          passed: passed,
+          tokens: usage["total_tokens"] || 0,
+          reply: inspect(reply) |> String.slice(0, 200)
+        }
       end)
 
     %{

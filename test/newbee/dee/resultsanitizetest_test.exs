@@ -22,5 +22,4 @@ defmodule Newbee.DEE.ResultSanitizeTest do
   end
 end
 
-
 :ok

@@ -27,9 +27,10 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
         client: %{},
         evaluator: ev,
         session: false,
-        client_fun: scripted([
-          fn _m, _o -> {:ok, done_msg("task done"), %{}} end
-        ]),
+        client_fun:
+          scripted([
+            fn _m, _o -> {:ok, done_msg("task done"), %{}} end
+          ]),
         progress: %{
           client: :fake,
           every: 100,
@@ -59,10 +60,11 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
         client: %{},
         evaluator: ev,
         session: false,
-        client_fun: scripted([
-          fn _m, _o -> {:ok, done_msg("hasty done"), %{}} end,
-          fn _m, _o -> {:ok, done_msg("final done"), %{}} end
-        ]),
+        client_fun:
+          scripted([
+            fn _m, _o -> {:ok, done_msg("hasty done"), %{}} end,
+            fn _m, _o -> {:ok, done_msg("final done"), %{}} end
+          ]),
         progress: %{
           client: :fake,
           every: 100,
@@ -93,9 +95,10 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
         client: %{},
         evaluator: ev,
         session: false,
-        client_fun: scripted([
-          fn _m, _o -> {:ok, done_msg("ok"), %{}} end
-        ]),
+        client_fun:
+          scripted([
+            fn _m, _o -> {:ok, done_msg("ok"), %{}} end
+          ]),
         progress: %{
           client: :fake,
           every: 100,
@@ -120,9 +123,10 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
         client: %{},
         evaluator: ev,
         session: false,
-        client_fun: scripted([
-          fn _m, _o -> {:ok, done_msg("ok"), %{}} end
-        ])
+        client_fun:
+          scripted([
+            fn _m, _o -> {:ok, done_msg("ok"), %{}} end
+          ])
       )
 
     assert {:done, "ok"} = Kernel.submit(kernel, "task")

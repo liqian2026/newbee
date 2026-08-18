@@ -68,8 +68,12 @@ defmodule Newbee.DEE.EvaluatorNodeTest do
     wait_standby = fn ->
       Enum.reduce_while(1..50, false, fn _, _ ->
         case Evaluator.info(ev).standby do
-          %{alive: true} -> {:halt, true}
-          _ -> Process.sleep(100); {:cont, false}
+          %{alive: true} ->
+            {:halt, true}
+
+          _ ->
+            Process.sleep(100)
+            {:cont, false}
         end
       end)
     end
@@ -96,6 +100,5 @@ defmodule Newbee.DEE.EvaluatorNodeTest do
 
   defp info1_node(_ev, info), do: info.peer
 end
-
 
 :ok

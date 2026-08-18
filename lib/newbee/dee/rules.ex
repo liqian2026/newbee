@@ -21,7 +21,10 @@ defmodule Newbee.DEE.Rules do
 
   @doc "注册一条规则（同 id 覆盖）。opts: source（:evolver | :user | :auto）。"
   def add(id, pattern, injection, opts \\ []) do
-    GenServer.call(__MODULE__, {:add, %{id: to_string(id), pattern: pattern, injection: injection, source: Keyword.get(opts, :source, :user)}})
+    GenServer.call(
+      __MODULE__,
+      {:add, %{id: to_string(id), pattern: pattern, injection: injection, source: Keyword.get(opts, :source, :user)}}
+    )
   end
 
   @doc "检查代码是否命中规则。返回命中列表（按注册序）。"

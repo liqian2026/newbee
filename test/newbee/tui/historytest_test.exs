@@ -7,7 +7,12 @@ defmodule Newbee.TUI.HistoryTest do
     File.mkdir_p!(tmp)
     path = Path.join(tmp, "history")
     Application.put_env(:newbee, :history_path, path)
-    on_exit(fn -> Application.delete_env(:newbee, :history_path); File.rm_rf!(tmp) end)
+
+    on_exit(fn ->
+      Application.delete_env(:newbee, :history_path)
+      File.rm_rf!(tmp)
+    end)
+
     %{path: path}
   end
 

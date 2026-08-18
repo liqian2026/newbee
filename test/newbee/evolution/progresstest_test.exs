@@ -60,12 +60,16 @@ defmodule Newbee.Evolution.ProgressTest do
       if opts[:logprobs] do
         content = [
           %{"token" => "<score>", "logprob" => -1.0, "top_logprobs" => []},
-          %{"token" => "M", "logprob" => -0.35, "top_logprobs" => [
-            %{"token" => "M", "logprob" => -0.35},
-            %{"token" => "A", "logprob" => -2.3},
-            %{"token" => "B", "logprob" => -2.3},
-            %{"token" => "T", "logprob" => -2.3}
-          ]},
+          %{
+            "token" => "M",
+            "logprob" => -0.35,
+            "top_logprobs" => [
+              %{"token" => "M", "logprob" => -0.35},
+              %{"token" => "A", "logprob" => -2.3},
+              %{"token" => "B", "logprob" => -2.3},
+              %{"token" => "T", "logprob" => -2.3}
+            ]
+          },
           %{"token" => "</score>", "logprob" => -1.0, "top_logprobs" => []}
         ]
 
@@ -78,9 +82,12 @@ defmodule Newbee.Evolution.ProgressTest do
     defp fake_sample(content), do: fn _c, _m, _o -> {:ok, content, %{usage: %{}, logprobs: nil}} end
 
     test "logprobs 路径：对评分 token 分布取期望" do
-      r = Progress.score(:fake, "task", "traj",
-        criteria: [%{name: "Spec", desc: "d"}],
-        complete_fn: &fake_logprob/3, k: 1)
+      r =
+        Progress.score(:fake, "task", "traj",
+          criteria: [%{name: "Spec", desc: "d"}],
+          complete_fn: &fake_logprob/3,
+          k: 1
+        )
 
       assert r.method == :logprob
       # 期望 = 0.1*1 + 0.1*2 + 0.7*13 + 0.1*20 = 11.4（归一化后）
@@ -88,26 +95,39 @@ defmodule Newbee.Evolution.ProgressTest do
     end
 
     test "采样路径：解析刻度符号得整数分" do
-      r = Progress.score(:fake, "task", "traj",
-        criteria: [%{name: "Spec", desc: "d"}],
-        complete_fn: fake_sample("<score>N</score>"), k: 1, logprobs: false)
+      r =
+        Progress.score(:fake, "task", "traj",
+          criteria: [%{name: "Spec", desc: "d"}],
+          complete_fn: fake_sample("<score>N</score>"),
+          k: 1,
+          logprobs: false
+        )
 
       assert r.method == :sample
       assert r.score == 14.0
     end
 
     test "中文刻度采样" do
-      r = Progress.score(:fake, "task", "traj",
-        criteria: [%{name: "Spec", desc: "d"}],
-        complete_fn: fake_sample("<score>八</score>"), k: 1, logprobs: false, scale: :cn)
+      r =
+        Progress.score(:fake, "task", "traj",
+          criteria: [%{name: "Spec", desc: "d"}],
+          complete_fn: fake_sample("<score>八</score>"),
+          k: 1,
+          logprobs: false,
+          scale: :cn
+        )
 
       assert r.score == 8.0
     end
 
     test "多标准 ensemble 取平均" do
-      r = Progress.score(:fake, "task", "traj",
-        criteria: [%{name: "A", desc: "d"}, %{name: "B", desc: "d"}],
-        complete_fn: fake_sample("<score>C</score>"), k: 1, logprobs: false)
+      r =
+        Progress.score(:fake, "task", "traj",
+          criteria: [%{name: "A", desc: "d"}, %{name: "B", desc: "d"}],
+          complete_fn: fake_sample("<score>C</score>"),
+          k: 1,
+          logprobs: false
+        )
 
       assert length(r.criteria) == 2
       assert r.score == 3.0
@@ -117,23 +137,33 @@ defmodule Newbee.Evolution.ProgressTest do
       # 两次采样返回不同值 → 平均
       seq = ["<score>C</score>", "<score>E</score>"]
       counter = :counters.new(1, [])
+
       fn_completer = fn _c, _m, _o ->
         n = :counters.get(counter, 1)
         :counters.add(counter, 1, 1)
         {:ok, Enum.at(seq, rem(n, 2)), %{usage: %{}, logprobs: nil}}
       end
 
-      r = Progress.score(:fake, "task", "traj",
-        criteria: [%{name: "Spec", desc: "d"}],
-        complete_fn: fn_completer, k: 2, logprobs: false)
+      r =
+        Progress.score(:fake, "task", "traj",
+          criteria: [%{name: "Spec", desc: "d"}],
+          complete_fn: fn_completer,
+          k: 2,
+          logprobs: false
+        )
 
-      assert r.score == 4.0  # (3 + 5) / 2
+      # (3 + 5) / 2
+      assert r.score == 4.0
     end
 
     test "解析失败 → score 0 且 method :error" do
-      r = Progress.score(:fake, "task", "traj",
-        criteria: [%{name: "Spec", desc: "d"}],
-        complete_fn: fake_sample("<score>??</score>"), k: 1, logprobs: false)
+      r =
+        Progress.score(:fake, "task", "traj",
+          criteria: [%{name: "Spec", desc: "d"}],
+          complete_fn: fake_sample("<score>??</score>"),
+          k: 1,
+          logprobs: false
+        )
 
       assert r.score == 0.0
       assert hd(r.criteria).method == :error
@@ -141,9 +171,7 @@ defmodule Newbee.Evolution.ProgressTest do
 
     test "LLM 调用报错 → score 0" do
       err_fn = fn _c, _m, _o -> {:error, :timeout} end
-      r = Progress.score(:fake, "task", "traj",
-        criteria: [%{name: "Spec", desc: "d"}],
-        complete_fn: err_fn, k: 1)
+      r = Progress.score(:fake, "task", "traj", criteria: [%{name: "Spec", desc: "d"}], complete_fn: err_fn, k: 1)
 
       assert r.score == 0.0
     end
@@ -152,9 +180,14 @@ defmodule Newbee.Evolution.ProgressTest do
   describe "track/3" do
     test "逐前缀打分返回 [{step, score, variance}]" do
       fn_completer = fn _c, _m, _o -> {:ok, "<score>D</score>", %{usage: %{}, logprobs: nil}} end
-      result = Progress.track(:fake, "task", ["step1", "step1 step2"],
-        criteria: [%{name: "Spec", desc: "d"}],
-        complete_fn: fn_completer, k: 1, logprobs: false)
+
+      result =
+        Progress.track(:fake, "task", ["step1", "step1 step2"],
+          criteria: [%{name: "Spec", desc: "d"}],
+          complete_fn: fn_completer,
+          k: 1,
+          logprobs: false
+        )
 
       assert result == [{1, 4.0, 33.25}, {2, 4.0, 33.25}]
     end

@@ -58,5 +58,4 @@ defmodule Newbee.DEE.KernelEventsTest do
   end
 end
 
-
 :ok

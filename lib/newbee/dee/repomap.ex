@@ -29,7 +29,9 @@ defmodule Newbee.DEE.RepoMap do
     with {:ok, src} <- File.read(path),
          {:ok, ast} <- Code.string_to_quoted(src, columns: false) do
       case extract_module(ast) do
-        nil -> nil
+        nil ->
+          nil
+
         {mod, doc, defs} ->
           doc = doc && String.slice(doc, 0, 80)
           header = "▸ #{inspect(mod)}" <> if(doc, do: " — #{doc}", else: "")
@@ -89,10 +91,12 @@ defmodule Newbee.DEE.RepoMap do
   defp block_to_list(x), do: [x]
 
   defp sig(kind, {:when, _, [head | _]}), do: sig(kind, head)
+
   defp sig(kind, {name, _, args}) when is_atom(name) do
     arity = if is_list(args), do: length(args), else: 0
     "#{kind} #{name}/#{arity}"
   end
+
   defp sig(kind, _), do: kind
 
   defp field_name({k, _}), do: to_string(k)

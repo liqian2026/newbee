@@ -77,8 +77,11 @@ defmodule Newbee.TUI.Line do
 
   defp trim_trailing_while(s, pred, n) do
     case String.last(s) do
-      nil -> {s, n}
-      last -> if pred.(last), do: trim_trailing_while(String.slice(s, 0, String.length(s) - 1), pred, n + 1), else: {s, n}
+      nil ->
+        {s, n}
+
+      last ->
+        if pred.(last), do: trim_trailing_while(String.slice(s, 0, String.length(s) - 1), pred, n + 1), else: {s, n}
     end
   end
 

@@ -50,12 +50,21 @@ defmodule Newbee.Evolution.EvolverTest do
     Evolver.take_hints()
   end
 
-
   describe "Best-of-N (PPT)" do
     test "rank_tool_candidates 用 PPT 选最优候选" do
       cands = [
-        %{"type" => "tool", "id" => "evo-ppt", "name" => "GoodTool", "source" => "defmodule GoodTool do\n  def run, do: :good\nend"},
-        %{"type" => "tool", "id" => "evo-ppt", "name" => "BadTool", "source" => "defmodule BadTool do\n  def run, do: :bad\nend"}
+        %{
+          "type" => "tool",
+          "id" => "evo-ppt",
+          "name" => "GoodTool",
+          "source" => "defmodule GoodTool do\n  def run, do: :good\nend"
+        },
+        %{
+          "type" => "tool",
+          "id" => "evo-ppt",
+          "name" => "BadTool",
+          "source" => "defmodule BadTool do\n  def run, do: :bad\nend"
+        }
       ]
 
       # mock completer：按候选源码内容打分（good 高分 / bad 低分）
@@ -68,7 +77,8 @@ defmodule Newbee.Evolution.EvolverTest do
         sb =
           if prompt =~ "Trajectory B:\ndefmodule BadTool", do: 4, else: 13
 
-        {:ok, "<score_A>#{Newbee.Evolution.Progress.value_to_token(:letters, sa)}</score_A><score_B>#{Newbee.Evolution.Progress.value_to_token(:letters, sb)}</score_B>",
+        {:ok,
+         "<score_A>#{Newbee.Evolution.Progress.value_to_token(:letters, sa)}</score_A><score_B>#{Newbee.Evolution.Progress.value_to_token(:letters, sb)}</score_B>",
          %{usage: %{}, logprobs: nil}}
       end
 
@@ -80,8 +90,18 @@ defmodule Newbee.Evolution.EvolverTest do
     test "publish 对同 id 多候选只发布 top-1" do
       # 直接测分组+发布逻辑（用 PPT 失败回退第一个验证只发一个）
       proposals = [
-        %{"type" => "tool", "id" => "evo-ppt-x", "name" => "XTool", "source" => "defmodule XTool do\n  def run, do: :x\nend"},
-        %{"type" => "tool", "id" => "evo-ppt-x", "name" => "XTool", "source" => "defmodule XTool do\n  def run, do: :y\nend"}
+        %{
+          "type" => "tool",
+          "id" => "evo-ppt-x",
+          "name" => "XTool",
+          "source" => "defmodule XTool do\n  def run, do: :x\nend"
+        },
+        %{
+          "type" => "tool",
+          "id" => "evo-ppt-x",
+          "name" => "XTool",
+          "source" => "defmodule XTool do\n  def run, do: :y\nend"
+        }
       ]
 
       # PPT 会真实调用（complete_fn 报错 → 回退第一个）
@@ -91,5 +111,4 @@ defmodule Newbee.Evolution.EvolverTest do
       assert length(results) == 1
     end
   end
-
 end

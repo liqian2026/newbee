@@ -13,7 +13,7 @@ defmodule Newbee.Codec.FallbackParserTest do
 
   test "裸 ``` 围栏也识别" do
     text = "```\nIO.puts(\"hi\")\n```"
-    {blocks, cleaned} = FallbackParser.extract(text)
+    {blocks, _cleaned} = FallbackParser.extract(text)
     assert blocks == ["IO.puts(\"hi\")"]
   end
 

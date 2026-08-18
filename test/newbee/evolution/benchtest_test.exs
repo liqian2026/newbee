@@ -5,9 +5,11 @@ defmodule Newbee.Evolution.BenchTest do
   setup do
     dir = Path.join(System.user_home!(), ".newbee/antibodies")
     backup = if File.dir?(dir), do: File.ls!(dir), else: []
+
     on_exit(fn ->
       for f <- File.ls!(dir) -- backup, do: File.rm(Path.join(dir, f))
     end)
+
     :ok
   end
 
@@ -69,5 +71,4 @@ defmodule Newbee.Evolution.BenchTest do
       assert failed == 0
     end
   end
-
 end

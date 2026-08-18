@@ -130,7 +130,6 @@ defmodule Newbee.CLI do
                 end
             end
 
-
           {:submit, text} ->
             run_submit(kernel, text)
             loop(kernel, client)
@@ -162,6 +161,7 @@ defmodule Newbee.CLI do
       IO.puts("  [#{i}] #{m.id} · #{m.when_str} · #{m.messages} 条 · #{m.title}")
     end)
   end
+
   defp run_submit(kernel, text) do
     case Newbee.DEE.Kernel.submit(kernel, text) do
       {:done, summary} -> IO.puts("\n\e[1m● \e[0m" <> summary <> "\n")
@@ -172,7 +172,9 @@ defmodule Newbee.CLI do
 
     # 暂存区有改动时提示
     case Newbee.Staging.list() do
-      [] -> :ok
+      [] ->
+        :ok
+
       staged ->
         IO.puts("\e[36m◆ #{length(staged)} 项改动待批准:\e[0m")
         IO.puts(Newbee.Staging.render())
@@ -181,7 +183,8 @@ defmodule Newbee.CLI do
   end
 
   defp session_id(kernel) do
-    :sys.get_state(kernel).session |> case do
+    :sys.get_state(kernel).session
+    |> case do
       nil -> "(off)"
       s -> s.id
     end

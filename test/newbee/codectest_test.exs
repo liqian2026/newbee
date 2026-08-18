@@ -29,5 +29,4 @@ defmodule Newbee.CodecTest do
   end
 end
 
-
 :ok

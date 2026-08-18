@@ -7,7 +7,9 @@ defmodule Newbee.Tools.Git do
   def log(dir \\ ".", n \\ 10), do: run(dir, ["log", "--oneline", "-#{n}"])
 
   def add_all(dir \\ "."), do: run(dir, ["add", "-A"])
-  def commit(dir \\ ".", msg), do: run(dir, ["-c", "user.email=newbee@local", "-c", "user.name=newbee", "commit", "-m", msg])
+
+  def commit(dir \\ ".", msg),
+    do: run(dir, ["-c", "user.email=newbee@local", "-c", "user.name=newbee", "commit", "-m", msg])
 
   @doc "回滚工作区到 HEAD（宽松沙箱的撤销键，§8）。"
   def rollback(dir \\ ".") do
@@ -26,6 +28,5 @@ defmodule Newbee.Tools.Git do
     end
   end
 end
-
 
 :ok

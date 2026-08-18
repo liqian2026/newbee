@@ -5,8 +5,15 @@ defmodule Newbee.DEE.Kernel do
   """
   use GenServer
 
-  defstruct messages: [], client: nil, evaluator: nil, render: nil,
-            client_fun: nil, usage: %{}, steps: 0, session: nil, progress: nil,
+  defstruct messages: [],
+            client: nil,
+            evaluator: nil,
+            render: nil,
+            client_fun: nil,
+            usage: %{},
+            steps: 0,
+            session: nil,
+            progress: nil,
             goal: nil
 
   # ── API ──
@@ -32,7 +39,6 @@ defmodule Newbee.DEE.Kernel do
   @doc "查询自主目标状态：nil | %{text, rounds, max_rounds, idle}。"
   def goal(kernel), do: GenServer.call(kernel, :goal)
 
-
   def usage(kernel), do: GenServer.call(kernel, :usage)
 
   # ── init ──
@@ -52,7 +58,9 @@ defmodule Newbee.DEE.Kernel do
     # 停滞时注入干预提醒。client 默认走 model.json 的 verifier role（无则回退 default）。
     progress =
       case Keyword.get(opts, :progress, false) do
-        false -> nil
+        false ->
+          nil
+
         p when is_map(p) or is_list(p) ->
           %{
             client: Map.get(p, :client) || Newbee.LLM.Config.client_for("verifier"),
@@ -133,6 +141,7 @@ defmodule Newbee.DEE.Kernel do
   end
 
   def handle_call(:usage, _from, state), do: {:reply, state.usage, state}
+
   def handle_call({:set_goal, text, opts}, _from, state) do
     text = String.trim(text)
     max_rounds = Keyword.get(opts, :max_rounds, 50)
@@ -266,6 +275,7 @@ defmodule Newbee.DEE.Kernel do
       Newbee.DebugLog.log(:turn, "step #{step}: long turn (uncapped, audited)")
       emit(state, {:turn_long, step})
     end
+
     Newbee.DebugLog.log(:turn, "step #{step} messages=#{length(state.messages)}")
     on_text = fn delta -> emit(state, {:text, delta}) end
     on_reasoning = fn delta -> emit(state, {:reasoning, delta}) end
@@ -282,7 +292,18 @@ defmodule Newbee.DEE.Kernel do
             case Newbee.Codec.FallbackParser.extract(msg["content"] || "") do
               {[], _cleaned} ->
                 Newbee.DebugLog.log(:turn, "step #{step} no tool calls, turn end")
-                {{:text, msg["content"]}, state}
+
+                case check_rules(msg["content"] || "") do
+                  [] ->
+                    {{:text, msg["content"]}, state}
+
+                  hits ->
+                    # 沉睡规则命中正文（§4.5 流监控）：注入提醒，模型下轮纠正
+                    emit(state, {:rule_hit, hits})
+                    injections = Enum.map_join(hits, "\n", &("- [" <> &1.id <> "] " <> &1.injection))
+                    reminder = %{"role" => "system", "content" => "[沉睡规则注入] " <> injections}
+                    {{:text, msg["content"]}, push_msg(state, reminder)}
+                end
 
               {blocks, cleaned} ->
                 Newbee.DebugLog.log(:turn, "step #{step} fallback: #{length(blocks)} elixir blocks")
@@ -357,99 +378,99 @@ defmodule Newbee.DEE.Kernel do
         {:halt, {:halt, {:interrupted, nil}, state}}
       else
         t0 = System.monotonic_time(:millisecond)
-      Newbee.DebugLog.log(:tool, "start #{call.name} id=#{call.id} args=#{String.slice(inspect(call.args), 0, 200)}")
+        Newbee.DebugLog.log(:tool, "start #{call.name} id=#{call.id} args=#{String.slice(inspect(call.args), 0, 200)}")
 
-      result =
-        case call.name do
-          "run_elixir" ->
-            code = call.args["code"] || ""
-            title = call.args["title"] || ""
+        result =
+          case call.name do
+            "run_elixir" ->
+              code = call.args["code"] || ""
+              title = call.args["title"] || ""
 
-            case check_rules(code) do
-              [] ->
-                audit_dangerous(code)
-                emit(state, {:tool_start, "run_elixir", title, code})
-                Newbee.DebugLog.log(:tool, "eval start #{title}")
+              case check_rules(code) do
+                [] ->
+                  audit_dangerous(code)
+                  emit(state, {:tool_start, "run_elixir", title, code})
+                  Newbee.DebugLog.log(:tool, "eval start #{title}")
 
-                eval_result =
-                  try do
-                    Newbee.DEE.Evaluator.eval(state.evaluator, code)
-                  rescue
-                    e ->
-                      Newbee.DebugLog.log(:tool, "eval raised #{inspect(e)}")
-                      %{status: :error, error: inspect(e), output: ""}
+                  eval_result =
+                    try do
+                      Newbee.DEE.Evaluator.eval(state.evaluator, code)
+                    rescue
+                      e ->
+                        Newbee.DebugLog.log(:tool, "eval raised #{inspect(e)}")
+                        %{status: :error, error: inspect(e), output: ""}
+                    end
+
+                  Newbee.DebugLog.log(:tool, "eval done status=#{eval_result.status} title=#{title}")
+                  rendered = Newbee.DEE.Result.render(eval_result)
+
+                  if eval_result.status == :error do
+                    emit(state, {:tool_error, rendered})
                   end
 
-                Newbee.DebugLog.log(:tool, "eval done status=#{eval_result.status} title=#{title}")
-                rendered = Newbee.DEE.Result.render(eval_result)
+                  emit(state, {:tool_result, "run_elixir", rendered})
 
-                if eval_result.status == :error do
-                  emit(state, {:tool_error, rendered})
-                end
+                  tool_msg = %{
+                    "role" => "tool",
+                    "tool_call_id" => call.id,
+                    "content" => rendered
+                  }
 
-                emit(state, {:tool_result, "run_elixir", rendered})
+                  {:cont, {:cont, state |> push_msg(tool_msg) |> maybe_progress()}}
 
-                tool_msg = %{
-                  "role" => "tool",
-                  "tool_call_id" => call.id,
-                  "content" => rendered
-                }
+                hits ->
+                  emit(state, {:rule_hit, hits})
+                  injections = Enum.map_join(hits, "\n", &("- [" <> &1.id <> "] " <> &1.injection))
 
-                {:cont, {:cont, state |> push_msg(tool_msg) |> maybe_progress()}}
+                  tool_msg = %{
+                    "role" => "tool",
+                    "tool_call_id" => call.id,
+                    "content" => "⛔ 未执行——命中环境规则，请先按以下提醒修正再重试:\n" <> injections
+                  }
 
-              hits ->
-                emit(state, {:rule_hit, hits})
-                injections = Enum.map_join(hits, "\n", &("- [" <> &1.id <> "] " <> &1.injection))
+                  reminder = %{
+                    "role" => "system",
+                    "content" => "[沉睡规则注入] 你刚才的代码命中了以下环境规则:\n" <> injections
+                  }
 
-                tool_msg = %{
-                  "role" => "tool",
-                  "tool_call_id" => call.id,
-                  "content" => "⛔ 未执行——命中环境规则，请先按以下提醒修正再重试:\n" <> injections
-                }
+                  {:cont, {:cont, state |> push_msg(tool_msg) |> push_msg(reminder)}}
+              end
 
-                reminder = %{
-                  "role" => "system",
-                  "content" => "[沉睡规则注入] 你刚才的代码命中了以下环境规则:\n" <> injections
-                }
+            "done" ->
+              summary = call.args["summary"] || ""
+              tool_msg = %{"role" => "tool", "tool_call_id" => call.id, "content" => "✓ done"}
 
-                {:cont, {:cont, state |> push_msg(tool_msg) |> push_msg(reminder)}}
-            end
+              case final_check(state) do
+                {:done, state} ->
+                  emit(state, {:done, summary})
+                  # DeepSeek 严格校验：带 tool_calls 的 assistant 后必须跟齐 tool 响应，
+                  # 否则下一回合 400（此前 done/ask 从不回填，历史必然悬空）
+                  {:halt, {:halt, {:done, summary}, push_msg(state, tool_msg)}}
 
-          "done" ->
-            summary = call.args["summary"] || ""
-            tool_msg = %{"role" => "tool", "tool_call_id" => call.id, "content" => "✓ done"}
+                {:retry, state, reminder} ->
+                  emit(state, {:final_check_low, state.progress.final_score})
+                  # 低分：注入提醒 + 让循环继续，模型重新评估后再 done
+                  {:cont, {:cont, state |> push_msg(tool_msg) |> push_msg(%{"role" => "user", "content" => reminder})}}
+              end
 
-            case final_check(state) do
-              {:done, state} ->
-                emit(state, {:done, summary})
-                # DeepSeek 严格校验：带 tool_calls 的 assistant 后必须跟齐 tool 响应，
-                # 否则下一回合 400（此前 done/ask 从不回填，历史必然悬空）
-                {:halt, {:halt, {:done, summary}, push_msg(state, tool_msg)}}
+            "ask" ->
+              question = call.args["question"] || ""
+              emit(state, {:ask, question})
+              tool_msg = %{"role" => "tool", "tool_call_id" => call.id, "content" => "（等待用户回答）"}
+              {:halt, {:halt, {:ask, question}, push_msg(state, tool_msg)}}
 
-              {:retry, state, reminder} ->
-                emit(state, {:final_check_low, state.progress.final_score})
-                # 低分：注入提醒 + 让循环继续，模型重新评估后再 done
-                {:cont, {:cont, state |> push_msg(tool_msg) |> push_msg(%{"role" => "user", "content" => reminder})}}
-            end
+            other ->
+              tool_msg = %{
+                "role" => "tool",
+                "tool_call_id" => call.id,
+                "content" => "✗ unknown tool: #{other}"
+              }
 
-          "ask" ->
-            question = call.args["question"] || ""
-            emit(state, {:ask, question})
-            tool_msg = %{"role" => "tool", "tool_call_id" => call.id, "content" => "（等待用户回答）"}
-            {:halt, {:halt, {:ask, question}, push_msg(state, tool_msg)}}
+              {:cont, {:cont, push_msg(state, tool_msg)}}
+          end
 
-          other ->
-            tool_msg = %{
-              "role" => "tool",
-              "tool_call_id" => call.id,
-              "content" => "✗ unknown tool: #{other}"
-            }
-
-            {:cont, {:cont, push_msg(state, tool_msg)}}
-        end
-
-      Newbee.DebugLog.log(:tool, "done #{call.name} in #{System.monotonic_time(:millisecond) - t0}ms")
-      result
+        Newbee.DebugLog.log(:tool, "done #{call.name} in #{System.monotonic_time(:millisecond) - t0}ms")
+        result
       end
     end)
     |> case do
@@ -590,6 +611,7 @@ defmodule Newbee.DEE.Kernel do
                 "[终局验证] 你的完成分数 #{Float.round(s, 1)}/20 低于阈值 #{p.done_threshold}。" <>
                   "请重新检查是否真正满足所有任务要求（输出格式、错误处理、测试通过）。" <>
                   "确认无误后再调用 done，或继续修正。"
+
               {:retry, state, reminder}
             end
           end
@@ -606,7 +628,6 @@ defmodule Newbee.DEE.Kernel do
   # ── 进度监控（LLM-as-a-Verifier）──
 
   defp maybe_progress(%{progress: nil} = state), do: state
-
 
   defp maybe_progress(state) do
     steps = state.steps + 1
@@ -649,6 +670,7 @@ defmodule Newbee.DEE.Kernel do
           emit(state, {:progress_stall, scores})
           reminder = progress_reminder(scores)
           Newbee.DebugLog.log(:progress, "stalled, injecting reminder")
+
           %{state | progress: %{p | scores: scores, injected: true}}
           |> push_msg(%{"role" => "user", "content" => reminder})
         else
@@ -677,10 +699,13 @@ defmodule Newbee.DEE.Kernel do
     |> Enum.filter(fn m -> m["role"] == "tool" and is_binary(m["content"]) end)
     |> Enum.map(fn m ->
       m["content"]
-      |> String.replace("
+      |> String.replace(
+        "
 
-", "
-")
+",
+        "
+"
+      )
       |> String.slice(0, 300)
     end)
     |> Enum.with_index(1)

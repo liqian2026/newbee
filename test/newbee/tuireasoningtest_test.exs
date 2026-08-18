@@ -32,4 +32,3 @@ defmodule Newbee.TUIReasoningTest do
     assert List.last(s3.lines) == "\e[2mb"
   end
 end
-

@@ -44,4 +44,3 @@ defmodule Newbee.TUIStreamTest do
     assert length(s3.lines) == length(s2.lines) + 1
   end
 end
-

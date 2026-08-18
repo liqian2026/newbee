@@ -71,12 +71,14 @@ defmodule Newbee.TUI.Screen do
   defp do_ansi([27, ?[ | rest], text, style, acc) do
     {codes, rest} = take_sgr(rest, "")
     acc = if text == "", do: acc, else: [{text, style} | acc]
+
     style2 =
       case codes do
         "0" -> []
         "" -> style
         _ -> merge_sgr(style, codes)
       end
+
     do_ansi(rest, "", style2, acc)
   end
 
@@ -114,21 +116,21 @@ defmodule Newbee.TUI.Screen do
       |> Enum.reduce({row, w, rows}, fn cp, {row, w, rows} ->
         cw = Line.char_width(cp)
 
-      # 双宽字符不得贴到右缘（留 1 空隙，避免折进半格）：窄字符超界才折，
-      # 宽字符到边界即折。单字符行（row == []）永不折，保证超宽字符有处放。
-      overflow? =
-        if cw > 1 do
-          w + cw >= max
-        else
-          w + cw > max
-        end
+        # 双宽字符不得贴到右缘（留 1 空隙，避免折进半格）：窄字符超界才折，
+        # 宽字符到边界即折。单字符行（row == []）永不折，保证超宽字符有处放。
+        overflow? =
+          if cw > 1 do
+            w + cw >= max
+          else
+            w + cw > max
+          end
 
-      if overflow? and row != [] do
-        # 换行：当前行封板，cp 开新行
-        {[{cp, style}], cw, [row | rows]}
-      else
-        {[{cp, style} | row], w + cw, rows}
-      end
+        if overflow? and row != [] do
+          # 换行：当前行封板，cp 开新行
+          {[{cp, style}], cw, [row | rows]}
+        else
+          {[{cp, style} | row], w + cw, rows}
+        end
       end)
 
     layout(rest, max, row, w, rows)
@@ -162,7 +164,7 @@ defmodule Newbee.TUI.Screen do
 
   # ── 双缓冲 paint ──
 
-  defstruct prev: :nil, cols: 0, rows: 0
+  defstruct prev: nil, cols: 0, rows: 0
 
   @doc """
   全量重画（首帧 / resize / 翻页跳变）。

@@ -196,9 +196,7 @@ defmodule Newbee.Evolution.Evolver do
     task = "选择最佳的工具实现（可用性、健壮性、Elixir 惯用法）"
 
     result =
-      Newbee.Evolution.PPT.select(client, task, Enum.map(cands, & &1["source"]),
-        complete_fn: complete_fn
-      )
+      Newbee.Evolution.PPT.select(client, task, Enum.map(cands, & &1["source"]), complete_fn: complete_fn)
 
     %{best: idx, ranking: ranking, scores: scores} = result
     %{best: Enum.at(cands, idx), idx: idx, ranking: ranking, scores: scores}

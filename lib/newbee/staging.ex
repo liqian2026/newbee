@@ -93,7 +93,9 @@ defmodule Newbee.Staging do
 
   def handle_call({:reject, id}, _from, state) when is_integer(id) do
     case Map.pop(state, id) do
-      {nil, _} -> {:reply, {:error, :not_staged}, state}
+      {nil, _} ->
+        {:reply, {:error, :not_staged}, state}
+
       {entry, rest} ->
         persist(rest)
         {:reply, {:ok, [entry.path]}, rest}
