@@ -590,7 +590,8 @@ defmodule Newbee.TUI do
           {:resume, id} ->
             GenServer.stop(state.kernel)
             {:ok, kernel2} = resume_kernel(state.client, id)
-            %{state | kernel: kernel2, busy: false}
+            lines = load_session_lines(id)
+            %{state | kernel: kernel2, busy: false, lines: lines}
 
           {:resume_picker, metas} ->
             %{state | picker: %{items: metas, index: 0}, busy: false}
@@ -646,7 +647,8 @@ defmodule Newbee.TUI do
       meta ->
         GenServer.stop(state.kernel)
         {:ok, kernel} = resume_kernel(state.client, meta.id)
-        {%{state | picker: nil, kernel: kernel, busy: false}, true}
+        lines = load_session_lines(meta.id)
+        {%{state | picker: nil, kernel: kernel, busy: false, lines: lines}, true}
     end
   end
 
@@ -700,7 +702,19 @@ defmodule Newbee.TUI do
     {:ok, kernel}
   end
 
-  # ── 事件渲染（公开 API，测试契约）──
+  defp load_session_lines(id) do
+    session = Newbee.Session.open(id)
+    session |> Newbee.Session.messages() |> Enum.flat_map(&message_to_lines/1) |> Enum.take(-@scrollback)
+  rescue
+    _ -> []
+  end
+
+  defp message_to_lines(%{"role" => "user", "content" => c}), do: ["\e[32m›\e[0m " <> String.slice(c, 0, 2000)]
+  defp message_to_lines(%{"role" => "assistant", "content" => c}) when is_binary(c) and c != "", do: String.split(c, "\n") |> Enum.map(&Newbee.Markdown.render/1)
+  defp message_to_lines(%{"role" => "assistant", "tool_calls" => calls}) when is_list(calls), do: Enum.map(calls, &"\e[36m⏺ #{&1["function"]["name"]}\e[0m")
+  defp message_to_lines(%{"role" => "tool", "content" => c}), do: ["\e[2m⎿ #{String.slice(c, 0, 400)}\e[0m"]
+  defp message_to_lines(%{"role" => "system", "content" => c}), do: ["\e[2m#{String.slice(c, 0, 300)}\e[0m"]
+  defp message_to_lines(_), do: []
 
   @doc "追加一行到 transcript；重置 streaming 状态。"
   def push_line(%__MODULE__{} = state, line) do
@@ -1176,6 +1190,7 @@ defmodule Newbee.TUI do
   defp status_line(state) do
     usage = state.usage
     tokens = Map.get(usage, "total_tokens", 0)
+    tok_str = human_tok(tokens)
     bs = if state.busy, do: [], else: state.bindings_cache
     bindings = length(bs)
     dots = spinner(state)
@@ -1188,17 +1203,23 @@ defmodule Newbee.TUI do
     page_hint = if state.page > 0, do: " ↕#{state.page}", else: ""
     q = length(state.pending_inputs)
     qpart = if q > 0, do: " q:#{q}", else: ""
-    # 左：model + cwd；右：tokens/bindings/policy/elapsed（分栏，右对齐）
     left = "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())}\e[0m"
-    right =
-      "\e[2m#{page_hint}\e[33m#{elapsed_str}\e[0m\e[2m tok:#{tokens} bind:#{bindings}#{qpart} #{Newbee.Evolution.Policy.get()}\e[0m"
-    cols = terminal_cols()
+    # 人性化 tok + 窄屏自适应：右栏过长时优先缩 model 名，仍保证 tok/bind/policy 可见
+    right_core = "tok:#{tok_str} bind:#{bindings}#{qpart} #{Newbee.Evolution.Policy.get()}"
+    right = "\e[2m#{page_hint}\e[33m#{elapsed_str}\e[0m\e[2m #{right_core}\e[0m"
+    cols = max(terminal_cols(), 40)
     lw = visible_len(left)
     rw = visible_len(right)
     pad = max(cols - lw - rw - 2, 1)
+    # 窄屏时左栏截断，保证右栏完整可见
+    left = if cols < lw + rw + 10, do: String.slice(left, 0, max(cols - rw - 10, 10)) <> "…", else: left
     left <> String.duplicate(" ", pad) <> right
   end
 
+  defp human_tok(n) when is_integer(n) and n >= 1_000_000_000, do: :io_lib.format("~.1fB", [n / 1_000_000_000]) |> IO.iodata_to_binary()
+  defp human_tok(n) when is_integer(n) and n >= 1_000_000, do: :io_lib.format("~.1fM", [n / 1_000_000]) |> IO.iodata_to_binary()
+  defp human_tok(n) when is_integer(n) and n >= 1_000, do: :io_lib.format("~.1fK", [n / 1_000]) |> IO.iodata_to_binary()
+  defp human_tok(n), do: to_string(n || 0)
   # 剥 ANSI 后按可见宽度算（用于分栏对齐）
   defp visible_len(s) do
     s |> String.replace(~r/\e\[[0-9;]*m/, "") |> Line.width()

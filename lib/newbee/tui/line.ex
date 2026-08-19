@@ -192,21 +192,14 @@ defmodule Newbee.TUI.Line do
     {candidates, base} = complete_candidates(prefix)
 
     case candidates do
-      [] ->
-        l
-
+      [] -> l
       cands ->
+        # 多候选时优先按公共前缀补到最长公共段，单候选直接补全
         common = longest_common_prefix(cands)
-
-        if String.length(common) > String.length(base) do
-          suffix = String.slice(common, String.length(base)..-1//1)
-          %{l | text: prefix <> suffix <> rest, cur: c + String.length(suffix)}
-        else
-          l
-        end
+        target = if length(cands) == 1, do: hd(cands), else: common
+        if String.length(target) > String.length(base), do: %{l | text: prefix <> String.slice(target, String.length(base)..-1//1) <> rest, cur: c + String.length(target) - String.length(base)}, else: l
     end
   end
-
   defp split_at(t, c) do
     {String.slice(t, 0, c), String.slice(t, c..-1//1)}
   end
@@ -234,24 +227,22 @@ defmodule Newbee.TUI.Line do
 
         {cands, prefix}
 
-      # /model 型号补全：/model 前缀后按 provider/model 候选
-      String.starts_with?(prefix, "/model") ->
+      # /model 型号补全：/model 前缀后按 provider/model 候选（优先于通用命令，避免 /re 被截胡时误入）
+      String.starts_with?(prefix, "/model ") or prefix == "/model" ->
         models = Newbee.LLM.Config.model_candidates()
 
-        case String.split(prefix, " ", parts: 2) do
-          ["/model"] ->
-            {[], prefix}
+        base =
+          case String.split(prefix, " ", parts: 2) do
+            ["/model"] -> ""
+            ["/model", b] -> String.trim(b)
+            _ -> ""
+          end
 
-          ["/model", ""] ->
-            {Enum.map(models, &"/model #{&1}"), prefix}
-
-          ["/model", base] ->
-            base = String.trim(base)
-            cands = Enum.filter(models, &String.starts_with?(&1, base))
-            {Enum.map(cands, &"/model #{&1}"), prefix}
-
-          _ ->
-            {[], prefix}
+        if base == "" do
+          {Enum.map(models, &"/model #{&1}"), prefix}
+        else
+          cands = Enum.filter(models, &String.starts_with?(&1, base))
+          {Enum.map(cands, &"/model #{&1}"), prefix}
         end
 
       # 命令补全：行首 / 
