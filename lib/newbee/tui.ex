@@ -869,6 +869,7 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :audit, {:audit, :dangerous_code, hits}) do
+    push_line(state, "\e[31m⚖ 审计: 危险代码 #{inspect(hits)}\e[0m")
   end
 
   def render_event(%__MODULE__{} = state, :audit, {:audit, verdict, actor, target, ring}) do

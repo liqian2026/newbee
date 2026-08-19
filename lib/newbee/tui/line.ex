@@ -350,8 +350,8 @@ defmodule Newbee.TUI.Line do
     end
   end
 
-  # 光标在第 row 行时的行首偏移（字符数）
-  defp line_offset(t, row) do
+  @doc false
+  def line_offset(t, row) do
     rows = String.split(t, "\n") |> Enum.take(row)
     if rows == [], do: 0, else: Enum.join(rows, "\n") |> String.length() |> Kernel.+(1)
   end
