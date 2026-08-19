@@ -1210,9 +1210,18 @@ defmodule Newbee.TUI do
     cols = max(terminal_cols(), 40)
     lw = visible_len(left)
     rw = visible_len(right)
+    # 窄屏：右栏 tok/bind/policy 永远完整，左栏 model 名可截断
+    {left, lw} =
+      if cols < lw + rw + 4 do
+        # 截断左边可见文本而非原始 ANSI 串，避免半个转义被切
+        visible_left = left |> String.replace(~r/\e\[[0-9;]*m/, "")
+        keep = max(cols - rw - 6, 8)
+        truncated = String.slice(visible_left, 0, keep) <> "…"
+        {"\e[2m#{truncated}\e[0m", keep + 1}
+      else
+        {left, lw}
+      end
     pad = max(cols - lw - rw - 2, 1)
-    # 窄屏时左栏截断，保证右栏完整可见
-    left = if cols < lw + rw + 10, do: String.slice(left, 0, max(cols - rw - 10, 10)) <> "…", else: left
     left <> String.duplicate(" ", pad) <> right
   end
 
