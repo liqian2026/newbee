@@ -9,6 +9,13 @@ defmodule Newbee.Session do
   @root Path.join(System.user_home!(), ".newbee/sessions")
   @artifacts Path.join(System.user_home!(), ".newbee/session-artifacts")
 
+  @doc "当前活动会话 id（kernel 启动时登记；无会话返回 nil）。"
+  def current_id, do: :persistent_term.get({__MODULE__, :current}, nil)
+
+  @doc "登记当前活动会话（kernel init 调用；nil 清除）。"
+  def set_current(nil), do: :persistent_term.erase({__MODULE__, :current})
+  def set_current(id) when is_binary(id), do: :persistent_term.put({__MODULE__, :current}, id)
+
   @doc "新会话或恢复已有会话。"
   def open(id \\ nil) do
     id = id || gen_id()
@@ -22,6 +29,12 @@ defmodule Newbee.Session do
   @doc "追加一条消息到 transcript。"
   def append(%__MODULE__{transcript: t}, %{"role" => _} = msg) do
     File.write!(t, [Jason.encode_to_iodata!(msg), "\n"], [:append])
+  end
+
+  @doc "重写整个 transcript（/compact 用：摘要 + 最近消息）。"
+  def rewrite(%__MODULE__{transcript: t}, messages) do
+    body = Enum.map_join(messages, "\n", &Jason.encode!/1)
+    File.write!(t, body <> "\n")
   end
 
   @doc "读取全部历史消息。坏行（崩溃写了一半的）跳过而非崩 init。"

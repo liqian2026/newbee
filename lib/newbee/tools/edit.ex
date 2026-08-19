@@ -105,7 +105,15 @@ defmodule Newbee.Tools.Edit do
       end)
 
     Enum.each(writes, fn {path, content} ->
+      old = if File.exists?(path), do: File.read!(path), else: ""
       File.write!(path, content)
+      # 内联 diff 事件（§5.1）：节点上经 Host 代理回主 VM 总线
+      if old != content do
+        Newbee.Host.emit(
+          :file_diff,
+          {:file_diff, path, Enum.join(Newbee.Diff.lines(old, content), "\n"), Newbee.Diff.stats(old, content)}
+        )
+      end
     end)
 
     %{applied: length(sections), paths: Enum.map(sections, & &1.path), warnings: warnings}

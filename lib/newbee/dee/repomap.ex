@@ -6,15 +6,80 @@ defmodule Newbee.DEE.RepoMap do
   """
 
   @max_entries 60
+  @cache_dir Path.join(System.user_home!(), ".newbee/cache")
 
-  @doc "构建工程结构图（紧凑字符串）。非 Elixir 工程退化为目录树。"
+  @doc """
+  构建工程结构图（紧凑字符串）。非 Elixir 工程退化为目录树。
+
+  增量缓存（§3.6）：以 mix.exs + lib 全部文件的 mtime 指纹为 key，
+  工程未变更时直接复用缓存，不重复 AST 解析。
+  """
   def build(dir \\ ".") do
-    if File.exists?(Path.join(dir, "mix.exs")) do
-      elixir_map(dir)
-    else
-      tree_map(dir)
+    key = fingerprint(dir)
+
+    case read_cache(key) do
+      {:ok, map} ->
+        map
+
+      :miss ->
+        map =
+          if File.exists?(Path.join(dir, "mix.exs")) do
+            elixir_map(dir)
+          else
+            tree_map(dir)
+          end
+
+        write_cache(key, map)
+        map
     end
   end
+
+  # 工程指纹：mix.exs + lib/**/*.{ex,exs} 的 mtime 汇总（mtime 变则指纹变）
+  defp fingerprint(dir) do
+    files = Path.wildcard(Path.join(dir, "lib/**/*.{ex,exs}")) ++ [Path.join(dir, "mix.exs")]
+
+    sig =
+      files
+      |> Enum.map(fn f ->
+        mtime =
+          case File.stat(f, time: :posix) do
+            {:ok, s} -> s.mtime
+            _ -> 0
+          end
+
+        "#{f}:#{mtime}"
+      end)
+      |> Enum.sort()
+      |> Enum.join("|")
+
+    :crypto.hash(:md5, sig <> dir) |> Base.encode16(case: :lower)
+  end
+
+  defp read_cache(key) do
+    file = Path.join(@cache_dir, "repomap-" <> cache_id() <> ".json")
+
+    case File.read(file) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, %{"key" => ^key, "map" => map}} -> {:ok, map}
+          _ -> :miss
+        end
+
+      _ ->
+        :miss
+    end
+  end
+
+  defp write_cache(key, map) do
+    File.mkdir_p!(@cache_dir)
+    file = Path.join(@cache_dir, "repomap-" <> cache_id() <> ".json")
+    File.write!(file, Jason.encode_to_iodata!(%{"key" => key, "map" => map}))
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp cache_id, do: File.cwd!() |> then(&:crypto.hash(:md5, &1)) |> Base.encode16(case: :lower)
 
   defp elixir_map(dir) do
     (Path.wildcard(Path.join(dir, "lib/**/*.ex")) ++

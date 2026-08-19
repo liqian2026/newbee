@@ -2,9 +2,18 @@ defmodule Newbee.DEE.Rules do
   @moduledoc """
   沉睡规则 (DESIGN §4.5) ⭐：环境的免疫系统。
 
-  规则平时沉睡、不占 context；kernel 在每个 run_elixir 代码提交前调用
-  `check/1`——命中即中断工具执行、把规则作为 system reminder 注入。
-  "平时零成本、犯病才出现"：教训编译成规则而非 prompt 文本。
+  规则平时沉睡、不占 context；kernel 在 run_elixir 代码提交前和模型输出流上调用
+  `check/2`——命中即把规则作为 system reminder 注入。"平时零成本、犯病才出现"：
+  教训编译成规则而非 prompt 文本。
+
+  规则带 scope（:all | :content | :code）：
+    - `:all`（默认）—— 代码、正文、思考流都检查（旧行为）
+    - `:content` —— 只检查模型对外正文（outer register；J-Space 纪律用，
+      因为思考流是 inner，允许稠密）
+    - `:code`   —— 只检查 run_elixir 代码
+
+  内建 **J-Space invariants**（outer 纪律）在启动时自动播种：缺则补，
+  用户删过的不会复活。
 
   持久化：~/.newbee/rules.json。重启后重新载入。
   """
@@ -15,21 +24,66 @@ defmodule Newbee.DEE.Rules do
 
   defstruct rules: []
 
+  # ── 内建 J-Space invariants（§?）：可文本检测的 outer 纪律 ──
+
+  @jspace_rules [
+    %{
+      id: "jspace-outer",
+      scope: :content,
+      pattern: "(→|⇒|⇔|∃|∀|∈|∉|⊆|⊇|⊢|⊨|⟦|⟧|↦|≡|✓\\d{2}|\\[CP\\s\\d+\\])",
+      injection: "[J-Space] 稠密符号泄进了 outer register——内层简写要展开成白话再输出，或移到思考流/ledger。只有可展开的压缩才算容量。"
+    },
+    %{
+      id: "jspace-marker",
+      scope: :content,
+      pattern: "(GRRR|GAAAH|PHEW|I'M DROWNING|DATA DATA|blocked\\?! WRONG|AAAAAAAA|STOP\\. FOCUS)",
+      injection: "[J-Space] marker 是内层状态信号，别在输出里表演。marker 必须成对：跟着 move（具体动作）+ settle（收尾一行），否则是 marker idling。"
+    },
+    %{
+      id: "jspace-hedge",
+      scope: :content,
+      pattern: "(可能.*也可能|it could be .* or .*|一方面.*另一方面|both .* and .* are possible|或许.*或许)",
+      injection: "[J-Space] 列可能性代替解决（hedge）——工作区不存混合物。能命名分离测试就是候选集（保留），否则选一个相信的并标 ?。"
+    },
+    %{
+      id: "jspace-checkpoint",
+      scope: :content,
+      pattern: "(检查点|checkpoint)",
+      injection: "[J-Space] 检查点必须落账：Newbee.Tools.JSpace.note(checkpoint: \"...\") 写编号记录，声明结论+验证覆盖了什么。没记录的检查点不是检查点。"
+    },
+    %{
+      id: "jspace-verified",
+      scope: :content,
+      pattern: "(verified|已验证)",
+      injection: "[J-Space] 声明 verified 时说明验证覆盖了什么（哪个编译/哪组测试），别只贴结论。"
+    }
+  ]
+
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @doc "注册一条规则（同 id 覆盖）。opts: source（:evolver | :user | :auto）。"
+  @doc "注册一条规则（同 id 覆盖）。opts: source（:evolver | :user | :auto | :jspace）、scope（:all | :content | :code）。"
   def add(id, pattern, injection, opts \\ []) do
     GenServer.call(
       __MODULE__,
-      {:add, %{id: to_string(id), pattern: pattern, injection: injection, source: Keyword.get(opts, :source, :user)}}
+      {:add,
+       %{
+         id: to_string(id),
+         pattern: pattern,
+         injection: injection,
+         source: Keyword.get(opts, :source, :user),
+         scope: Keyword.get(opts, :scope, :all)
+       }}
     )
   end
 
-  @doc "检查代码是否命中规则。返回命中列表（按注册序）。"
-  def check(code) when is_binary(code) do
-    GenServer.call(__MODULE__, {:check, code})
+  @doc """
+  检查文本是否命中规则。scope 为当前上下文（:all | :content | :code）；
+  规则在自身 scope 为 :all 或等于当前 scope 时参与。返回命中列表（按注册序）。
+  """
+  def check(text, scope \\ :all) when is_binary(text) do
+    GenServer.call(__MODULE__, {:check, text, scope})
   end
 
   @doc "全部规则。"
@@ -44,7 +98,8 @@ defmodule Newbee.DEE.Rules do
 
   @impl true
   def init(_) do
-    {:ok, %__MODULE__{rules: load()}}
+    rules = seed_jspace(load())
+    {:ok, %__MODULE__{rules: rules}}
   end
 
   @impl true
@@ -55,12 +110,16 @@ defmodule Newbee.DEE.Rules do
     {:reply, :ok, state}
   end
 
-  def handle_call({:check, code}, _from, state) do
+  def handle_call({:check, text, scope}, _from, state) do
     hits =
       Enum.filter(state.rules, fn rule ->
-        case Regex.compile(rule.pattern) do
-          {:ok, re} -> Regex.match?(re, code)
-          {:error, _} -> false
+        if rule.scope == :all or rule.scope == scope do
+          case Regex.compile(rule.pattern) do
+            {:ok, re} -> Regex.match?(re, text)
+            {:error, _} -> false
+          end
+        else
+          false
         end
       end)
 
@@ -74,6 +133,21 @@ defmodule Newbee.DEE.Rules do
     state = %{state | rules: rules}
     persist(state.rules)
     {:reply, :ok, state}
+  end
+
+  # 内建 J-Space 规则播种：缺则补（用户删过的不会复活），有改动才落盘
+  defp seed_jspace(rules) do
+    {rules, added?} =
+      Enum.reduce(@jspace_rules, {rules, false}, fn r, {acc, added?} ->
+        if Enum.any?(acc, &(&1.id == r.id)) do
+          {acc, added?}
+        else
+          {acc ++ [%{id: r.id, pattern: r.pattern, injection: r.injection, source: :jspace, scope: r.scope}], true}
+        end
+      end)
+
+    if added?, do: persist(rules)
+    rules
   end
 
   defp persist(rules) do
@@ -92,7 +166,8 @@ defmodule Newbee.DEE.Rules do
                 id: r["id"],
                 pattern: r["pattern"],
                 injection: r["injection"],
-                source: (r["source"] || "user") |> String.to_atom()
+                source: (r["source"] || "user") |> String.to_atom(),
+                scope: (r["scope"] || "all") |> String.to_atom()
               }
             end)
 

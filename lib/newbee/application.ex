@@ -13,6 +13,8 @@ defmodule Newbee.Application do
       Newbee.DEE.Rules,
       # 指标采集 (§6.1)
       Newbee.Evolution.Metrics,
+      # 价签系统 (§9.11)
+      Newbee.Evolution.PriceTags,
       # JIT 认知阶梯 (§6.2)
       Newbee.Evolution.JIT,
       # 编辑暂存区（/approve）

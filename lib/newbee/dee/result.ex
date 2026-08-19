@@ -32,9 +32,48 @@ defmodule Newbee.DEE.Result do
   end
 
   def render(%{status: :error, error: error, output: output}) do
-    body = sanitize(output <> "\n" <> error) |> compress() |> sanitize()
+    hint = repair_hint(error)
+    body = sanitize(output <> "\n" <> error <> hint) |> compress() |> sanitize()
     "✗ error\n" <> body
   end
+
+  @doc "根据常见 Elixir 错误附加可直接尝试的修复示例。"
+  def repair_hint(error) when is_binary(error) do
+    cond do
+      String.contains?(error, "String.Chars not implemented for Tuple") ->
+        """
+
+        💡 修复建议：这是一个返回值 tuple 被当成字符串使用的问题。先匹配 `{:ok, value}`，再传给 `IO.puts/1`；错误分支也要处理。例如：
+        case Newbee.read("path.md") do
+          {:ok, content} -> IO.puts(content)
+          {:error, reason} -> IO.puts("读取失败: \#{inspect(reason)}")
+        end
+        """
+
+      String.contains?(error, "KeyError") ->
+        """
+
+        💡 修复建议：不要直接用 `map.key` 读取可能不存在的键。可改用 `Map.get(map, :key, default)`，或先用 `Map.fetch/2` 匹配 `{:ok, value} | :error`。
+        """
+
+      String.contains?(error, "no function clause matching") ->
+        """
+
+        💡 修复建议：函数收到的参数类型/数量没有匹配任何子句。先用 `IO.inspect(value, label: "value")` 检查实际值，并为预期类型增加匹配或兜底子句。
+        """
+
+      String.contains?(error, "SyntaxError") or String.contains?(error, "CompileError") ->
+        """
+
+        💡 修复建议：先定位错误报告中的行号和列号，检查括号、逗号、`do/end` 及字符串边界；可用 `Code.format_string!(code)` 验证代码结构。
+        """
+
+      true ->
+        ""
+    end
+  end
+
+  def repair_hint(_), do: ""
 
   @doc """
   清洗非法 UTF-8：工具输出可能是任意字节（读二进制文件等），

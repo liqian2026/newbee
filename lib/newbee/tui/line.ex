@@ -143,7 +143,8 @@ defmodule Newbee.TUI.Line do
         common = longest_common_prefix(cands)
 
         if String.length(common) > String.length(base) do
-          %{l | text: prefix <> common <> rest, cur: c + (String.length(common) - String.length(base))}
+          suffix = String.slice(common, String.length(base)..-1//1)
+          %{l | text: prefix <> suffix <> rest, cur: c + String.length(suffix)}
         else
           l
         end

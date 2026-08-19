@@ -25,8 +25,8 @@ defmodule Newbee.Evolution.JIT do
   @doc "登记一条 L1 教训。返回 :ok。"
   def learn(id, note), do: GenServer.call(__MODULE__, {:learn, to_string(id), note})
 
-  @doc "记录某条教训被引用/命中一次；可能触发升级。返回 {:promoted, level} | :ok。"
-  def hit(id), do: GenServer.call(__MODULE__, {:hit, to_string(id)})
+  @doc "记录某条教训被引用/命中一次（可附单次 token 成本用于热度剖析）；可能触发升级。返回 {:promoted, level} | :ok。"
+  def hit(id, cost \\ 0), do: GenServer.call(__MODULE__, {:hit, to_string(id), cost})
 
   @doc "记录 L3 工具失败；可能 deopt。返回 {:deopted, :l2} | :ok。"
   def fail(id), do: GenServer.call(__MODULE__, {:fail, to_string(id)})
@@ -40,20 +40,26 @@ defmodule Newbee.Evolution.JIT do
   @impl true
   def init(_), do: {:ok, %__MODULE__{items: load()}}
 
+  # 热度剖析（§6.2）：频率 × 单次成本 = 编译收益的简化实现——
+  # hits 触发升级，total_cost/hits 提供 avg_cost 供 evolver 判断收益
+  defp bump(item, cost) do
+    %{item | hits: item.hits + 1, total_cost: (item.total_cost || 0) + cost}
+  end
+
   @impl true
   def handle_call({:learn, id, note}, _from, state) do
-    item = %{id: id, level: :l1, note: note, hits: 0, fails: 0, module: nil}
+    item = %{id: id, level: :l1, note: note, hits: 0, fails: 0, total_cost: 0, module: nil}
     state = put_item(state, item)
     {:reply, :ok, state}
   end
 
-  def handle_call({:hit, id}, _from, state) do
+  def handle_call({:hit, id, cost}, _from, state) do
     case Map.fetch(state.items, id) do
       :error ->
         {:reply, :ok, state}
 
       {:ok, item} ->
-        item = %{item | hits: item.hits + 1}
+        item = bump(item, cost)
 
         {item, reply} =
           cond do
@@ -146,6 +152,7 @@ defmodule Newbee.Evolution.JIT do
                  note: i["note"] || "",
                  hits: i["hits"] || 0,
                  fails: i["fails"] || 0,
+                 total_cost: i["total_cost"] || 0,
                  module: i["module"]
                }}
             end)

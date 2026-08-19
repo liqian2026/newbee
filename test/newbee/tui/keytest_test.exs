@@ -82,6 +82,23 @@ defmodule Newbee.TUI.KeyTest do
     test "混合流：方向键后跟中文不出伪字符" do
       assert {[{:key, :left}, {:key, 0x4E2D}], ""} = Key.feed("\e[D中")
     end
+
+    test "孤立 ESC 留缓冲（reader 用 50ms 超时消歧，而非吞掉）" do
+      assert {[], "\e"} = Key.feed("\e")
+      # 后续字节到来：按序列正常解析（方向键）
+      assert {[{:key, :up}], ""} = Key.feed("\e", "[A")
+    end
+  end
+
+  describe "flush/1 空闲超时消歧（Esc 中断即时响应的关键）" do
+    test "孤立 ESC 超时后按裸 Esc 发出" do
+      assert {[{:key, :esc}], ""} = Key.flush("\e")
+    end
+
+    test "半截序列（CSI/UTF-8）超时后继续等待不误发" do
+      assert {[], "\e["} = Key.flush("\e[")
+      assert {[], "\xE4"} = Key.flush("\xE4")
+    end
   end
 
   describe "括号粘贴" do

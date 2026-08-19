@@ -59,16 +59,18 @@ defmodule Newbee.Staging do
   def handle_call({:approve, :all}, _from, state) do
     entries = Map.values(state) |> Enum.sort_by(& &1.id)
 
-    written =
-      Enum.map(entries, fn e ->
-        File.mkdir_p!(Path.dirname(e.path))
-        File.write!(e.path, e.content)
-        e.path
-      end)
+    case try_approve_all(entries) do
+      {:ok, written} ->
+        state = %{}
+        persist(state)
+        # 用户验收回流（§6.3）：approve 作为真实世界信号进指标/事件日志
+        Newbee.Bus.emit(:audit, {:audit, :approved, "user", written, :staging})
+        {:reply, {:ok, written}, state}
 
-    state = %{}
-    persist(state)
-    {:reply, {:ok, written}, state}
+      {:error, reason} ->
+        # 任一条目越界：整体拒绝落盘（原子），暂存区保留
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:approve, id}, _from, state) when is_integer(id) do
@@ -77,10 +79,15 @@ defmodule Newbee.Staging do
         {:reply, {:error, :not_staged}, state}
 
       {entry, rest} ->
-        File.mkdir_p!(Path.dirname(entry.path))
-        File.write!(entry.path, entry.content)
-        persist(rest)
-        {:reply, {:ok, [entry.path]}, rest}
+        case try_approve(entry) do
+          {:ok, path} ->
+            persist(rest)
+            Newbee.Bus.emit(:audit, {:audit, :approved, "user", [path], :staging})
+            {:reply, {:ok, [path]}, rest}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
     end
   end
 
@@ -88,6 +95,7 @@ defmodule Newbee.Staging do
     dropped = state |> Map.values() |> Enum.map(& &1.path)
     state = %{}
     persist(state)
+    Newbee.Bus.emit(:audit, {:audit, :rejected, "user", dropped, :staging})
     {:reply, {:ok, dropped}, state}
   end
 
@@ -98,12 +106,36 @@ defmodule Newbee.Staging do
 
       {entry, rest} ->
         persist(rest)
+        Newbee.Bus.emit(:audit, {:audit, :rejected, "user", [entry.path], :staging})
         {:reply, {:ok, [entry.path]}, rest}
     end
   end
 
   def handle_call(:list, _from, state) do
     {:reply, state |> Map.values() |> Enum.sort_by(& &1.id), state}
+  end
+
+  # 落盘前复核路径（§8 工作目录隔离：工程树或 ~/.newbee 内）
+  defp try_approve_all(entries) do
+    Enum.reduce_while(entries, {:ok, []}, fn e, {:ok, acc} ->
+      case try_approve(e) do
+        {:ok, path} -> {:cont, {:ok, [path | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, paths} -> {:ok, Enum.reverse(paths)}
+      other -> other
+    end
+  end
+
+  defp try_approve(entry) do
+    Newbee.Tools.Fs.guard_path!(entry.path)
+    File.mkdir_p!(Path.dirname(entry.path))
+    File.write!(entry.path, entry.content)
+    {:ok, entry.path}
+  rescue
+    ArgumentError -> {:error, :outside_project}
   end
 
   defp put_entry(state, entry) do

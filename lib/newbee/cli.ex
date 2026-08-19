@@ -20,9 +20,11 @@ defmodule Newbee.CLI do
     Task.start(fn -> Newbee.LLM.Client.prewarm(client) end)
 
     Newbee.Bus.subscribe()
-    spawn_link(fn -> printer() end)
+    spawn_link(fn -> printer(<<>>) end)
 
-    {:ok, kernel} = Newbee.DEE.Kernel.start_link(client: client, render: fn _ -> :ok end)
+    {:ok, kernel} =
+      Newbee.DEE.Kernel.start_link(client: client, auto_antibodies: true, render: fn _ -> :ok end)
+
     IO.puts("\e[2msession: #{session_id(kernel)}\e[0m")
 
     loop(kernel, client)
@@ -30,49 +32,122 @@ defmodule Newbee.CLI do
 
   # ── 事件打印（独立进程，实时流式） ──
 
-  defp printer do
+  defp printer(buffer) do
     receive do
       {:newbee_event, :text, {:text, delta}} ->
-        IO.write(delta)
+        printer(buffer_and_print_md(buffer, delta))
 
       {:newbee_event, :reasoning, {:reasoning, delta}} ->
-        IO.write("\e[2m" <> delta <> "\e[0m")
+        buf = flush_buffer(buffer)
+        IO.write("[2m" <> delta <> "[0m")
+        printer(buf)
 
       {:newbee_event, :tool_start, {:tool_start, "run_elixir", title, code}} ->
-        preview = code |> String.split("\n") |> Enum.take(3) |> Enum.join("\n")
-        ellipsis = if String.contains?(code, "\n"), do: " …", else: ""
-        IO.puts("\n\e[36m⏺\e[0m \e[1mrun_elixir\e[0m \e[2m#{title}\e[0m\n#{preview}#{ellipsis}")
+        buf = flush_buffer(buffer)
+        line = Newbee.TUI.Cards.tool_header("run_elixir", title) <> (Newbee.TUI.Cards.tool_preview(code) || "")
+        IO.puts("
+" <> line)
+        printer(buf)
 
       {:newbee_event, :tool_result, {:tool_result, _, text}} ->
-        {mark, body} =
-          case text do
-            "✓ ok\n" <> rest -> {"\e[32m  ⎿ ✓\e[0m", rest}
-            "✗ error\n" <> rest -> {"\e[31m  ⎿ ✗\e[0m", rest}
-            other -> {"\e[36m  ⎿\e[0m", other}
-          end
+        buf = flush_buffer(buffer)
+        IO.puts(Newbee.TUI.Cards.tool_footer(text) <> "
+")
+        printer(buf)
 
-        preview = body |> String.split("\n") |> Enum.take(6) |> Enum.join("\n    ")
-        IO.puts(mark <> " " <> preview <> "\n")
+      {:newbee_event, :tool_error, {:tool_error, text}} ->
+        buf = flush_buffer(buffer)
+        IO.puts(Newbee.TUI.Cards.error_line(text))
+        printer(buf)
+
+      {:newbee_event, :file_diff, {:file_diff, path, diff, stats}} ->
+        buf = flush_buffer(buffer)
+        IO.puts("
+")
+        Enum.each(Newbee.TUI.Cards.diff_card(path, diff, stats), &IO.puts/1)
+        printer(buf)
+
+      {:newbee_event, :permission_ask, {:permission_ask, preview}} ->
+        buf = flush_buffer(buffer)
+        first = preview |> String.split("
+") |> hd() |> String.slice(0, 80)
+        IO.puts("
+[33m? 允许执行？[y 允许 / 其他拒绝][0m [2m#{first}[0m")
+        printer(buf)
+
+      {:newbee_event, :advisor_note, {:advisor_note, text}} ->
+        buf = flush_buffer(buffer)
+        IO.puts("
+[38;5;117m\u25C9 advisor[0m #{text}")
+        printer(buf)
+
+      {:newbee_event, :worker_hint, {:worker_hint, sig}} ->
+        buf = flush_buffer(buffer)
+        IO.puts("[2m\u2691 进化线索已记录: #{String.slice(sig, 0, 60)}[0m")
+        printer(buf)
+
+      {:newbee_event, :compacted, {:compacted, n}} ->
+        buf = flush_buffer(buffer)
+        IO.puts("[2m\u23F3 历史已压缩 #{n} 条[0m")
+        printer(buf)
 
       {:newbee_event, :rule_hit, {:rule_hit, hits}} ->
+        buf = flush_buffer(buffer)
+
         Enum.each(hits, fn r ->
-          IO.puts("\e[33m⚑ 沉睡规则命中 [#{r.id}]\e[0m \e[2m#{r.injection}\e[0m")
+          IO.puts("[33m\u2691 沉睡规则命中 [#{r.id}][0m [2m#{r.injection}[0m")
         end)
 
+        printer(buf)
+
       {:newbee_event, :audit, {:audit, verdict, actor, target, ring}} ->
-        IO.puts("\e[2m⚖ 审计: #{verdict} #{actor} → ring#{ring} #{inspect(target) |> String.slice(0, 60)}\e[0m")
+        buf = flush_buffer(buffer)
+        IO.puts("[2m\u2696 审计: #{verdict} #{actor} \u2192 ring#{ring} #{inspect(target) |> String.slice(0, 60)}[0m")
+        printer(buf)
 
       {:newbee_event, :audit, {:audit, :dangerous_code, hits}} ->
-        IO.puts("\e[31m⚖ 审计: 危险代码模式 #{inspect(hits)}\e[0m")
+        buf = flush_buffer(buffer)
+        IO.puts("[31m\u2696 审计: 危险代码模式 #{inspect(hits)}[0m")
+        printer(buf)
 
       {:newbee_event, :error, {:error, e}} ->
-        IO.puts("\e[31m#{inspect(e)}\e[0m")
+        buf = flush_buffer(buffer)
+        IO.puts("[31m#{inspect(e)}[0m")
+        printer(buf)
 
       {:newbee_event, _, _} ->
-        :ok
+        printer(flush_buffer(buffer))
+    end
+  end
+
+  # ── 行缓冲 Markdown 渲染 ──
+
+  defp buffer_and_print_md(buffer, delta) do
+    combined = buffer <> delta
+
+    case String.split(combined, "\n") do
+      [_] ->
+        combined
+
+      parts ->
+        {completed, [remaining]} = Enum.split(parts, -1)
+
+        Enum.each(completed, fn line ->
+          IO.write(Newbee.Markdown.render(line) <> "\n")
+        end)
+
+        remaining
+    end
+  end
+
+  defp flush_buffer(<<>>), do: <<>>
+
+  defp flush_buffer(buffer) do
+    if String.trim_leading(buffer) != <<>> do
+      IO.write(Newbee.Markdown.render(buffer))
     end
 
-    printer()
+    <<>>
   end
 
   # ── 输入循环 ──
@@ -83,56 +158,91 @@ defmodule Newbee.CLI do
         :ok
 
       input ->
-        ctx = %{say: &IO.puts/1}
+        # 权限确认流（§8 ask 档）：kernel 在等待确认时，输入即 y/n 回复
+        if Newbee.DEE.Kernel.awaiting_permission?() do
+          ok = String.trim(input) in ["y", "Y", "yes", "YES"]
+          send(kernel, {:permission_reply, ok})
+          IO.puts(if ok, do: "✓ 已允许执行", else: "✗ 已拒绝执行")
+          loop(kernel, client)
+        else
+          ctx = %{say: &IO.puts/1}
 
-        case Newbee.Commands.handle(input, ctx |> Map.put(:kernel, kernel)) do
-          :quit ->
-            System.halt(0)
+          case Newbee.Commands.handle(input, ctx |> Map.put(:kernel, kernel)) do
+            :quit ->
+              System.halt(0)
 
-          :ok ->
-            loop(kernel, client)
+            :ok ->
+              loop(kernel, client)
 
-          :handled ->
-            loop(kernel, client)
+            :handled ->
+              loop(kernel, client)
 
-          {:resume, id} ->
-            GenServer.stop(kernel)
-            {:ok, kernel2} = resume_kernel(client, id)
-            loop(kernel2, client)
-
-          {:resume_picker, metas} ->
-            print_metas(metas)
-
-            case IO.gets("\e[36m选择编号或 id 前缀（回车取消）›\e[0m ") do
-              nil ->
-                loop(kernel, client)
-
-              sel ->
-                sel = String.trim(sel)
-
-                if sel == "" do
-                  loop(kernel, client)
-                else
-                  case Newbee.Commands.resolve(sel) do
-                    {:ok, id} ->
-                      GenServer.stop(kernel)
-                      {:ok, kernel2} = resume_kernel(client, id)
-                      loop(kernel2, client)
-
-                    {:candidates, ids} ->
-                      IO.puts("匹配多个: #{Enum.join(ids, " ")}")
-                      loop(kernel, client)
-
-                    :none ->
-                      IO.puts("没有匹配的会话")
-                      loop(kernel, client)
-                  end
+            {:restart} ->
+              # /model 切换：重建会话内核（保留原会话，模型换新）
+              sid =
+                case :sys.get_state(kernel) do
+                  %{session: %Newbee.Session{} = s} -> s.id
+                  _ -> nil
                 end
-            end
 
-          {:submit, text} ->
-            run_submit(kernel, text)
-            loop(kernel, client)
+              GenServer.stop(kernel)
+              client2 = Newbee.LLM.Config.client_for()
+              opts = if sid, do: [session_id: sid], else: []
+
+              {:ok, kernel2} =
+                Newbee.DEE.Kernel.start_link([client: client2, auto_antibodies: true, render: fn _ -> :ok end] ++ opts)
+
+              IO.puts("会话内核已重建（模型: #{client2.model}）")
+              loop(kernel2, client2)
+
+            {:resume, id} ->
+              GenServer.stop(kernel)
+              {:ok, kernel2} = resume_kernel(client, id)
+              loop(kernel2, client)
+
+            {:resume_picker, metas} ->
+              print_metas(metas)
+
+              case IO.gets("\e[36m选择编号或 id 前缀（回车取消）›\e[0m ") do
+                nil ->
+                  loop(kernel, client)
+
+                sel ->
+                  sel = String.trim(sel)
+
+                  if sel == "" do
+                    loop(kernel, client)
+                  else
+                    case Newbee.Commands.resolve(sel) do
+                      {:ok, id} ->
+                        GenServer.stop(kernel)
+                        {:ok, kernel2} = resume_kernel(client, id)
+                        loop(kernel2, client)
+
+                      {:candidates, ids} ->
+                        IO.puts("匹配多个: #{Enum.join(ids, " ")}")
+                        loop(kernel, client)
+
+                      :none ->
+                        IO.puts("没有匹配的会话")
+                        loop(kernel, client)
+                    end
+                  end
+              end
+
+            {:submit, text} ->
+              run_submit(kernel, text)
+              loop(kernel, client)
+
+            {:shell, cmd} ->
+              # !shell 命令卡片（与 TUI 一致）
+              result = Newbee.Tools.Run.sh(cmd, timeout: 300_000)
+              output = String.slice(result.output, 0, 8_000)
+              IO.puts("\n" <> Newbee.TUI.Cards.shell_header(cmd))
+              Enum.each(String.split(output, "\n"), &IO.puts/1)
+              IO.puts(Newbee.TUI.Cards.shell_footer(result))
+              loop(kernel, client)
+          end
         end
     end
   end
@@ -141,13 +251,15 @@ defmodule Newbee.CLI do
   def resume(id) do
     client = Newbee.LLM.Config.client_for()
     Newbee.Bus.subscribe()
-    spawn_link(fn -> printer() end)
+    spawn_link(fn -> printer(<<>>) end)
     {:ok, kernel} = resume_kernel(client, id)
     loop(kernel, client)
   end
 
   defp resume_kernel(client, id) do
-    {:ok, kernel} = Newbee.DEE.Kernel.start_link(client: client, session_id: id, render: fn _ -> :ok end)
+    {:ok, kernel} =
+      Newbee.DEE.Kernel.start_link(client: client, session_id: id, auto_antibodies: true, render: fn _ -> :ok end)
+
     meta = Newbee.Session.meta(id)
     IO.puts("\e[2m已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}\e[0m")
     {:ok, kernel}
@@ -164,8 +276,8 @@ defmodule Newbee.CLI do
 
   defp run_submit(kernel, text) do
     case Newbee.DEE.Kernel.submit(kernel, text) do
-      {:done, summary} -> IO.puts("\n\e[1m● \e[0m" <> summary <> "\n")
-      {:ask, q} -> IO.puts("\n\e[33m? \e[0m" <> q <> "\n")
+      {:done, summary} -> IO.puts("\n\e[1m● \e[0m" <> Newbee.Markdown.render(summary) <> "\n")
+      {:ask, q} -> IO.puts("\n\e[33m? \e[0m" <> Newbee.Markdown.render(q) <> "\n")
       {:text, _} -> IO.puts("")
       {:error, e} -> IO.puts("\e[31merror: #{inspect(e)}\e[0m")
     end

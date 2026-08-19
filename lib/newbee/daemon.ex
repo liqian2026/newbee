@@ -66,6 +66,10 @@ defmodule Newbee.Daemon do
       {:skipped, reason} ->
         Logger.info("evolver skipped: #{reason}")
 
+      {:suggested, proposals} ->
+        # 档位 :hint：只记录建议，不自动发布
+        Logger.info("evolver suggestions (#{length(proposals)}): #{inspect(proposals, limit: 3)}")
+
       results when is_list(results) ->
         Logger.info("evolver cycle: #{inspect(results, limit: 6)}")
 

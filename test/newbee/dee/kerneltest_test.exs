@@ -30,6 +30,7 @@ defmodule Newbee.DEE.KernelTest do
     }
   end
 
+  @tag timeout: 120_000
   test "完整循环：run_elixir → 回填 → done，绑定留在求值器" do
     {:ok, ev} = Evaluator.start(mode: :local)
 

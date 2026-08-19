@@ -28,6 +28,31 @@ defmodule Newbee.Evolution.BenchTest do
     assert failed == 0
   end
 
+  test "auto 抗体不再复现 → 过期删除且不判回归（自愈）" do
+    :ok = Bench.add_antibody("ab_stale", "1 + 1", {:expect_error, "NEVER_MATCHES"}, provenance: "auto")
+    {_passed, failed, details} = Bench.replay()
+    assert failed == 0
+    # 文件已被删除
+    refute Enum.any?(Bench.antibodies(), &(&1["id"] == "ab_stale"))
+    assert Enum.any?(details, fn {id, ok, d} -> id == "ab_stale" and ok and d =~ "stale" end)
+  end
+
+  test "auto 抗体仍复现 → 保留且通过" do
+    :ok = Bench.add_antibody("ab_still", "raise \"still-boom\"", {:expect_error, "still-boom"}, provenance: "auto")
+    {_, failed, _} = Bench.replay()
+    assert failed == 0
+    assert Enum.any?(Bench.antibodies(), &(&1["id"] == "ab_still"))
+  end
+
+  test "人工 expect_error 抗体失效 → 如实判回归（不自愈）" do
+    :ok = Bench.add_antibody("ab_manual", "1 + 1", {:expect_error, "NEVER_MATCHES"})
+    {_, failed, details} = Bench.replay()
+    assert failed >= 1
+    assert Enum.any?(details, fn {id, ok, _} -> id == "ab_manual" and not ok end)
+    # 不被删除
+    assert Enum.any?(Bench.antibodies(), &(&1["id"] == "ab_manual"))
+  end
+
   test "回归能被检出（故意失败的抗体）" do
     :ok = Bench.add_antibody("ab_fail", "1 + 1", {:expect_ok, "999"})
     {_, failed, details} = Bench.replay()

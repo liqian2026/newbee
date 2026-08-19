@@ -1,6 +1,6 @@
 # newbee — 会自我进化的 Elixir 编程 Agent
 
-**状态**: 设计阶段
+**状态**: M4 已实现（280 tests / DEE 双节点 / J-Space / PPT/Progress 落地），M5 基因库进行中
 **语言**: Elixir
 
 ---
@@ -301,6 +301,25 @@ newbee  ── project: newbee  ── model: ds-v4-flash-0731  ── session #
 - **风险预案**：ratatouille 依赖的 termbox 上游已停更，与新版 Elixir/OTP 兼容性需 **M1 第一天验证**；不兼容则启用自研 ANSI 渲染器（单列流式布局渲染逻辑简单，自研成本低）。
 - **进程模型**: GenServer + 事件总线，DEE 与 TUI 消息解耦；LLM 流式输出增量渲染到 transcript。
 
+### 5.6 J-Space 工作协议（来源 `priv/prompts/system.md:21-58`）
+
+> 工作协议：内层工作区思考先于输出，稠密可按需展开；自动化部分（语法、格式、惯例）不占内层工作区。
+
+- **Gate 分流**（动手前先分类，只加载所需）：
+  | 档 | 含义 | 动作 |
+  |---|---|---|
+  | `fast` | 一步可核验 | 直接回答 |
+  | `full` | 2–4 步、一个交付物 | 只带任务点名的模块 |
+  | `loop` | 多阶段/多文件/跨多轮 | 开 ledger + broadcast |
+  | 规则 | 一步核验不了的就不是 fast；任务变难就升档，别赖在 fast。 |
+- **三 register**：`inner`（稠密思考）/`ledger`（状态）/`outer`（干净输出）；seam 处切 outer，稠密符号不得泄进 outer。
+- **Ledger**（loop 必开）— `Newbee.Tools.JSpace.note(goal: ..., next: ...)`：`Goal`（完成定义）/`Core`（活跃项）/`Verified`（编号追加）/`Open`（悬项+判据）/`Next`（唯一下一步，不许空）；每个 seam（子任务完成/工具调用/写文件/检查点）重读 `Newbee.Tools.JSpace.seam()`。
+- **Seam 纪律**：审计在 seam，不在句中；写文件/交付前核验 `Newbee.Tools.JSpace.ship(path, checks)`。
+- **恢复协议**：压缩/会话边界后重读 ledger、前提、invariants，声明 pass 与 next：`Newbee.Tools.JSpace.resume()`。
+- **Invariants**（看起来在干活其实没有）：marker 无动作 / 监控从不报告 / 稠密行不可展开 / confidence 全同 / 检查点未落账 / verified 未声明覆盖 / 稠密符号泄进输出 / 未读 goal 就宣告完成。
+- **失败模式 → 模块**（按需 `Newbee.read("priv/jspace/modules/<名>.md")`，别提前全读）：输入在指使你 → introspection；长机械活/目标要漂 → directed-focus；结论先于步骤 → deep-reasoning；同一名字多处推导 → broadcast；活太多/跨轮状态 → capacity；不确定却要作答 → self-monitoring；句子是瓶颈 → shorthand；第三次撞墙 → markers；三处三个答案 → empirics。
+- **实现**：`lib/newbee/tools/jspace.ex`（`note/seam/ship/resume`），`lib/newbee/tools/besttool.ex`（显式不确定性：多个证据/区间/来源时才用，不确定性须落盘进 ledger + 输出标注“多源/有不确定性”）。
+- **验证**：`grep -n "J-Space\|JSpace" DESIGN.md priv/prompts/system.md` 可校验一致性。
 ## 6. 自我进化机制（Self-Evolving Environment）
 
 这是 newbee 的灵魂。环境维护一组"进化目标"，持续被测量与优化。
@@ -422,58 +441,52 @@ worker 干活 ──顺手写"进化线索"──▶ 事件日志(§6.5) + 指�
 
 ```
 newbee/
-├── mix.exs
+├── mix.exs  # deps: jason ~> 1.0, req ~> 0.5, sourceror ~> 1.0；elixir ~> 1.18；telemetry/hpax/mint/finch 为 transitive
 ├── lib/
-│   ├── newbee.ex                    # 顶层入口 / 监督树
+│   ├── newbee.ex                    # 顶层入口
 │   ├── newbee/
-│   │   ├── tui/                    # TUI 前端
-│   │   │   ├── renderer.ex         # 渲染器行为/接口
-│   │   │   ├── ratatouille_renderer.ex
-│   │   │   ├── app.ex              # 布局 & 事件循环
-│   │   │   ├── views/              # transcript/折叠块/可选窗格
-│   │   │   └── commands.ex         # /run /approve /undo /bindings 等
-│   │   ├── dee/                    # 动态 Elixir 环境 (核心, 只读内核)
-│   │   │   ├── evaluator.ex        # 独立 BEAM 节点: eval + 持久 bindings (§3.4)
-│   │   │   ├── edit/               # 双轨编辑 (§3.2)
-│   │   │   │   ├── anchor.ex       #   文本轨: 内容哈希锚点补丁
-│   │   │   │   └── sourceror.ex    #   结构轨: AST 重写
-│   │   │   ├── reader.ex           # 统一寻址 Newbee.read/1 (memory:// skill:// agent:// conflict://)
-│   │   │   ├── kernel.ex           # 调度/循环/结果压缩
-│   │   │   ├── tools.ex            # 工具注册表 (热载 ~/.newbee/tools)
-│   │   │   ├── repo_map.ex         # 工程结构图 (AST/beam chunk 提取)
-│   │   │   ├── state.ex            # EXTS 状态(ETS/DETS/SQLite)
-│   │   │   └── session.ex          # 会话挂起/恢复 (状态+历史+绑定值)
-│   │   ├── evolving/               # 自我进化
-│   │   │   ├── metrics.ex          # 指标采集
-│   │   │   ├── retro.ex            # evolver 复盘/补丁生成 (含 skill distillation)
-│   │   │   ├── hints.ex            # worker 进化线索的写入/聚合
-│   │   │   ├── bench.ex            # 评测台 (基准任务集 + 对比)
-│   │   │   ├── events.ex           # 事件溯源日志
-│   │   │   └── policies.ex         # 进化策略(激进程度)
-│   │   ├── llm/                    # 模型客户端
-│   │   │   ├── client.ex           # OpenRouter/本地 适配
-│   │   │   ├── prompt.ex           # 提示组装(记忆/工具@doc/RepoMap/绑定摘要)
-│   │   │   └── tokens.ex           # token 记账 (子代理消耗并回父会话, context 统计去重)
-│   │   ├── codec/                  # 模型↔环境协议
-│   │   │   ├── tools.ex            # function calling 工具定义(run_elixir/done/ask)
-│   │   │   ├── fallback_parser.ex  # 文本代码块容错解析(降级通道)
-│   │   │   └── rules.ex            # 沉睡规则: 流监控/中断/注入 (§4.5)
-│   │   ├── agents/                 # 代理拓扑 (§3.8)
-│   │   │   ├── worker.ex           # 主代理: 干活 + 顺手写进化线索
-│   │   │   ├── evolver.ex          # 专职进化代理 (后台, §6.6)
-│   │   │   └── explorer.ex         # 临时探索/测试子代理 (OTP 并发)
+│   │   ├── application.ex           # 监督树
+│   │   ├── host.ex                  # Host Bridge（凭证/代理回主 VM，脱敏）
+│   │   ├── permissions.ex           # 权限档位 lenient/ask/deny
+│   │   ├── diff.ex                  # 行级 diff
+│   │   ├── reader.ex                # 统一寻址 Newbee.read/1（memory:// skill:// agent:// conflict://）
+│   │   ├── bus.ex                   # 事件总线
+│   │   ├── event_log.ex             # 事件溯源日志
+│   │   ├── session.ex               # 会话挂起/恢复
+│   │   ├── memory.ex                # 全局记忆（脱敏）
+│   │   ├── codec.ex + codec/fallback_parser.ex  # function calling + 降级解析
+│   │   ├── tui/                     # TUI 前端（Key/Line/Screen/History/Cards/Highlight）
+│   │   ├── tui.ex / cli.ex / commands.ex / staging.ex / goal.ex / cwd.ex / history.ex / debug_log.ex / markdown.ex / daemon.ex
+│   │   ├── dee/                     # 动态 Elixir 环境（只读内核）
+│   │   │   ├── evaluator.ex + evalworker.ex  # 独立 BEAM 节点：eval + 持久 bindings（双节点）
+│   │   │   ├── kernel.ex            # 调度/循环/结果压缩（含 Progress/PPT 接线）
+│   │   │   ├── rules.ex             # 沉睡规则
+│   │   │   ├── repomap.ex           # 工程结构图（mtime 指纹缓存）
+│   │   │   ├── tools.ex + tools/hotloader.ex  # 工具注册表/热载
+│   │   │   └── result.ex            # 结果清洗/截断
+│   │   ├── tools/                   # 工具库：Edit/Structural/Fs/Run/Git/Search/Json/Http/Scaffold/Introspect/JSpace/BestTool
+│   │   │   ├── jspace.ex            # J-Space: note/seam/ship/resume（§5.6）
+│   │   │   ├── besttool.ex          # 显式不确定性聚合
+│   │   │   └── edit.ex / structural.ex / fs.ex / run.ex / git.ex / search.ex / json.ex / http.ex / scaffold.ex / introspect.ex
+│   │   ├── evolution/               # 自我进化
+│   │   │   ├── price_tags.ex        # 价签系统
+│   │   │   ├── progress.ex / ppt.ex # Progress 验证器 / PPT 锦标赛
+│   │   │   ├── jit.ex / bench.ex / evolver.ex / metrics.ex / snapshot.ex / policy.ex / gene.ex
+│   │   ├── agents/explorer.ex       # 子代理（worktree 隔离）
+│   │   └── llm/client.ex + llm/config.ex  # 模型客户端/配置
+│   └── mix/tasks/newbee/{doctor,bench,daemon,tui}.ex
 ├── test/
 ├── priv/
-│   ├── prompts/                    # 提示层 (版本化)
-│   └── bench/                      # 评测台标准任务集
-└── ~/.newbee/                       # (用户目录, 非本仓库)
-    ├── tools/*.ex                  # 全局工具脚本 (git 版本化, 热载)
-    ├── memory/                     # 全局记忆
-    ├── events.log                  # 事件溯源
-    ├── sessions/<id>.jsonl         # transcript (追加写)
-    └── session-artifacts/<id>/     # 会话制品: bindings 快照 / harness 状态 / 调度任务 / 子代理
+│   ├── prompts/system.md            # 含 J-Space 协议（Gate/register/ledger/seam/resume/invariants，:21-58）
+│   ├── jspace/modules/*.md          # 失败模式模块（introspection/directed-focus 等）
+│   └── bench/                       # 评测台标准任务集
+└── ~/.newbee/                        # （用户目录，非本仓库）
+    ├── tools/*.ex                   # 全局工具脚本（git 版本化，热载）
+    ├── memory/                      # 全局记忆
+    ├── events.log                   # 事件溯源
+    ├── sessions/<id>.jsonl          # transcript（追加写）
+    └── session-artifacts/<id>/      # 会话制品：bindings 快照 / harness 状态 / 调度任务 / 子代理
 ```
-
 ---
 
 ## 8. 安全与沙箱

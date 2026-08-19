@@ -195,7 +195,8 @@ defmodule Newbee.TUI.Screen do
     out = out ++ ["\e[#{rows - 2};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
     out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
     out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
-    out = out ++ ["\e[#{line_no};#{cursor_col}H"]
+    # 光标定位到输入行后重新显示（启动时 \e[?25l 隐藏，每帧补 \e[?25h）
+    out = out ++ ["\e[#{line_no};#{cursor_col}H\e[?25h"]
     Port.command(port, out)
     %__MODULE__{prev: body, cols: cols, rows: rows, port: port}
   end
@@ -214,7 +215,8 @@ defmodule Newbee.TUI.Screen do
     out = out ++ ["\e[#{rows - 2};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
     out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
     out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
-    out = out ++ ["\e[#{line_no};#{cursor_col}H"]
+    # 光标定位到输入行后重新显示（启动时 \e[?25l 隐藏，每帧补 \e[?25h）
+    out = out ++ ["\e[#{line_no};#{cursor_col}H\e[?25h"]
     Port.command(screen.port, out)
     %__MODULE__{prev: body, cols: cols, rows: rows, port: screen.port}
   end

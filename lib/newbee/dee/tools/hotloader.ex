@@ -51,6 +51,47 @@ defmodule Newbee.DEE.Tools.HotLoader do
     end
   end
 
+  @doc """
+  卸载一个工具：删除文件 + git commit + 节点 purge 模块。
+  purge 后节点内该模块的旧版本代码全部失效（§3.5 热替换语义）。
+  返回 {:ok, path} | {:error, reason}。
+  """
+  def remove(name) do
+    name = validate_name!(name)
+    path = Path.join(global_dir(), "#{name}.ex")
+
+    if File.exists?(path) do
+      File.rm(path)
+
+      with :ok <- git_commit(path, "remove tool #{name}") do
+        module = Module.concat(["Newbee.Tools", name])
+
+        if node = current_node() do
+          :rpc.call(node, :code, :delete, [module], 30_000)
+          :rpc.call(node, :code, :purge, [module], 30_000)
+        end
+
+        {:ok, path}
+      end
+    else
+      {:error, :not_found}
+    end
+  end
+
+  # 当前求值器主节点（HotLoader 在主 VM 被调用时）
+  defp current_node do
+    if Process.whereis(Newbee.DEE.Evaluator) do
+      case Newbee.DEE.Evaluator.info() do
+        %{node: node} when is_atom(node) -> node
+        _ -> nil
+      end
+    else
+      nil
+    end
+  rescue
+    _ -> nil
+  end
+
   @doc "把工具目录全部编译加载到目标节点（不存在则跳过）。"
   def load_into_node(nil), do: :ok
   def load_into_node(node) when not is_atom(node), do: :ok

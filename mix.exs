@@ -24,6 +24,7 @@ defmodule Newbee.MixProject do
 
   defp deps do
     [
+      {:jason, "~> 1.0"},
       {:req, "~> 0.5"},
       {:sourceror, "~> 1.0"}
     ]

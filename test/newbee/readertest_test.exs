@@ -1,4 +1,4 @@
-defmodule NewbeeTest do
+defmodule Newbee.ReaderTest do
   use ExUnit.Case, async: true
 
   test "read 裸路径读文件" do

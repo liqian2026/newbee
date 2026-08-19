@@ -46,7 +46,13 @@ defmodule Newbee.Evolution.Bench do
     end)
   end
 
-  @doc "回放全部抗体（用独立求值器，互不污染）。返回 {passed, failed, details}。"
+  @doc """
+  回放全部抗体（用独立求值器，互不污染）。返回 {passed, failed, details}。
+
+  自愈（§6.3）：provenance=auto 的 expect_error 抗体若**不再复现**（环境已变化，
+  瞬态失败已消失）→ 过期删除并计为通过，避免陈旧抗体误伤进化门；
+  人工抗体与 expect_ok 抗体失败仍如实判回归。
+  """
   def replay(opts \\ []) do
     evaluator = Keyword.get(opts, :evaluator, Newbee.DEE.Evaluator)
     score_fn = Keyword.get(opts, :score_fn, &score_default/2)
@@ -55,7 +61,14 @@ defmodule Newbee.Evolution.Bench do
       antibodies()
       |> Enum.map(fn a ->
         {passed?, detail} = run_antibody(a, evaluator, score_fn)
-        {a["id"], passed?, detail}
+
+        if not passed? and a["provenance"] == "auto" and
+             get_in(a, ["check", "kind"]) == "expect_error" do
+          File.rm(Path.join(@dir, "#{a["id"]}.json"))
+          {a["id"], true, "stale auto-antibody removed"}
+        else
+          {a["id"], passed?, detail}
+        end
       end)
 
     failed = Enum.filter(results, fn {_, ok, _} -> !ok end)

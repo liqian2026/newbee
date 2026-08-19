@@ -22,4 +22,13 @@ defmodule Newbee.DEE.ResultTest do
     assert out =~ "✗"
     assert out =~ "boom"
   end
+
+  test "tuple 被当字符串使用时附带修复示例" do
+    error = "** (Protocol.UndefinedError) protocol String.Chars not implemented for Tuple"
+    out = Result.render(%{status: :error, error: error, output: ""})
+
+    assert out =~ "{:ok, content}"
+    assert out =~ "IO.puts(content)"
+    assert out =~ "读取失败"
+  end
 end

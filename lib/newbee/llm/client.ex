@@ -29,6 +29,25 @@ defmodule Newbee.LLM.Client do
   message 含 "content" 与 "tool_calls"（可能为空列表）。
   """
   def stream_chat(%__MODULE__{} = client, messages, on_text \\ fn _ -> :ok end, on_reasoning \\ fn _ -> :ok end) do
+    if interrupted?() do
+      {:interrupted, ""}
+    else
+      parent = self()
+      ref = make_ref()
+
+      {worker, monitor} =
+        spawn_monitor(fn ->
+          result = stream_chat_request(client, messages, on_text, on_reasoning)
+          send(parent, {:stream_chat_result, ref, result})
+        end)
+
+      await_stream_chat(worker, monitor, ref)
+    end
+  end
+
+  # Req.request/1 在收到首个响应前可能同步等待连接/首 token，
+  # 所以整个请求放到可杀的 worker；调用方每 50ms 检查一次 Esc 标志。
+  defp stream_chat_request(%__MODULE__{} = client, messages, on_text, on_reasoning) do
     Newbee.DebugLog.log(:llm, "start model=#{client.model} messages=#{length(messages)}")
     t0 = System.monotonic_time(:millisecond)
 
@@ -99,6 +118,26 @@ defmodule Newbee.LLM.Client do
 
     Newbee.DebugLog.log(:llm, "done in #{System.monotonic_time(:millisecond) - t0}ms result=#{elem(result, 0)}")
     result
+  end
+
+  defp await_stream_chat(worker, monitor, ref) do
+    receive do
+      {:stream_chat_result, ^ref, result} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^worker, _reason} ->
+        {:error, :stream_worker_stopped}
+    after
+      50 ->
+        if interrupted?() do
+          Process.exit(worker, :kill)
+          Process.demonitor(monitor, [:flush])
+          {:interrupted, ""}
+        else
+          await_stream_chat(worker, monitor, ref)
+        end
+    end
   end
 
   @doc """

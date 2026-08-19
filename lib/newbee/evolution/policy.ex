@@ -11,7 +11,8 @@ defmodule Newbee.Evolution.Policy do
   """
 
   @levels [:off, :hint, :background, :auto]
-  @default :background
+  # DESIGN §6.6：默认 :hint——evolver 只产出建议，用户逐个 /approve 后热载
+  @default :hint
   @config Path.join(System.user_home!(), ".newbee/config.json")
 
   @doc "合法档位列表。"

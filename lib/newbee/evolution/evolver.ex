@@ -9,6 +9,7 @@ defmodule Newbee.Evolution.Evolver do
   """
 
   require Logger
+  alias Newbee.Evolution.Policy
 
   @hints Path.join(System.user_home!(), ".newbee/hints.jsonl")
   @evolog Path.join(System.user_home!(), ".newbee/evolution/log.jsonl")
@@ -39,9 +40,7 @@ defmodule Newbee.Evolution.Evolver do
   client_fun 可注入（测试用假客户端）。
   """
   def run_once(opts \\ []) do
-    policy = effective_policy()
-
-    if policy == :off do
+    if Policy.get() == :off do
       {:skipped, :policy_off}
     else
       do_run(opts)
@@ -56,22 +55,6 @@ defmodule Newbee.Evolution.Evolver do
       {:error, {kind, reason}}
   end
 
-  # Policy.set/1 把档位原子写成 JSON 字符串（"off"），而 Policy.get/0 的守卫用
-  # 原子列表比较（"off" in [:off, ...] 恒 false）→ 一律退回 :background，:off
-  # 信息丢失。这里直接从 config 读原始档位，避免依赖该行为。
-  defp effective_policy do
-    case File.read(Path.join(System.user_home!(), ".newbee/config.json")) do
-      {:ok, body} ->
-        case Jason.decode(body) do
-          {:ok, %{"policy" => p}} when p in ~w(off hint background auto) -> String.to_atom(p)
-          _ -> :background
-        end
-
-      _ ->
-        :background
-    end
-  end
-
   defp do_run(opts) do
     hints = take_hints()
     jit_hot = Newbee.Evolution.JIT.list() |> Enum.filter(&(&1.level == :l2_hot))
@@ -81,7 +64,19 @@ defmodule Newbee.Evolution.Evolver do
       {:skipped, :nothing_to_evolve}
     else
       proposals = synthesize(hints, jit_hot, metrics, opts)
-      publish(proposals, opts)
+      route(proposals, opts)
+    end
+  end
+
+  # 按进化档位路由（§6.6）：
+  #   :hint       → 只产出建议，不发布（用户 /policy background 或逐个采纳）
+  #   :background / :auto → 验证通过即发布（:auto 含 prompt/策略层变更，暂同 background）
+  defp route([], _opts), do: {:skipped, :nothing_to_evolve}
+
+  defp route(proposals, opts) do
+    case Policy.get() do
+      :hint -> {:suggested, proposals}
+      _ -> publish(proposals, opts)
     end
   end
 

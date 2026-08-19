@@ -85,14 +85,6 @@ defmodule Newbee.TUI.Key do
   # 其余 C0 控制字节：吞掉
   defp next_event(<<ch>> <> rest) when ch < 32, do: {:event, {:key, :unknown}, rest}
 
-  # ESC：进入序列解析
-  defp next_event(<<27>> <> rest) do
-    case parse_escape(rest) do
-      {:seq, ev, remaining} -> {:event, ev, remaining}
-      :need_more -> :need_more
-    end
-  end
-
   # 可打印 ASCII
   defp next_event(<<ch>> <> rest) when ch < 127, do: {:event, {:key, ch}, rest}
 
@@ -212,6 +204,13 @@ defmodule Newbee.TUI.Key do
       [_] -> {:more, buf}
     end
   end
+
+  @doc """
+  空闲超时触发时解析残留缓冲（reader 的 50ms 消歧窗口用）：
+  孤立 ESC → 裸 Esc；其余（半截 UTF-8/CSI）继续等待。
+  """
+  def flush(<<27>>), do: {[{:key, :esc}], <<>>}
+  def flush(buf), do: {[], buf}
 
   @doc """
   规整粘贴正文：\r\n -> \n、孤立 \r -> \n、去尾换行。

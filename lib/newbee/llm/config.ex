@@ -41,6 +41,36 @@ defmodule Newbee.LLM.Config do
     )
   end
 
+  @doc """
+  切换默认模型（/model <id>）：改写 roles.default.model，落盘到
+  当前生效的配置文件（找不到配置文件则创建 ~/.newbee/model.json）。
+  """
+  def set_default_model(model_id) do
+    if is_binary(model_id) and String.trim(model_id) != "" and String.contains?(model_id, "/") do
+      cfg = load()
+      default = get_in(cfg, ["roles", "default"]) || %{"provider" => "openrouter"}
+      default = Map.put(default, "model", String.trim(model_id))
+      cfg = put_in(cfg, ["roles", "default"], default)
+
+      target =
+        Enum.find(
+          [
+            System.get_env("NEWBEE_MODEL_JSON"),
+            "model.json",
+            "model.local.json",
+            Path.join([System.user_home!(), ".newbee", "model.json"])
+          ],
+          &(&1 && File.exists?(&1))
+        ) || Path.join(System.user_home!(), ".newbee/model.json")
+
+      File.mkdir_p!(Path.dirname(target))
+      File.write!(target, Jason.encode_to_iodata!(cfg, pretty: true))
+      :ok
+    else
+      {:error, :bad_model_id}
+    end
+  end
+
   @doc "当前配置的人类可读描述（给 /model 命令用）。"
   def describe do
     cfg = load()

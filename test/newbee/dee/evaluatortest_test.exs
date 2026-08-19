@@ -40,6 +40,15 @@ defmodule Newbee.DEE.EvaluatorTest do
     assert r.error =~ "timeout"
   end
 
+  test "外部 interrupt 可杀掉正在运行的 cell，worker 仍可复用", %{ev: ev} do
+    task = Task.async(fn -> Evaluator.eval(ev, "Process.sleep(:infinity)") end)
+    assert wait_until(fn -> is_pid(Newbee.DEE.EvalWorker.active_pid(ev)) end, 5_000)
+
+    assert :ok = Evaluator.interrupt(ev)
+    assert %{status: :error, error: "interrupted"} = Task.await(task, 5_000)
+    assert %{status: :ok, value: "2"} = Evaluator.eval(ev, "1 + 1")
+  end
+
   test "bindings_summary 只给摘要不给内容", %{ev: ev} do
     Evaluator.eval(ev, "secret = \"x\" |> String.duplicate(100_000)", [])
     [b] = Evaluator.bindings_summary(ev)
@@ -52,5 +61,16 @@ defmodule Newbee.DEE.EvaluatorTest do
     Evaluator.eval(ev, "x = 1", [])
     Evaluator.reset(ev)
     assert Evaluator.bindings_summary(ev) == []
+  end
+
+  defp wait_until(predicate, remaining) when remaining <= 0, do: predicate.()
+
+  defp wait_until(predicate, remaining) do
+    if predicate.() do
+      true
+    else
+      Process.sleep(10)
+      wait_until(predicate, remaining - 10)
+    end
   end
 end

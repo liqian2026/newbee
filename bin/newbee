@@ -52,6 +52,17 @@ case "${1:-}" in
     exec mix newbee.daemon "$@"
     ;;
 
+  attach)
+    # 接回最近会话（环境记忆仍在 ~/.newbee，§3.8）
+    LATEST=$(ls -t "$HOME/.newbee/sessions/"*.jsonl 2>/dev/null | head -1)
+    if [ -z "$LATEST" ]; then
+      echo "没有可附加的会话（~/.newbee/sessions/ 为空）"
+      exit 1
+    fi
+    ID=$(basename "$LATEST" .jsonl)
+    exec mix newbee -r "$ID"
+    ;;
+
   bench)
     shift
     exec mix newbee.bench "$@"

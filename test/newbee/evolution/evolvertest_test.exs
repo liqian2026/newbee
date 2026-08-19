@@ -25,7 +25,9 @@ defmodule Newbee.Evolution.EvolverTest do
     assert {:skipped, :nothing_to_evolve} = Evolver.run_once(client_fun: fn _, _ -> {:error, :no_call} end)
   end
 
-  test "合成规则提案并发布（假 LLM 出 JSON）" do
+  test "合成规则提案并发布（假 LLM 出 JSON，档位 :background）" do
+    Newbee.Evolution.Policy.set(:background)
+    on_exit(fn -> Newbee.Evolution.Policy.set(:hint) end)
     Evolver.hint("总忘加文档")
 
     canned = fn _messages, _on_text ->
@@ -40,6 +42,25 @@ defmodule Newbee.Evolution.EvolverTest do
     results = Evolver.run_once(client_fun: canned)
     assert Enum.any?(results, &match?({:published, {:rule, "evo-rule-test"}}, &1))
     assert [%{id: "evo-rule-test"}] = Newbee.DEE.Rules.check("defmodule X do")
+  end
+
+  test "档位 :hint 只产出建议不发布（DESIGN §6.6）" do
+    Newbee.Evolution.Policy.set(:hint)
+    Evolver.hint("总忘加文档")
+
+    canned = fn _messages, _on_text ->
+      {:ok,
+       %{
+         "role" => "assistant",
+         "content" => ~s([{"type":"rule","id":"evo-hint-test","pattern":"defmodule.*do$","injection":"记得写 moduledoc"}]),
+         "tool_calls" => []
+       }, %{}}
+    end
+
+    assert {:suggested, proposals} = Evolver.run_once(client_fun: canned)
+    assert [%{"type" => "rule", "id" => "evo-hint-test"}] = proposals
+    # 未发布：规则不存在
+    refute Enum.any?(Newbee.DEE.Rules.list(), &(&1.id == "evo-hint-test"))
   end
 
   test "policy=:off 时整体跳过" do

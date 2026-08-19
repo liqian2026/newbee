@@ -13,9 +13,9 @@ defmodule Newbee.Evolution.PolicyTest do
     :ok
   end
 
-  test "默认 :background" do
+  test "默认 :hint（DESIGN §6.6：只建议不发布）" do
     File.rm(Path.join(System.user_home!(), ".newbee/config.json"))
-    assert Policy.get() == :background
+    assert Policy.get() == :hint
   end
 
   test "set/get 持久化" do

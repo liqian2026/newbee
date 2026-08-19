@@ -29,6 +29,9 @@ defmodule Newbee.TUI do
             client: nil,
             busy: false,
             submit_pid: nil,
+            submit_kind: nil,
+            pending_inputs: [],
+            picker: nil,
             screen: nil,
             page: 0,
             streaming: false,
@@ -41,6 +44,8 @@ defmodule Newbee.TUI do
             usage: %{},
             pane: nil,
             out: nil,
+            awaiting_permission: false,
+            text_buffer: <<>>,
             last_paint: 0
 
   @scrollback 5_000
@@ -61,7 +66,8 @@ defmodule Newbee.TUI do
     Task.start(fn -> Newbee.LLM.Client.prewarm(client) end)
     Newbee.Bus.subscribe()
 
-    {:ok, kernel} = Newbee.DEE.Kernel.start_link(client: client, render: fn _ -> :ok end)
+    {:ok, kernel} =
+      Newbee.DEE.Kernel.start_link(client: client, auto_antibodies: true, render: fn _ -> :ok end)
 
     # 输出走独立 fd 端口：IO.getn 挂起时 group leader 会排队所有输出
     # （"不输入就不输出"的根因），端口直写 tty 与输入解耦。
@@ -83,11 +89,16 @@ defmodule Newbee.TUI do
       state
       |> push_line("\e[1mnewbee\e[0m TUI - #{client.model} · policy=#{Newbee.Evolution.Policy.get()}")
       |> push_line("\e[2m命令: #{Enum.join(Newbee.Commands.commands(), " ")}\e[0m")
-      |> push_line("\e[2m↑↓ 历史 · PgUp/PgDn 翻屏 · Tab 补全 · Esc 中断 · Ctrl-C 退出 · Ctrl-L 重绘\e[0m")
+      |> push_line("\e[2m↑↓ 历史 · PgUp/PgDn 翻屏 · Tab 补全 · Esc 中断 · Ctrl-C 退出 · Ctrl-L 重绘 · Ctrl-T 窗格/队列\e[0m")
       |> push_line("\e[2msession: #{session_id(kernel)}\e[0m")
 
     parent = self()
+    # 字节泵（独占阻塞读）+ 事件 reader（receive 驱动）：
+    # reader 的 50ms 空闲超时消歧孤立 ESC——Esc 中断才能即时响应。
+    # 泵必须把原始字节发给 reader，而不是发给 TUI 主循环；主循环只接收
+    # reader 解码后的 {:key, ...} 事件，否则输入会被静默丢弃。
     reader = spawn_link(fn -> reader_loop(parent, <<>>, :normal, <<>>) end)
+    spawn_link(fn -> pump(reader) end)
 
     try do
       loop(paint(state, true), reader)
@@ -98,18 +109,28 @@ defmodule Newbee.TUI do
     end
   end
 
-  # ── 输入 reader 进程：tty_sl 字节 -> 事件 ──
+  # ── 输入：字节泵 + 事件 reader（tty_sl 字节 -> 事件）──
 
-  # paste 态：累积可打印字符，直到 :paste_end
-  defp reader_loop(parent, buf, :paste, paste_buf) do
+  # 字节泵：独占阻塞读（IO.getn），字节即时消息化发给 reader。
+  # 与 reader 分离后，reader 才能用 receive-timeout 消歧孤立 ESC。
+  defp pump(parent) do
     case IO.getn("", 1) do
       :eof ->
-        send(parent, {:paste, paste_buf})
+        send(parent, {:tty_eof, :ok})
 
       {:error, _} ->
         :ok
 
       ch ->
+        send(parent, {:tty, ch})
+        pump(parent)
+    end
+  end
+
+  # paste 态：累积可打印字符，直到 :paste_end
+  defp reader_loop(parent, buf, :paste, paste_buf) do
+    receive do
+      {:tty, ch} ->
         {events, rest} = Key.feed(buf, ch)
 
         {paste_buf, events} =
@@ -131,18 +152,19 @@ defmodule Newbee.TUI do
         else
           reader_loop(parent, rest, :paste, paste_buf)
         end
+
+      {:tty_eof, :ok} ->
+        send(parent, {:paste, paste_buf})
     end
   end
 
   defp reader_loop(parent, buf, :normal, _) do
-    case IO.getn("", 1) do
-      :eof ->
-        send(parent, {:key, :ctrl_d})
+    # 缓冲里只有孤立 ESC 时启用 50ms 空闲超时（xterm 同款消歧）：
+    # 无后续字节 → 裸 Esc（中断即时响应）；有后续字节（方向键等）→ 正常解析
+    timeout = if buf == <<27>>, do: 50, else: :infinity
 
-      {:error, _} ->
-        :ok
-
-      ch ->
+    receive do
+      {:tty, ch} ->
         {events, rest} = Key.feed(buf, ch)
 
         Enum.each(events, fn
@@ -155,6 +177,15 @@ defmodule Newbee.TUI do
         else
           reader_loop(parent, rest, :normal, <<>>)
         end
+
+      {:tty_eof, :ok} ->
+        send(parent, {:key, :ctrl_d})
+    after
+      timeout ->
+        # 孤立 ESC 空闲超时：Key.flush 按裸 Esc 发出
+        {events, rest} = Key.flush(buf)
+        Enum.each(events, &send(parent, &1))
+        reader_loop(parent, rest, :normal, <<>>)
     end
   end
 
@@ -162,110 +193,40 @@ defmodule Newbee.TUI do
 
   defp loop(state, reader) do
     receive do
-      {:key, :ctrl_c} ->
-        if state.line_ed.text == "" do
-          # 空输入时 Ctrl-C 退出（codex 行为）
-          :ok
+      {:key, key} ->
+        if state.picker do
+          case handle_picker_key(state, key) do
+            :quit ->
+              :ok
+
+            {state, force} ->
+              loop(paint(state, force), reader)
+          end
         else
-          state = %{state | line_ed: Line.clear(state.line_ed)}
-          loop(paint(state), reader)
+          if state.awaiting_permission do
+            # 权限确认流（§8 ask 档）：y/Enter 允许，其余拒绝
+            ok = key in [?y, ?Y] or key == :enter
+            send(state.kernel, {:permission_reply, ok})
+
+            state =
+              state
+              |> Map.put(:awaiting_permission, false)
+              # 权限回复只是结束询问，当前 kernel 回合仍在继续；保持 busy，
+              # 之后按 Enter 的内容进入显式队列。
+              |> Map.put(:busy, true)
+              |> push_line(if ok, do: "\e[32m✓ 已允许执行\e[0m", else: "\e[31m✗ 已拒绝执行\e[0m")
+
+            loop(paint(state), reader)
+          else
+            case handle_key(state, reader, key) do
+              :quit ->
+                :ok
+
+              {state, force} ->
+                loop(paint(state, force), reader)
+            end
+          end
         end
-
-      {:key, :ctrl_l} ->
-        loop(paint(state, true), reader)
-
-      {:key, :enter} ->
-        state = submit(state, reader)
-
-        if state.busy do
-          loop(state, reader)
-        else
-          loop(state, reader)
-        end
-
-      {:key, :backspace} ->
-        state = %{state | line_ed: Line.backspace(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :delete} ->
-        state = %{state | line_ed: Line.delete(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :left} ->
-        state = %{state | line_ed: Line.left(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :right} ->
-        state = %{state | line_ed: Line.right(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :home} ->
-        state = %{state | line_ed: Line.home(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :end} ->
-        state = %{state | line_ed: Line.to_end(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :ctrl_u} ->
-        state = %{state | line_ed: Line.cut_to_start(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :ctrl_k} ->
-        state = %{state | line_ed: Line.cut_to_end(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :ctrl_y} ->
-        state = %{state | line_ed: Line.yank(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :ctrl_t} ->
-        state = %{state | show_reasoning: not state.show_reasoning}
-        state = push_line(state, if(state.show_reasoning, do: "\e[2m思考流：显示\e[0m", else: "\e[2m思考流：隐藏\e[0m"))
-        loop(paint(state, true), reader)
-
-      {:key, :ctrl_w} ->
-        state = %{state | line_ed: Line.cut_word(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :tab} ->
-        state = %{state | line_ed: Line.complete(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :up} ->
-        state = %{state | line_ed: Line.hist_prev(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :down} ->
-        state = %{state | line_ed: Line.hist_next(state.line_ed)}
-        loop(paint(state), reader)
-
-      {:key, :page_up} ->
-        state = %{state | page: min(state.page + 1, 50)}
-        loop(paint(state, true), reader)
-
-      {:key, :page_down} ->
-        state = %{state | page: max(state.page - 1, 0)}
-        loop(paint(state, true), reader)
-
-      {:key, :escape} ->
-        if state.busy do
-          # 中断模型执行
-          Newbee.LLM.Client.interrupt()
-          state = state |> push_line("\e[31m⏹ 已请求中断…\e[0m")
-          loop(paint(state), reader)
-        else
-          # 清输入
-          state = %{state | line_ed: Line.clear(state.line_ed)}
-          loop(paint(state), reader)
-        end
-
-      {:key, ch} when is_integer(ch) ->
-        state = %{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}
-        loop(paint(state), reader)
-
-      {:key, _unknown} ->
-        loop(state, reader)
 
       {:paste, text} when byte_size(text) > 0 ->
         state = %{state | line_ed: Line.insert(state.line_ed, text)}
@@ -274,70 +235,299 @@ defmodule Newbee.TUI do
       {:paste, _empty} ->
         loop(state, reader)
 
-      {:newbee_event, topic, payload} when topic in [:text, :reasoning] ->
-        state = state |> render_event(topic, payload) |> schedule_paint()
-        loop(state, reader)
-
       {:newbee_event, topic, payload} ->
         state = state |> render_event(topic, payload) |> schedule_paint()
+        state = if topic == :turn_done, do: maybe_start_next(state), else: state
         loop(state, reader)
+
+      {:shell_done, cmd, result} ->
+        output = String.slice(result.output, 0, 8_000)
+
+        state =
+          state
+          |> push_line(Newbee.TUI.Cards.shell_header(cmd))
+          |> then(fn s -> Enum.reduce(String.split(output, "\n"), s, &push_line(&2, &1)) end)
+          |> push_line(Newbee.TUI.Cards.shell_footer(result))
+          |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil})
+          |> maybe_start_next()
+
+        loop(paint(state), reader)
 
       {:paint, :now} ->
         loop(paint(state), reader)
     end
   end
 
+  # 普通按键处理（权限确认由 loop 先拦截）。返回 :quit | {state, force_paint?}。
+  defp handle_key(state, reader, key) do
+    case key do
+      :ctrl_c ->
+        # 空输入时 Ctrl-C 退出（codex 行为）
+        if state.line_ed.text == "", do: :quit, else: {%{state | line_ed: Line.clear(state.line_ed)}, false}
+
+      :ctrl_l ->
+        {state, true}
+
+      :enter ->
+        {submit(state, reader), false}
+
+      :backspace ->
+        {%{state | line_ed: Line.backspace(state.line_ed)}, false}
+
+      :delete ->
+        {%{state | line_ed: Line.delete(state.line_ed)}, false}
+
+      :left ->
+        {%{state | line_ed: Line.left(state.line_ed)}, false}
+
+      :right ->
+        {%{state | line_ed: Line.right(state.line_ed)}, false}
+
+      :home ->
+        {%{state | line_ed: Line.home(state.line_ed)}, false}
+
+      :end ->
+        {%{state | line_ed: Line.to_end(state.line_ed)}, false}
+
+      :ctrl_u ->
+        {%{state | line_ed: Line.cut_to_start(state.line_ed)}, false}
+
+      :ctrl_k ->
+        {%{state | line_ed: Line.cut_to_end(state.line_ed)}, false}
+
+      :ctrl_y ->
+        {%{state | line_ed: Line.yank(state.line_ed)}, false}
+
+      :ctrl_t ->
+        # Ctrl+T 切换可选窗格（DESIGN §5.2）：绑定 / 事件日志 / 工具块
+        {%{state | pane: next_pane(state.pane)}, true}
+
+      :ctrl_w ->
+        {%{state | line_ed: Line.cut_word(state.line_ed)}, false}
+
+      :tab ->
+        # 空输入时 Tab = 展开/收起最近工具块（§5.1 折叠块）；有输入时 Tab = 补全
+        if state.line_ed.text == "" and state.last_block_id do
+          case Map.get(state.tool_blocks, state.last_block_id) do
+            nil ->
+              {%{state | line_ed: Line.complete(state.line_ed)}, false}
+
+            block ->
+              if Map.get(state.tool_open, block.id) do
+                {state, false}
+              else
+                state = expand_block(state, block)
+                {state, true}
+              end
+          end
+        else
+          {%{state | line_ed: Line.complete(state.line_ed)}, false}
+        end
+
+      :up ->
+        {%{state | line_ed: Line.hist_prev(state.line_ed)}, false}
+
+      :down ->
+        {%{state | line_ed: Line.hist_next(state.line_ed)}, false}
+
+      :page_up ->
+        {%{state | page: min(state.page + 1, 50)}, true}
+
+      :page_down ->
+        {%{state | page: max(state.page - 1, 0)}, true}
+
+      :escape ->
+        if state.busy do
+          # 无论当前焦点在输入行、输出区、模型流还是 run_elixir，
+          # 都走同一个非阻塞取消面。
+          Newbee.DEE.Kernel.interrupt(state.kernel)
+
+          if state.submit_kind == :shell and is_pid(state.submit_pid) do
+            Process.exit(state.submit_pid, :kill)
+
+            state =
+              state
+              |> push_line("\e[31m⏹ shell 已中断\e[0m")
+              |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil})
+              |> maybe_start_next()
+
+            {state, false}
+          else
+            state = state |> push_line("\e[31m⏹ 已请求中断…\e[0m")
+            {state, false}
+          end
+        else
+          # 清输入
+          {%{state | line_ed: Line.clear(state.line_ed)}, false}
+        end
+
+      ch when is_integer(ch) ->
+        {%{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}, false}
+
+      _unknown ->
+        {state, false}
+    end
+  end
+
   # ── 提交 ──
 
-  defp submit(state, reader) do
+  defp submit(state, reader), do: submit_text(state, reader, true)
+
+  # 当前回合运行时不再把请求直接扔进 Kernel mailbox；显式保存在 TUI，
+  # 这样用户能看到内容，Esc 取消当前回合后也不会丢失后续输入。
+  defp submit_text(state, reader, record_history?) do
     text = String.trim_trailing(state.line_ed.text)
 
     if text == "" do
       state
     else
-      Newbee.TUI.History.append(text)
+      if record_history?, do: Newbee.TUI.History.append(text)
 
-      state =
-        state
-        |> push_line("\e[32m›\e[0m " <> text)
-        |> Map.put(:line_ed, %Line{hist: state.line_ed.hist, hcur: length(state.line_ed.hist)})
-        |> Map.put(:busy, true)
-        |> Map.put(:page, 0)
-
-      state = paint(state)
-
-      ctx = %{say: fn line -> send(self(), {:newbee_event, :tui_say, {:tui_say, line}}) end, kernel: state.kernel}
-
-      case Newbee.Commands.handle(text, ctx) do
-        :quit ->
-          send(reader, {:key, :ctrl_c})
-          state
-
-        :ok ->
-          %{state | busy: false}
-
-        :handled ->
-          %{state | busy: false}
-
-        {:shell, cmd} ->
-          output = Newbee.Commands.run_shell(cmd)
-          state = Enum.reduce(String.split(output, "\n"), state, &push_line(&2, &1))
-          %{state | busy: false}
-
-        {:submit, text} ->
-          run_submit(state, text)
-
-        {:resume, id} ->
-          GenServer.stop(state.kernel)
-          {:ok, kernel2} = resume_kernel(state.client, id)
-          %{state | kernel: kernel2, busy: false}
-
-        {:resume_picker, metas} ->
-          print_metas(state, metas)
-          %{state | busy: false}
+      if state.busy do
+        enqueue_input(state, text)
+      else
+        submit_now(state, reader, text)
       end
     end
   end
+
+  defp enqueue_input(state, text) do
+    n = length(state.pending_inputs) + 1
+
+    state
+    |> push_line("\e[2m⏳ 已排队 [##{n}] #{String.slice(text, 0, 160)}\e[0m")
+    |> Map.put(:line_ed, %Line{hist: state.line_ed.hist, hcur: length(state.line_ed.hist)})
+    |> Map.update!(:pending_inputs, &(&1 ++ [text]))
+  end
+
+  defp submit_now(state, reader, text) do
+    case String.trim(text) do
+      # TUI 内建命令：思考流开关（Ctrl+T 已让位给窗格切换）
+      "/reasoning" ->
+        state = %{state | show_reasoning: not state.show_reasoning}
+        push_line(state, if(state.show_reasoning, do: "\e[2m思考流：显示\e[0m", else: "\e[2m思考流：隐藏\e[0m"))
+
+      _ ->
+        state =
+          state
+          |> push_line("\e[32m›\e[0m " <> text)
+          |> Map.put(:line_ed, %Line{hist: state.line_ed.hist, hcur: length(state.line_ed.hist)})
+          |> Map.put(:busy, true)
+          |> Map.put(:page, 0)
+
+        state = paint(state)
+
+        ctx =
+          %{say: fn line -> send(self(), {:newbee_event, :tui_say, {:tui_say, line}}) end, kernel: state.kernel}
+
+        case Newbee.Commands.handle(text, ctx) do
+          :quit ->
+            if is_pid(reader), do: send(reader, {:key, :ctrl_c}), else: send(self(), {:key, :ctrl_c})
+            %{state | busy: false}
+
+          :ok ->
+            %{state | busy: false}
+
+          :handled ->
+            %{state | busy: false}
+
+          {:shell, cmd} ->
+            # !shell 也异步执行，否则主循环被同步 shell 卡住时无法处理 Esc。
+            parent = self()
+
+            shell_pid =
+              spawn(fn ->
+                result = Newbee.Tools.Run.sh(cmd, timeout: 300_000)
+                send(parent, {:shell_done, cmd, result})
+              end)
+
+            %{state | submit_pid: shell_pid, submit_kind: :shell}
+
+          {:submit, text} ->
+            run_submit(state, text)
+
+          {:restart} ->
+            # /model 切换：重建会话内核（保留原会话，模型换新）
+            sid =
+              case :sys.get_state(state.kernel) do
+                %{session: %Newbee.Session{} = s} -> s.id
+                _ -> nil
+              end
+
+            GenServer.stop(state.kernel)
+            client2 = Newbee.LLM.Config.client_for()
+            opts = if sid, do: [session_id: sid], else: []
+
+            {:ok, kernel2} =
+              Newbee.DEE.Kernel.start_link([client: client2, auto_antibodies: true, render: fn _ -> :ok end] ++ opts)
+
+            send(self(), {:newbee_event, :tui_say, {:tui_say, "会话内核已重建（模型: #{client2.model}）"}})
+            %{state | kernel: kernel2, client: client2, busy: false}
+
+          {:resume, id} ->
+            GenServer.stop(state.kernel)
+            {:ok, kernel2} = resume_kernel(state.client, id)
+            %{state | kernel: kernel2, busy: false}
+
+          {:resume_picker, metas} ->
+            %{state | picker: %{items: metas, index: 0}, busy: false}
+        end
+    end
+  end
+
+  # 当前任务完成后按 FIFO 启动下一条；命令类输入也经过同一入口。
+  defp maybe_start_next(%{busy: false, pending_inputs: [text | rest]} = state) do
+    state =
+      state
+      |> Map.put(:pending_inputs, rest)
+      |> Map.put(:line_ed, %{state.line_ed | text: text, cur: String.length(text)})
+      |> push_line("\e[2m▶ 执行排队输入: #{String.slice(text, 0, 160)}\e[0m")
+      |> submit_text(nil, false)
+
+    if state.busy, do: state, else: maybe_start_next(state)
+  end
+
+  defp maybe_start_next(state), do: state
+
+  # ── 会话选择器：/resume、/session list/load 共用 ──
+
+  defp handle_picker_key(state, :up) do
+    picker = %{state.picker | index: max(state.picker.index - 1, 0)}
+    {%{state | picker: picker}, true}
+  end
+
+  defp handle_picker_key(state, :down) do
+    last = max(length(state.picker.items) - 1, 0)
+    picker = %{state.picker | index: min(state.picker.index + 1, last)}
+    {%{state | picker: picker}, true}
+  end
+
+  defp handle_picker_key(state, :escape) do
+    {push_line(%{state | picker: nil}, "\e[2m已取消会话选择\e[0m"), true}
+  end
+
+  defp handle_picker_key(_state, :ctrl_c), do: :quit
+
+  defp handle_picker_key(state, :enter) do
+    case Enum.at(state.picker.items, state.picker.index) do
+      nil ->
+        {%{state | picker: nil} |> push_line("\e[2m（没有可恢复的会话）\e[0m"), true}
+
+      meta ->
+        GenServer.stop(state.kernel)
+        {:ok, kernel} = resume_kernel(state.client, meta.id)
+        {%{state | picker: nil, kernel: kernel, busy: false}, true}
+    end
+  end
+
+  defp handle_picker_key(state, _key), do: {state, false}
+
+  # Ctrl+T 窗格轮转：nil → 绑定 → 事件日志 → 工具块 → 队列 → nil
+  defp next_pane(nil), do: :bindings
+  defp next_pane(:bindings), do: :events
+  defp next_pane(:events), do: :tools
+  defp next_pane(:tools), do: :queue
+  defp next_pane(:queue), do: nil
 
   defp run_submit(state, text) do
     parent = self()
@@ -367,23 +557,16 @@ defmodule Newbee.TUI do
         end
       end)
 
-    %{state | busy: true, submit_pid: caller}
+    %{state | busy: true, submit_pid: caller, submit_kind: :turn}
   end
 
   defp resume_kernel(client, id) do
-    {:ok, kernel} = Newbee.DEE.Kernel.start_link(client: client, session_id: id, render: fn _ -> :ok end)
+    {:ok, kernel} =
+      Newbee.DEE.Kernel.start_link(client: client, session_id: id, auto_antibodies: true, render: fn _ -> :ok end)
+
     meta = Newbee.Session.meta(id)
     send(self(), {:newbee_event, :tui_say, {:tui_say, "已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}"}})
     {:ok, kernel}
-  end
-
-  defp print_metas(state, metas) do
-    lines =
-      Enum.with_index(metas, 1)
-      |> Enum.map(fn {m, i} -> "  [#{i}] #{m.id} · #{m.when_str} · #{m.messages} 条 · #{m.title}" end)
-
-    send(self(), {:newbee_event, :tui_say, {:tui_say, Enum.join(["最近会话:" | lines], "\n")}})
-    state
   end
 
   # ── 事件渲染（公开 API，测试契约）──
@@ -401,18 +584,46 @@ defmodule Newbee.TUI do
     - 其余 topic 渲染成一行后 push_line
   """
   def render_event(%__MODULE__{} = state, :text, {:text, delta}) do
-    if state.streaming and state.stream_kind == :text do
-      append_text(state, delta)
-    else
-      state
-      |> push_line("")
-      |> Map.put(:streaming, true)
-      |> Map.put(:stream_kind, :text)
-      |> append_text(delta)
+    # 缓冲 delta 中的文本, 遇到换行符时渲染完整行
+    combined = state.text_buffer <> delta
+
+    case String.split(combined, "\n") do
+      [_] ->
+        # 没有换行, 继续缓冲
+        if state.streaming and state.stream_kind == :text do
+          %{state | text_buffer: combined}
+        else
+          state
+          |> push_line("")
+          |> Map.put(:streaming, true)
+          |> Map.put(:stream_kind, :text)
+          |> Map.put(:text_buffer, combined)
+        end
+
+      parts ->
+        {completed, [remaining]} = Enum.split(parts, -1)
+
+        # 渲染完整行通过 Markdown
+        state =
+          if not (state.streaming and state.stream_kind == :text) do
+            state |> push_line("") |> Map.put(:streaming, true) |> Map.put(:stream_kind, :text)
+          else
+            state
+          end
+
+        state =
+          Enum.reduce(completed, state, fn line, acc ->
+            push_line(acc, Newbee.Markdown.render(line))
+          end)
+
+        # 重新开始缓冲剩余文本
+        %{state | text_buffer: remaining}
     end
   end
 
   def render_event(%__MODULE__{} = state, :reasoning, {:reasoning, delta}) do
+    state = flush_text_buffer(state)
+
     if not state.show_reasoning do
       state
     else
@@ -433,13 +644,15 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :tool_start, {:tool_start, name, title, code}) do
+    state = flush_text_buffer(state)
     id = :erlang.unique_integer([:positive])
     block = %{id: id, name: name, title: title, code: code, result: nil}
     line = tool_block_line(block)
     %{push_line(state, line) | tool_blocks: Map.put(state.tool_blocks, id, block), last_block_id: id}
   end
 
-  def render_event(%__MODULE__{} = state, :tool_result, {:tool_result, name, text}) do
+  def render_event(%__MODULE__{} = state, :tool_result, {:tool_result, _name, text}) do
+    state = flush_text_buffer(state)
     id = Map.get(state, :last_block_id)
 
     state =
@@ -452,15 +665,33 @@ defmodule Newbee.TUI do
         state
       end
 
-    line = tool_result_line(name, text)
+    line = Newbee.TUI.Cards.tool_footer(text)
     push_line(state, line)
   end
 
+  def render_event(%__MODULE__{} = state, :permission_ask, {:permission_ask, preview}) do
+    first_line = preview |> String.split("\n") |> hd() |> String.slice(0, 80)
+
+    state =
+      push_line(state, "\e[33m? 允许执行以下代码？[y 允许 / 任意键拒绝]\e[0m \e[2m#{first_line}\e[0m")
+
+    %{state | awaiting_permission: true, busy: true}
+  end
+
+  def render_event(%__MODULE__{} = state, :file_diff, {:file_diff, path, diff, stats}) do
+    state = flush_text_buffer(state)
+    # 内联 diff（§5.1）：行号 + 语法高亮，渲染逻辑在 Newbee.TUI.Cards.diff_card
+    Enum.reduce(Newbee.TUI.Cards.diff_card(path, diff, stats), state, &push_line(&2, &1))
+  end
+
   def render_event(%__MODULE__{} = state, :tool_error, {:tool_error, text}) do
-    push_line(state, "\e[31m✗\e[0m " <> String.slice(text, 0, 400))
+    state = flush_text_buffer(state)
+    # 卡内错误详情行（状态徽章由紧随的 tool_result 脚给出）
+    push_line(state, Newbee.TUI.Cards.error_line(text))
   end
 
   def render_event(%__MODULE__{} = state, :rule_hit, {:rule_hit, hits}) do
+    state = flush_text_buffer(state)
     lines = Enum.map(hits, &"\e[33m⚑ 沉睡规则命中 [#{&1.id}]\e[0m \e[2m#{&1.injection}\e[0m")
     Enum.reduce(lines, state, &push_line(&2, &1))
   end
@@ -474,29 +705,46 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :error, {:error, e}) do
+    state = flush_text_buffer(state)
     push_line(state, "\e[31m#{inspect(e)}\e[0m")
   end
 
   def render_event(%__MODULE__{} = state, :done, {:done, summary}) do
+    state = flush_text_buffer(state)
     push_line(state, "\e[1m● \e[0m" <> Newbee.Markdown.render(summary))
   end
 
   def render_event(%__MODULE__{} = state, :ask, {:ask, q}) do
+    state = flush_text_buffer(state)
     push_line(state, "\e[33m? \e[0m" <> Newbee.Markdown.render(q))
   end
 
   def render_event(%__MODULE__{} = state, :interrupted, {:interrupted, content}) do
+    state = flush_text_buffer(state)
     state = push_line(state, "\e[31m⏹ 已中断\e[0m")
     if content, do: push_line(state, content), else: state
   end
 
   def render_event(%__MODULE__{} = state, :turn_done, _) do
+    state = flush_text_buffer(state)
     notify("newbee", "回合完成")
-    %{state | busy: false}
+    %{state | busy: false, submit_pid: nil, submit_kind: nil}
   end
 
   def render_event(%__MODULE__{} = state, :tui_say, {:tui_say, text}) do
     Enum.reduce(String.split(text, "\n"), state, &push_line(&2, &1))
+  end
+
+  def render_event(%__MODULE__{} = state, :advisor_note, {:advisor_note, text}) do
+    push_line(state, "\e[38;5;117m◉ advisor\e[0m #{text}")
+  end
+
+  def render_event(%__MODULE__{} = state, :worker_hint, {:worker_hint, sig}) do
+    push_line(state, "\e[2m⚑ 进化线索已记录（重复失败模式）: #{String.slice(sig, 0, 60)}\e[0m")
+  end
+
+  def render_event(%__MODULE__{} = state, :compacted, {:compacted, n}) do
+    push_line(state, "\e[2m⏳ 历史已压缩 #{n} 条（事件日志原样保留）\e[0m")
   end
 
   def render_event(%__MODULE__{} = state, :progress, {:progress, score, scores}) do
@@ -512,6 +760,7 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :goal_done, {:goal_done, summary}) do
+    state = flush_text_buffer(state)
     push_line(state, "\e[1m● 目标完成\e[0m " <> summary)
   end
 
@@ -529,6 +778,19 @@ defmodule Newbee.TUI do
 
   # ── 流式追加 ──
 
+  # Flush 缓冲的 markdown 文本到显示行
+  defp flush_text_buffer(%__MODULE__{text_buffer: <<>>} = state), do: state
+
+  defp flush_text_buffer(%__MODULE__{} = state) do
+    if String.trim_leading(state.text_buffer) != <<>> do
+      state
+      |> push_line(Newbee.Markdown.render(state.text_buffer))
+    else
+      state
+    end
+    |> Map.put(:text_buffer, <<>>)
+  end
+
   defp append_text(state, delta), do: append_text(state, delta, "")
 
   defp append_text(%__MODULE__{lines: lines} = state, delta, prefix) do
@@ -545,22 +807,34 @@ defmodule Newbee.TUI do
 
   # ── 工具块 ──
 
-  defp tool_block_line(block) do
-    preview = block.code |> String.split("\n") |> Enum.take(3) |> Enum.join("\n")
-    ellipsis = if String.contains?(block.code, "\n"), do: " …", else: ""
-    "\e[36m⏺\e[0m \e[1m#{block.name}\e[0m \e[2m#{block.title}\e[0m\n\e[2m  #{preview}#{ellipsis}\e[0m"
+  # Tab 展开工具块：完整代码 + 完整结果追加进 transcript（§5.1 折叠块）
+  defp expand_block(state, block) do
+    state =
+      state
+      |> Map.put(:tool_open, Map.put(state.tool_open, block.id, true))
+      |> push_line("")
+      |> push_line("\e[36m┌─\e[0m \e[1m⏺ 完整代码 [#{block.name} #{block.title}]\e[0m")
+
+    # 整体先高亮再分行：跨行 heredoc/字符串的颜色不断裂
+    state =
+      Enum.reduce(String.split(Newbee.TUI.Highlight.elixir(block.code), "\n"), state, &push_line(&2, &1))
+
+    case block.result do
+      nil ->
+        state
+
+      result ->
+        state
+        |> push_line("\e[36m└─⎿\e[0m 完整结果")
+        |> then(fn s -> Enum.reduce(String.split(result, "\n"), s, &push_line(&2, &1)) end)
+    end
   end
 
-  defp tool_result_line(_name, text) do
-    {mark, body} =
-      case text do
-        "✓ ok\n" <> rest -> {"\e[32m  ⎿ ✓\e[0m", rest}
-        "✗ error\n" <> rest -> {"\e[31m  ⎿ ✗\e[0m", rest}
-        other -> {"\e[36m  ⎿\e[0m", other}
-      end
+  # ── 工具块卡片（渲染逻辑在 Newbee.TUI.Cards，TUI/CLI 共用）──
 
-    preview = body |> String.split("\n") |> Enum.take(6) |> Enum.join("\n    ")
-    mark <> " " <> preview
+  defp tool_block_line(block) do
+    header = Newbee.TUI.Cards.tool_header(block.name, block.title)
+    header <> (Newbee.TUI.Cards.tool_preview(block.code) || "")
   end
 
   # ── 渲染 ──
@@ -584,9 +858,9 @@ defmodule Newbee.TUI do
 
   defp paint(state, force \\ false) do
     {cols, rows} = terminal_size()
-    status = {status_line(state), {rows, Line.cursor_col(state.line_ed)}}
-    input_view = input_view(state)
-    lines = state.lines ++ pane_lines(state.pane, state)
+    {input_view, cur_col} = input_view(state)
+    status = {status_line(state), {rows, cur_col}}
+    lines = state.lines ++ pane_lines(state.pane, state) ++ picker_lines(state.picker)
 
     screen =
       if state.screen == nil or force or state.screen.cols != cols do
@@ -600,14 +874,9 @@ defmodule Newbee.TUI do
 
   # Ctrl-T 窗格：绑定清单 / 事件日志 / 工具块
 
-  defp pane_lines(:bindings, _state) do
-    bs =
-      if Process.whereis(Newbee.DEE.Evaluator) do
-        Newbee.DEE.Evaluator.bindings_summary()
-      else
-        []
-      end
-
+  defp pane_lines(:bindings, state) do
+    # 模型/工具运行时 evaluator 正在占用 GenServer，不排队同步查询。
+    bs = if state.busy, do: [], else: safe_bindings_summary()
     ["\e[1;36m[窗格] 绑定 (#{length(bs)})\e[0m" | Enum.map(bs, &"  #{&1.name} : #{&1.type} (#{&1.size} bytes)")]
   end
 
@@ -625,7 +894,32 @@ defmodule Newbee.TUI do
     ["\e[1;36m[窗格] 工具块 (#{length(blocks)})\e[0m" | Enum.map(blocks, &"  #{&1}")]
   end
 
+  defp pane_lines(:queue, state) do
+    lines =
+      state.pending_inputs
+      |> Enum.with_index(1)
+      |> Enum.map(fn {text, i} -> "  [#{i}] #{String.slice(text, 0, 200)}" end)
+
+    ["\e[1;36m[窗格] 输入队列 (#{length(lines)})\e[0m" | lines]
+  end
+
   defp pane_lines(nil, _state), do: []
+
+  defp picker_lines(nil), do: []
+
+  defp picker_lines(%{items: items, index: index}) do
+    header = "\e[1;33m[会话选择] ↑/↓ 移动 · Enter 恢复 · Esc 取消 (#{length(items)})\e[0m"
+
+    rows =
+      items
+      |> Enum.with_index()
+      |> Enum.map(fn {meta, i} ->
+        marker = if i == index, do: "\e[36m❯\e[0m", else: " "
+        "#{marker} [#{i + 1}] #{meta.id} · #{meta.when_str} · #{meta.messages} 条 · #{meta.title}"
+      end)
+
+    [header | rows]
+  end
 
   defp notify(title, msg) do
     # 桌面通知（可选）：长任务完成提醒，失败静默
@@ -637,28 +931,41 @@ defmodule Newbee.TUI do
     :ok
   end
 
+  # 首帧可能早于 evaluator peer 完成启动；状态栏/窗格不能把一次超时升级成 TUI 崩溃。
+  defp safe_bindings_summary do
+    case Process.whereis(Newbee.DEE.Evaluator) do
+      nil ->
+        []
+
+      pid ->
+        try do
+          case Newbee.DEE.Evaluator.bindings_summary(pid, 50) do
+            bs when is_list(bs) -> bs
+            _ -> []
+          end
+        rescue
+          _ -> []
+        catch
+          :exit, _ -> []
+        end
+    end
+  end
+
   defp status_line(state) do
     usage = state.usage
     tokens = Map.get(usage, "total_tokens", 0)
 
-    bindings =
-      if Process.whereis(Newbee.DEE.Evaluator) do
-        case Newbee.DEE.Evaluator.bindings_summary() do
-          bs when is_list(bs) -> length(bs)
-          _ -> 0
-        end
-      else
-        0
-      end
+    bindings = if state.busy, do: 0, else: length(safe_bindings_summary())
 
     "\e[2m#{state.client.model} · #{Path.basename(File.cwd!())} · " <>
-      "tokens: #{tokens} · bindings: #{bindings} · policy: #{Newbee.Evolution.Policy.get()}\e[0m"
+      "tokens: #{tokens} · bindings: #{bindings} · queue: #{length(state.pending_inputs)} · policy: #{Newbee.Evolution.Policy.get()}\e[0m"
   end
 
   defp input_view(state) do
     prefix = if state.busy, do: "\e[33m…\e[0m ", else: "\e[32m›\e[0m "
-    {line, _cur_col} = Line.scroll_view(state.line_ed, terminal_cols() - 4)
-    prefix <> line
+    {line, cur_col} = Line.scroll_view(state.line_ed, terminal_cols() - 4)
+    # 光标屏幕列 = 前缀宽(2) + 可见窗口内光标列（滚动感知，Line.cursor_col 未滚动会算错）
+    {prefix <> line, 2 + cur_col}
   end
 
   defp terminal_size do

@@ -4,8 +4,29 @@ defmodule Newbee.Tools.Run do
   @default_timeout 120_000
   @max_output 32_000
 
+  @dangerous_re ~r/(rm\s+.*-rf|rm\s+-r\s+\/|git\s+push|rm\s+-rf\s+\/)/i
+
   @doc "在工程根下执行 shell 命令。返回 %{exit, output}。"
   def sh(cmd, opts \\ []) do
+    case gate(cmd) do
+      :allow -> do_sh(cmd, opts)
+      {:deny, msg} -> %{exit: :denied, output: msg}
+    end
+  end
+
+  defp gate(cmd) do
+    if Regex.match?(@dangerous_re, cmd) do
+      case Newbee.Permissions.get() do
+        :lenient -> :allow
+        :ask -> {:deny, "[denied: ask 档 — 高危命令需 /permissions lenient 或 /approve 后执行: #{String.slice(cmd, 0, 120)}]"}
+        :deny -> {:deny, "[denied: deny 档 — 高危命令已拦截: #{String.slice(cmd, 0, 120)}]"}
+      end
+    else
+      :allow
+    end
+  end
+
+  defp do_sh(cmd, opts) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
     task =

@@ -49,6 +49,7 @@ export OPENROUTER_API_KEY=sk-...
 ./bin/newbee            # 全屏 TUI（推荐）
 ./bin/newbee cli        # 单列流式 CLI
 ./bin/newbee daemon     # 常驻 daemon（后台自动进化）
+./bin/newbee attach     # 接回最近会话（环境记忆仍在）
 ./bin/newbee bench      # 公开基准
 ./bin/newbee doctor     # 环境体检
 ```
@@ -58,11 +59,17 @@ export OPENROUTER_API_KEY=sk-...
 - 单列流式对话：模型输出、思考流（灰色）、工具块、审计事件依次流式追加
 - `Enter` 发送 · `\` 续行 · `↑/↓` 历史（跨会话持久）· `Tab` 补全（`@路径` / 命令）
 - `Esc` 中断模型执行 · `Ctrl-C` 清输入/退出 · `Ctrl-L` 重绘
-- `PgUp/PgDn` 翻屏 · 括号粘贴 · 状态栏（模型/工程/token/绑定/策略）
+- `PgUp/PgDn` 翻屏 · `Ctrl-T` 切换窗格（绑定/事件日志/工具块/输入队列）· 括号粘贴
+- 状态栏（模型/工程/token/绑定/策略）
 
 命令：`/model` `/bindings` `/tokens` `/rules` `/dump` `/resume` `/reset`
 `/approve` `/reject` `/log` `/snapshot` `/rollback` `/evolve` `/policy`
-`/genes` `/bench` `/goal` `/quit`；`@文件` 引用；`!shell` 执行。
+`/genes` `/bench` `/goal` `/diff` `/undo` `/session` `/init` `/tools`
+`/permissions` `/compact` `/quit`；TUI 内 `/reasoning` 切换思考流显示；
+`@文件` 引用；`!shell` 执行。
+
+权限档位：`/permissions lenient|ask|deny`——`ask` 档危险操作（写文件/删文件/shell）
+弹确认（TUI 按 y/Enter 允许，其余拒绝；CLI 输入 y 允许）。
 
 ## 架构
 
@@ -74,16 +81,21 @@ lib/newbee/
 │   ├── evalworker.ex  # 节点内求值 worker
 │   ├── kernel.ex      # 主循环：prompt 组装 → LLM → run_elixir → 压缩回填
 │   ├── rules.ex       # 沉睡规则（免疫系统）
-│   ├── repomap.ex     # 工程结构图
-│   └── tools/hotloader.ex  # 工具热载（git 版本化）
-├── tools/         # 工具库：Edit(锚点编辑) / Structural(Sourceror) / Fs / Run / Git
-├── llm/           # 模型客户端（OpenRouter 多后端适配）+ token 记账
+│   ├── repomap.ex     # 工程结构图（mtime 指纹缓存）
+│   ├── tools.ex       # 工具注册表（@doc 签名 + 渐进式披露）
+│   └── tools/hotloader.ex  # 工具热载（git 版本化，支持卸载/purge）
+├── tools/         # 工具库：Edit / Structural / Fs(目录隔离) / Run / Git / Search / Json / Http / Scaffold / Introspect
+├── agents/        # Explorer 子代理（worktree 隔离 + 结构化结果）
+├── host.ex        # Host Bridge：节点权威操作代理回主 VM + 配置脱敏
+├── permissions.ex # 权限档位 lenient/ask/deny（§8）
+├── diff.ex        # 行级 diff（内联 diff 渲染底座）
+├── llm/           # 模型客户端（OpenRouter 多后端适配）+ 模型热切换
 ├── codec.ex       # function calling 协议（run_elixir/done/ask）
-├── evolution/     # 自我进化：Bench(裁判) / Evolver / JIT / PPT / Progress / Metrics / Gene / Snapshot / Policy
+├── evolution/     # 自我进化：Bench / Evolver / JIT / PPT / Progress / Metrics / PriceTags / Gene / Snapshot / Policy
 ├── bus.ex         # 事件总线（全系统一条总线）
 ├── event_log.ex   # 事件溯源日志
-├── session.ex     # 会话挂起/恢复（transcript + bindings 快照）
-└── memory.ex      # 全局记忆（自动脱敏）
+├── session.ex     # 会话挂起/恢复（transcript + bindings 快照，支持重写）
+└── memory.ex      # 全局记忆（自动脱敏，done 时自动抽取 lessons）
 ```
 
 ## 测试
@@ -96,6 +108,9 @@ mix test test/newbee/tools/edittest_test.exs   # 锚点编辑契约
 ## 状态
 
 M1-M4 功能已实现：DEE 求值器（崩溃隔离/绑定持久/env 过滤）、双轨编辑、
-RepoMap、工具热载、会话挂起/恢复、事件溯源、沉睡规则、JIT 三级、PPT
-Best-of-N、进度验证器、失败抗体/反事实回放、evolver 后台合成、基因打包、
-daemon 常驻。见 [DESIGN.md](DESIGN.md) 路线图。
+RepoMap（带缓存）、工具热载、会话挂起/恢复、事件溯源、沉睡规则、JIT 三级
+（含热度接线）、PPT Best-of-N、进度验证器、失败抗体自动生成 + 反事实回放
+（自愈）、evolver 后台合成（档位区分 :hint/:background）、基因打包、daemon
+常驻、权限档位、内联 diff、Host Bridge、子代理、advisor、价签系统、
+按模型度量、统一寻址（skill:// agent:// conflict://）、工具注册表。
+见 [DESIGN.md](DESIGN.md) 路线图。

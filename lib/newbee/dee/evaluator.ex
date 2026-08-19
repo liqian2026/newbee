@@ -52,7 +52,25 @@ defmodule Newbee.DEE.Evaluator do
     GenServer.call(server, {:eval, code, opts}, :infinity)
   end
 
-  def bindings_summary(server \\ __MODULE__), do: GenServer.call(server, :bindings_summary)
+  @doc "中断当前正在执行的求值 cell；不会影响求值器绑定或后续调用。"
+  def interrupt(server \\ __MODULE__) do
+    server = if is_atom(server), do: Process.whereis(server), else: server
+
+    if is_pid(server) do
+      case Newbee.DEE.EvalWorker.active_pid(server) do
+        pid when is_pid(pid) ->
+          Process.exit(pid, :kill)
+          Newbee.DEE.EvalWorker.clear_active(server, pid)
+
+        _ ->
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  def bindings_summary(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :bindings_summary, timeout)
   def reset(server \\ __MODULE__), do: GenServer.call(server, :reset)
   def dump_bindings(server \\ __MODULE__), do: GenServer.call(server, :dump_bindings)
   def restore_bindings(server \\ __MODULE__, binding), do: GenServer.call(server, {:restore_bindings, binding})
@@ -102,6 +120,10 @@ defmodule Newbee.DEE.Evaluator do
   def handle_call({:eval, code, opts}, _from, state) do
     t0 = System.monotonic_time(:millisecond)
     Newbee.DebugLog.log(:eval, "start code=#{String.slice(code, 0, 120) |> inspect()}")
+
+    # active key 是本地 evaluator GenServer pid；远端 worker 用它把当前 task
+    # 注册回主 VM，Esc 无需等待这个已阻塞的 GenServer 处理 mailbox。
+    opts = Keyword.merge(opts, interrupt_key: self(), interrupt_node: Node.self())
 
     result =
       case remote_call(primary_target(state), {:eval, code, opts}) do
@@ -320,6 +342,8 @@ defmodule Newbee.DEE.Evaluator do
           case :rpc.call(node, :application, :ensure_all_started, [:elixir], @rpc_boot_timeout) do
             {:ok, _} ->
               filter_env(node)
+              # 宿主契约（§3.4）：把主节点名注入节点 env，供 Newbee.Host 代理
+              :rpc.call(node, :os, :putenv, [~c"NEWBEE_MAIN_NODE", Atom.to_charlist(Node.self())], @rpc_boot_timeout)
 
               case :rpc.call(node, Newbee.DEE.EvalWorker, :start, [[]], @rpc_boot_timeout) do
                 {:ok, worker} ->
