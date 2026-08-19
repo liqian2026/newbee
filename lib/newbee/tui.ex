@@ -384,6 +384,10 @@ defmodule Newbee.TUI do
       :ctrl_w ->
         {%{state | line_ed: Line.cut_word(state.line_ed)}, false}
 
+      :ctrl_r ->
+        state = %{state | show_reasoning: not state.show_reasoning}
+        {push_line(state, if(state.show_reasoning, do: "\e[2m思考流：显示\e[0m", else: "\e[2m思考流：隐藏\e[0m")), true}
+
       :tab ->
         # 空输入时 Tab = 展开/收起最近工具块（§5.1 折叠块）；有输入时 Tab = 补全
         if state.line_ed.text == "" and state.last_block_id do
@@ -1070,7 +1074,7 @@ defmodule Newbee.TUI do
 
   defp help_text do
     "help: Enter send | Esc interrupt | Tab complete | Ctrl-A/E home/end | Alt-B/F word jump\n" <>
-      "      Ctrl-U/K cut | Ctrl-Y paste | Ctrl-W/Alt-D delete word | PgUp/Dn scroll | Ctrl-T pane"
+      "      Ctrl-U/K cut | Ctrl-Y paste | Ctrl-W/Alt-D delete word | PgUp/Dn scroll | Ctrl-T pane | /reasoning 思考流 | Ctrl-R 同切"
   end
 
 
