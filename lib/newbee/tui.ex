@@ -98,7 +98,7 @@ defmodule Newbee.TUI do
       state
       |> push_line("\e[1mnewbee\e[0m TUI - #{client.model} · policy=#{Newbee.Evolution.Policy.get()}")
       |> push_line("\e[2m命令: #{Enum.join(Newbee.Commands.commands(), " ")}\e[0m")
-      |> push_line("\e[2m↑↓ 历史 · PgUp/PgDn 翻屏 · Tab 补全 · Esc 中断 · Ctrl-C 退出 · Ctrl-L 重绘 · Ctrl-T 窗格/队列\e[0m")
+      |> push_line("\e[2m↑↓ 历史 · Ctrl-R 搜历史 · PgUp/PgDn 翻屏 · Tab 补全 · Esc 中断 · Ctrl-C 退出 · Ctrl-L 重绘 · Ctrl-T 窗格/队列\e[0m")
       |> push_line("\e[2msession: #{session_id(kernel)}\e[0m")
 
     parent = self()
@@ -283,7 +283,7 @@ defmodule Newbee.TUI do
         dur =
           if state.shell_started_at do
             secs = (System.monotonic_time(:millisecond) - state.shell_started_at) / 1000
-            "\e[2m⏱ 用时 #{format_duration(secs)}\e[0m"
+            "\e[2m⏱ 用时 #{format_duration(secs)} · " <> now_hm() <> "\e[0m"
           else
             nil
           end
@@ -544,7 +544,7 @@ defmodule Newbee.TUI do
       _ ->
         state =
           state
-          |> push_line("\e[32m›\e[0m " <> text)
+          |> push_line("\e[32m›\e[0m \e[2m[" <> now_hm() <> "]\e[0m " <> text)
           |> Map.put(:line_ed, %Line{hist: state.line_ed.hist, hcur: length(state.line_ed.hist)})
           |> Map.put(:busy, true)
           |> Map.put(:page, 0)
@@ -1133,6 +1133,11 @@ defmodule Newbee.TUI do
     end
   end
 
+  defp now_hm do
+    {{_, _, _}, {h, m, _}} = :calendar.local_time()
+    :io_lib.format("~2..0B:~2..0B", [h, m]) |> IO.iodata_to_binary()
+  end
+
   defp format_duration(secs) when secs < 60, do: :io_lib.format("~.1fs", [secs]) |> IO.iodata_to_binary()
   defp format_duration(secs) do
     m = trunc(secs / 60)
@@ -1142,7 +1147,7 @@ defmodule Newbee.TUI do
 
   defp help_text do
     "help: Enter send | Esc interrupt | Tab complete | Ctrl-A/E home/end | Alt-B/F word jump\n" <>
-      "      Ctrl-U/K cut | Ctrl-Y paste | Ctrl-W/Alt-D delete word | PgUp/Dn scroll | Ctrl-T pane | /reasoning 思考流 | Ctrl-R 同切"
+      "      Ctrl-U/K cut | Ctrl-Y paste | Ctrl-W/Alt-D delete word | PgUp/Dn scroll | Ctrl-T pane | /reasoning 思考流 | Ctrl-R 历史搜索"
   end
 
 
@@ -1269,3 +1274,7 @@ defmodule Newbee.TUI do
     end
   end
 end
+
+# MARKER_TEST_123
+
+# MARKER_PATCH2
