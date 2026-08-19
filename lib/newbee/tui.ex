@@ -1012,9 +1012,11 @@ defmodule Newbee.TUI do
     bs = if state.busy, do: [], else: state.bindings_cache
     bindings = length(bs)
     dots = spinner(state)
-
+    page_hint = if state.page > 0, do: " · \e[33m↕ #{state.page} PgDn回底\e[0m\e[2m", else: ""
+    q = length(state.pending_inputs)
+    qpart = if q > 0, do: " · queue:#{q}", else: ""
     "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())} · " <>
-      "tokens: #{tokens} · bindings: #{bindings} · queue: #{length(state.pending_inputs)} · policy: #{Newbee.Evolution.Policy.get()}\e[0m"
+      "tok:#{tokens} · bind:#{bindings}#{qpart} · #{Newbee.Evolution.Policy.get()}#{page_hint}\e[0m"
   end
 
   defp input_view(state) do
