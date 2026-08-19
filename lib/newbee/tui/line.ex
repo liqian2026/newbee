@@ -356,7 +356,7 @@ defmodule Newbee.TUI.Line do
     if rows == [], do: 0, else: Enum.join(rows, "\n") |> String.length() |> Kernel.+(1)
   end
 
-  defp slice_by_width(s, offset, w) do
+  def slice_by_width(s, offset, w) do
     s
     |> String.to_charlist()
     |> do_slice(offset, w, [])

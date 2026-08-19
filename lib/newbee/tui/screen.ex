@@ -194,9 +194,8 @@ defmodule Newbee.TUI.Screen do
           "\e[#{i};1H" <> l <> "\e[K"
         end)
 
-    out = out ++ ["\e[#{rows - n - 1};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
+    out = out ++ ["\e[#{rows - n - 1};1H\e[K" <> slice_by_width(status_text, cols) <> "\e[K"]
     out = out ++ ["\e[#{rows - n};1H" <> String.duplicate("─", cols) <> "\e[K"]
-
     out =
       out ++
         (Enum.with_index(in_lines, 1)
@@ -221,9 +220,8 @@ defmodule Newbee.TUI.Screen do
       diff_rows(screen.prev, body)
       |> Enum.map(fn {i, l} -> "\e[#{i + 1};1H" <> l <> "\e[K" end)
 
-    out = out ++ ["\e[#{rows - n - 1};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
+    out = out ++ ["\e[#{rows - n - 1};1H\e[K" <> slice_by_width(status_text, cols) <> "\e[K"]
     out = out ++ ["\e[#{rows - n};1H" <> String.duplicate("─", cols) <> "\e[K"]
-
     out =
       out ++
         (Enum.with_index(in_lines, 1)
@@ -258,5 +256,10 @@ defmodule Newbee.TUI.Screen do
       if p != c, do: [{i, c || ""} | acc], else: acc
     end)
     |> Enum.reverse()
+  end
+
+  # 状态栏按可见宽度截断（不切半个 ANSI 转义，避免 \e[ 吞掉后段）
+  defp slice_by_width(text, cols) do
+    Newbee.TUI.Line.slice_by_width(text, 0, max(cols, 0))
   end
 end
