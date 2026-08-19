@@ -207,19 +207,32 @@ defmodule Newbee.TUI do
           end
         else
           if state.awaiting_permission do
-            # 权限确认流（§8 ask 档）：y/Enter 允许，其余拒绝
-            ok = key in [?y, ?Y] or key == :enter
-            send(state.kernel, {:permission_reply, ok})
+            # 权限等待期 Esc/Ctrl-C 仍应中断当前 turn（既拒绝又杀 evaluator）
+            if key in [:escape, :ctrl_c] do
+              Newbee.DEE.Kernel.interrupt(state.kernel)
+              send(state.kernel, {:permission_reply, false})
 
-            state =
-              state
-              |> Map.put(:awaiting_permission, false)
-              # 权限回复只是结束询问，当前 kernel 回合仍在继续；保持 busy，
-              # 之后按 Enter 的内容进入显式队列。
-              |> Map.put(:busy, true)
-              |> push_line(if ok, do: "\e[32m✓ 已允许执行\e[0m", else: "\e[31m✗ 已拒绝执行\e[0m")
+              state =
+                state
+                |> Map.put(:awaiting_permission, false)
+                |> push_line("\e[31m⏹ 已拒绝并中断\e[0m")
 
-            loop(paint(state), reader)
+              loop(paint(state), reader)
+            else
+              # 权限确认流（§8 ask 档）：y/Enter 允许，其余拒绝
+              ok = key in [?y, ?Y] or key == :enter
+              send(state.kernel, {:permission_reply, ok})
+
+              state =
+                state
+                |> Map.put(:awaiting_permission, false)
+                # 权限回复只是结束询问，当前 kernel 回合仍在继续；保持 busy，
+                # 之后按 Enter 的内容进入显式队列。
+                |> Map.put(:busy, true)
+                |> push_line(if ok, do: "\e[32m✓ 已允许执行\e[0m", else: "\e[31m✗ 已拒绝执行\e[0m")
+
+              loop(paint(state), reader)
+            end
           else
             case handle_key(state, reader, key) do
               :quit ->
@@ -409,6 +422,13 @@ defmodule Newbee.TUI do
 
       {:alt, ?d} ->
         {%{state | line_ed: Line.delete_word_forward(state.line_ed)}, false}
+
+      63 ->
+        if state.line_ed.text == "" do
+          {push_line(state, help_text()), true}
+        else
+          {%{state | line_ed: Line.insert(state.line_ed, <<63::utf8>>)}, false}
+        end
 
       ch when is_integer(ch) ->
         {%{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}, false}
@@ -992,6 +1012,12 @@ defmodule Newbee.TUI do
         end
     end
   end
+
+  defp help_text do
+    "help: Enter send | Esc interrupt | Tab complete | Ctrl-A/E home/end | Alt-B/F word jump\n" <>
+      "      Ctrl-U/K cut | Ctrl-Y paste | Ctrl-W/Alt-D delete word | PgUp/Dn scroll | Ctrl-T pane"
+  end
+
 
   # 缓存 bindings（500ms TTL + busy 时跳过查询，避免每帧 GenServer.call 卡 paint）
   @bindings_ttl 500

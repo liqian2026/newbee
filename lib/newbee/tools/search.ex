@@ -10,25 +10,20 @@ defmodule Newbee.Tools.Search do
   def grep(pattern, dir \\ ".", opts \\ []) when is_binary(pattern) do
     max = Keyword.get(opts, :max, 100)
     re = Regex.compile!(pattern)
+    files = list_files(dir)
 
-    dir
-    |> Path.join("**/*")
-    |> Path.wildcard()
-    |> Enum.reject(&(File.dir?(&1) or Regex.match?(@skip, &1)))
+    files
     |> Enum.reduce_while([], fn f, acc ->
       if length(acc) >= max do
         {:halt, acc}
       else
         hits =
           try do
-            # 二进制文件快速跳过：含 NUL 字节视为二进制
             case File.stat(f) do
-              {:ok, %File.Stat{size: s}} when s > 5_000_000 ->
-                []
-
+              {:ok, %File.Stat{size: s}} when s > 5_000_000 -> []
               _ ->
                 f
-                |> File.stream!([], :line)
+                |> File.stream!([:read], :line)
                 |> Stream.with_index(1)
                 |> Enum.reduce_while([], fn {line, n}, inner ->
                   if length(acc) + length(inner) >= max do
@@ -62,10 +57,26 @@ defmodule Newbee.Tools.Search do
 
   @doc "按文件名片段查找。返回路径列表。"
   def find(name, dir \\ ".") do
-    dir
-    |> Path.join("**/*")
-    |> Path.wildcard()
-    |> Enum.reject(&(File.dir?(&1) or Regex.match?(@skip, &1)))
-    |> Enum.filter(&String.contains?(Path.basename(&1), name))
+    list_files(dir) |> Enum.filter(&String.contains?(Path.basename(&1), name))
+  end
+
+  defp list_files(dir) do
+    dir = Path.expand(dir)
+
+    # 优先用 git ls-files（秒级，白名单），失败回退到 wildcard + 过滤
+    case System.cmd("git", ["ls-files", "-co", "--exclude-standard", dir],
+           stderr_to_stdout: true
+         ) do
+      {out, 0} ->
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.reject(&Regex.match?(@skip, "/" <> &1 <> "/"))
+
+      _ ->
+        dir
+        |> Path.join("**/*")
+        |> Path.wildcard()
+        |> Enum.reject(&(File.dir?(&1) or Regex.match?(@skip, &1)))
+    end
   end
 end

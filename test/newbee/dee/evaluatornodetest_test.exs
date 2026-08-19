@@ -1,11 +1,10 @@
 defmodule Newbee.DEE.EvaluatorNodeTest do
-  use ExUnit.Case, async: false
+  use Newbee.EvaluatorCase
   alias Newbee.DEE.Evaluator
 
   @tag :node
-  test "独立节点: 求值 + 绑定持久 + env 过滤" do
-    {:ok, ev} = Evaluator.start(mode: :node)
-
+  test "独立节点: 求值 + 绑定持久 + env 过滤", %{shared_ev: ev} do
+    Evaluator.reset(ev)
     assert %{status: :ok, value: "42"} = Evaluator.eval(ev, "x = 40 + 2")
     assert %{status: :ok, value: "84"} = Evaluator.eval(ev, "x * 2")
 
@@ -18,8 +17,6 @@ defmodule Newbee.DEE.EvaluatorNodeTest do
     System.put_env("OPENROUTER_API_KEY", "sk-should-not-leak")
     r = Evaluator.eval(ev, ~s|System.get_env("OPENROUTER_API_KEY")|)
     assert r.value == "nil"
-
-    GenServer.stop(ev)
   end
 
   @tag :node
