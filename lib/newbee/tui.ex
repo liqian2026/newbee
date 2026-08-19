@@ -1001,7 +1001,7 @@ defmodule Newbee.TUI do
 
   defp pane_lines(:tools, state) do
     blocks = Map.values(state.tool_blocks)
-    ["\e[1;36m[窗格] 工具块 (#{length(blocks)})\e[0m" | Enum.map(blocks, &"  #{&1}")]
+    ["\e[1;36m[窗格] 工具块 (#{length(blocks)})\e[0m" | Enum.map(blocks, &"  #{&1.name}: #{&1.title} (#{String.slice(to_string(&1.code || ""), 0, 60)})")]
   end
 
   defp pane_lines(:queue, state) do
