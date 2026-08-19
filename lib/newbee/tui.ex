@@ -49,7 +49,9 @@ defmodule Newbee.TUI do
             last_paint: 0,
             bindings_cache: [],
             bindings_cache_at: 0,
-            spinner_idx: 0
+            spinner_idx: 0,
+            turn_started_at: nil,
+            shell_started_at: nil
 
   @scrollback 5_000
 
@@ -196,6 +198,27 @@ defmodule Newbee.TUI do
 
   defp loop(state, reader) do
     receive do
+      # Esc 在 busy 时优先抢占：即使 mailbox 里已排了若干 :text/:tool_result，
+      # 也先杀 evaluator/LLM，再丢弃滞后文本，避免"已取消还在流"
+      {:key, :escape} when state.busy ->
+        Newbee.DEE.Kernel.interrupt(state.kernel)
+
+        if state.submit_kind == :shell and is_pid(state.submit_pid) do
+          Process.exit(state.submit_pid, :kill)
+        end
+
+        state =
+          if state.awaiting_permission do
+            send(state.kernel, {:permission_reply, false})
+            state |> Map.put(:awaiting_permission, false) |> push_line("\e[31m⏹ 已拒绝并中断\e[0m")
+          else
+            state |> push_line("\e[31m⏹ 已请求中断…\e[0m")
+          end
+
+        # 丢弃已排队的滞后渲染事件，防"取消后仍吐字"
+        state = flush_pending_events(state) |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil}) |> maybe_start_next()
+        loop(paint(state), reader)
+
       {:key, key} ->
         if state.picker do
           case handle_picker_key(state, key) do
@@ -207,27 +230,19 @@ defmodule Newbee.TUI do
           end
         else
           if state.awaiting_permission do
-            # 权限等待期 Esc/Ctrl-C 仍应中断当前 turn（既拒绝又杀 evaluator）
             if key in [:escape, :ctrl_c] do
+              # 已被上面的 guard 覆盖，此分支仅兜底
               Newbee.DEE.Kernel.interrupt(state.kernel)
               send(state.kernel, {:permission_reply, false})
-
-              state =
-                state
-                |> Map.put(:awaiting_permission, false)
-                |> push_line("\e[31m⏹ 已拒绝并中断\e[0m")
-
+              state = state |> Map.put(:awaiting_permission, false) |> push_line("\e[31m⏹ 已拒绝并中断\e[0m")
               loop(paint(state), reader)
             else
-              # 权限确认流（§8 ask 档）：y/Enter 允许，其余拒绝
               ok = key in [?y, ?Y] or key == :enter
               send(state.kernel, {:permission_reply, ok})
 
               state =
                 state
                 |> Map.put(:awaiting_permission, false)
-                # 权限回复只是结束询问，当前 kernel 回合仍在继续；保持 busy，
-                # 之后按 Enter 的内容进入显式队列。
                 |> Map.put(:busy, true)
                 |> push_line(if ok, do: "\e[32m✓ 已允许执行\e[0m", else: "\e[31m✗ 已拒绝执行\e[0m")
 
@@ -235,11 +250,8 @@ defmodule Newbee.TUI do
             end
           else
             case handle_key(state, reader, key) do
-              :quit ->
-                :ok
-
-              {state, force} ->
-                loop(paint(state, force), reader)
+              :quit -> :ok
+              {state, force} -> loop(paint(state, force), reader)
             end
           end
         end
@@ -252,20 +264,34 @@ defmodule Newbee.TUI do
         loop(state, reader)
 
       {:newbee_event, topic, payload} ->
-        state = state |> render_event(topic, payload) |> schedule_paint()
-        state = if topic == :turn_done, do: maybe_start_next(state), else: state
-        loop(state, reader)
+        # 已中断：丢弃滞后文本/推理，避免取消后仍吐字
+        if Newbee.LLM.Client.interrupted?() and topic in [:text, :reasoning, :tool_start] do
+          loop(state, reader)
+        else
+          state = state |> render_event(topic, payload) |> schedule_paint()
+          state = if topic == :turn_done, do: maybe_start_next(state), else: state
+          loop(state, reader)
+        end
 
       {:shell_done, cmd, result} ->
         output = String.slice(result.output, 0, 8_000)
+
+        dur =
+          if state.shell_started_at do
+            secs = (System.monotonic_time(:millisecond) - state.shell_started_at) / 1000
+            "\e[2m⏱ 用时 #{format_duration(secs)}\e[0m"
+          else
+            nil
+          end
 
         state =
           state
           |> push_line(Newbee.TUI.Cards.shell_header(cmd))
           |> then(fn s -> Enum.reduce(String.split(output, "\n"), s, &push_line(&2, &1)) end)
           |> push_line(Newbee.TUI.Cards.shell_footer(result))
-          |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil})
-          |> maybe_start_next()
+
+        state = if dur, do: push_line(state, dur), else: state
+        state = %{state | busy: false, submit_pid: nil, submit_kind: nil, shell_started_at: nil} |> maybe_start_next()
 
         loop(paint(state), reader)
 
@@ -483,6 +509,7 @@ defmodule Newbee.TUI do
           |> Map.put(:line_ed, %Line{hist: state.line_ed.hist, hcur: length(state.line_ed.hist)})
           |> Map.put(:busy, true)
           |> Map.put(:page, 0)
+          |> Map.put(:turn_started_at, System.monotonic_time(:millisecond))
 
         state = paint(state)
 
@@ -495,10 +522,10 @@ defmodule Newbee.TUI do
             %{state | busy: false}
 
           :ok ->
-            %{state | busy: false}
+            %{state | busy: false, turn_started_at: nil}
 
           :handled ->
-            %{state | busy: false}
+            %{state | busy: false, turn_started_at: nil}
 
           {:shell, cmd} ->
             # !shell 也异步执行，否则主循环被同步 shell 卡住时无法处理 Esc。
@@ -510,7 +537,7 @@ defmodule Newbee.TUI do
                 send(parent, {:shell_done, cmd, result})
               end)
 
-            %{state | submit_pid: shell_pid, submit_kind: :shell}
+            %{state | submit_pid: shell_pid, submit_kind: :shell, shell_started_at: System.monotonic_time(:millisecond)}
 
           {:submit, text} ->
             run_submit(state, text)
@@ -546,7 +573,14 @@ defmodule Newbee.TUI do
 
   defp maybe_start_next(state), do: state
 
-  # ── 会话选择器：/resume、/session list/load 共用 ──
+  defp flush_pending_events(state) do
+    receive do
+      {:newbee_event, topic, _} when topic in [:text, :reasoning, :tool_start, :tool_result, :stream_chunk] ->
+        flush_pending_events(state)
+    after
+      0 -> state
+    end
+  end
 
   defp handle_picker_key(state, :up) do
     picker = %{state.picker | index: max(state.picker.index - 1, 0)}
@@ -779,14 +813,28 @@ defmodule Newbee.TUI do
 
   def render_event(%__MODULE__{} = state, :interrupted, {:interrupted, content}) do
     state = flush_text_buffer(state)
-    state = push_line(state, "\e[31m⏹ 已中断\e[0m")
+    dur_str = if state.turn_started_at do
+      secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
+      "\e[2m⏱ 用时 #{format_duration(secs)} · 已中断\e[0m"
+    else
+      "\e[31m⏹ 已中断\e[0m"
+    end
+    state = push_line(state, dur_str)
+    state = %{state | turn_started_at: nil}
     if content, do: push_line(state, content), else: state
   end
 
   def render_event(%__MODULE__{} = state, :turn_done, _) do
     state = flush_text_buffer(state)
+    dur_str = if state.turn_started_at do
+      secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
+      "\e[2m⏱ 用时 #{format_duration(secs)}\e[0m"
+    else
+      nil
+    end
+    state = if dur_str, do: push_line(state, dur_str), else: state
     notify("newbee", "回合完成")
-    %{state | busy: false, submit_pid: nil, submit_kind: nil}
+    %{state | busy: false, submit_pid: nil, submit_kind: nil, turn_started_at: nil}
   end
 
   def render_event(%__MODULE__{} = state, :tui_say, {:tui_say, text}) do
@@ -1013,6 +1061,13 @@ defmodule Newbee.TUI do
     end
   end
 
+  defp format_duration(secs) when secs < 60, do: :io_lib.format("~.1fs", [secs]) |> IO.iodata_to_binary()
+  defp format_duration(secs) do
+    m = trunc(secs / 60)
+    s = secs - m * 60
+    :io_lib.format("~wm ~.1fs", [m, s]) |> IO.iodata_to_binary()
+  end
+
   defp help_text do
     "help: Enter send | Esc interrupt | Tab complete | Ctrl-A/E home/end | Alt-B/F word jump\n" <>
       "      Ctrl-U/K cut | Ctrl-Y paste | Ctrl-W/Alt-D delete word | PgUp/Dn scroll | Ctrl-T pane"
@@ -1047,11 +1102,17 @@ defmodule Newbee.TUI do
     bs = if state.busy, do: [], else: state.bindings_cache
     bindings = length(bs)
     dots = spinner(state)
+    elapsed_str = if state.busy and state.turn_started_at do
+      secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
+      " · ⏱ #{format_duration(secs)}"
+    else
+      ""
+    end
     page_hint = if state.page > 0, do: " · \e[33m↕ #{state.page} PgDn回底\e[0m\e[2m", else: ""
     q = length(state.pending_inputs)
     qpart = if q > 0, do: " · queue:#{q}", else: ""
     "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())} · " <>
-      "tok:#{tokens} · bind:#{bindings}#{qpart} · #{Newbee.Evolution.Policy.get()}#{page_hint}\e[0m"
+      "tok:#{tokens} · bind:#{bindings}#{qpart} · #{Newbee.Evolution.Policy.get()}#{elapsed_str}#{page_hint}\e[0m"
   end
 
   defp input_view(state) do
