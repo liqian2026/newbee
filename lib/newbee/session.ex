@@ -121,7 +121,7 @@ defmodule Newbee.Session do
       version: 1,
       elixir: System.version(),
       otp: :erlang.system_info(:otp_release) |> List.to_string(),
-      saved_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      saved_at: local_iso(),
       bindings: encode_etf_bindings(binding)
     }
 
@@ -210,7 +210,7 @@ defmodule Newbee.Session do
         Enum.map(binding, fn {name, v} ->
           %{name: to_string(name), type: type_of(v), size: byte_size_safe(v)}
         end),
-      saved_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      saved_at: local_iso()
     }
 
     File.write!(Path.join(dir, "beam_snapshot.json"), Jason.encode_to_iodata!(snapshot, pretty: true))
@@ -341,5 +341,11 @@ defmodule Newbee.Session do
 
   defp gen_id do
     :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+  end
+
+  # 本地时间 ISO（无 tz database 时 :calendar.local_time 即系统本地时区）
+  defp local_iso do
+    {{y, m, d}, {h, mi, sec}} = :calendar.local_time()
+    :io_lib.format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0B", [y, m, d, h, mi, sec]) |> IO.iodata_to_binary()
   end
 end

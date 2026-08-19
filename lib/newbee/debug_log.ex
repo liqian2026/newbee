@@ -1,7 +1,7 @@
 defmodule Newbee.DebugLog do
   @moduledoc """
   调试日志（文件，不污染 TUI 全屏）：
-  `~/.newbee/debug.log`，追加写，带 UTC 时间戳与调用方 tag。
+  `~/.newbee/debug.log`，追加写，带本地时间戳与调用方 tag。
 
   埋点纪律：
   - 只记"决策点与异常"，不记高频数据（SSE 每个 delta 不记）
@@ -16,7 +16,7 @@ defmodule Newbee.DebugLog do
   @doc "追加一条日志。tag 用短冒号链如 :eval/:boot/:ok。"
   def log(tag, msg) do
     line = [
-      DateTime.utc_now() |> DateTime.to_iso8601(),
+      local_iso(),
       " ",
       format_tag(tag),
       " ",
@@ -79,6 +79,11 @@ defmodule Newbee.DebugLog do
   defp format_tag(tag) when is_atom(tag), do: "[#{tag}]"
   defp format_tag(tag) when is_list(tag), do: "[" <> Enum.map_join(tag, ".", &format_tag/1) <> "]"
   defp format_tag(tag), do: inspect(tag)
+
+  defp local_iso do
+    {{y, m, d}, {h, mi, s}} = :calendar.local_time()
+    :io_lib.format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0B", [y, m, d, h, mi, s]) |> IO.iodata_to_binary()
+  end
 end
 
 :ok

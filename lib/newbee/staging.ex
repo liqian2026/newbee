@@ -51,7 +51,7 @@ defmodule Newbee.Staging do
   @impl true
   def handle_call({:stage, path, content, source}, _from, state) do
     id = :erlang.unique_integer([:positive])
-    entry = %{id: id, path: path, content: content, source: source, when: DateTime.to_iso8601(DateTime.utc_now())}
+    entry = %{id: id, path: path, content: content, source: source, when: local_iso()}
     state = put_entry(state, entry)
     {:reply, id, state}
   end
@@ -179,5 +179,10 @@ defmodule Newbee.Staging do
           acc
       end
     end)
+  end
+
+  defp local_iso do
+    {{y, m, d}, {h, mi, s}} = :calendar.local_time()
+    :io_lib.format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0B", [y, m, d, h, mi, s]) |> IO.iodata_to_binary()
   end
 end

@@ -74,7 +74,7 @@ defmodule Newbee.EventLog do
         Jason.encode_to_iodata!(%{
           topic: topic,
           event: encodable(event),
-          at: DateTime.to_iso8601(DateTime.utc_now())
+          at: local_iso()
         })
 
       File.write!(@path, [line, "\n"], [:append])
@@ -116,5 +116,11 @@ defmodule Newbee.EventLog do
       _ ->
         :ok
     end
+  end
+
+  # 本地时间 ISO（事件日志与界面同源，避免 UTC 差 8 小时）
+  defp local_iso do
+    {{y, m, d}, {h, mi, s}} = :calendar.local_time()
+    :io_lib.format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0B", [y, m, d, h, mi, s]) |> IO.iodata_to_binary()
   end
 end

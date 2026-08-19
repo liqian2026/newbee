@@ -252,6 +252,7 @@ defmodule Newbee.TUI do
 
               loop(paint(state), reader)
             end
+          else
             case handle_key(state, reader, key) do
               :quit -> :ok
               {state, force} -> loop(paint(state, force), reader)
