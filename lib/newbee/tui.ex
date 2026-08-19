@@ -204,7 +204,7 @@ defmodule Newbee.TUI do
     receive do
       # Esc 在 busy 时优先抢占：即使 mailbox 里已排了若干 :text/:tool_result，
       # 也先杀 evaluator/LLM，再丢弃滞后文本，避免"已取消还在流"
-      {:key, :escape} when state.busy ->
+      {:key, key} when key in [:esc, :escape] and state.busy ->
         Newbee.DEE.Kernel.interrupt(state.kernel)
 
         if state.submit_kind == :shell and is_pid(state.submit_pid) do
@@ -234,7 +234,7 @@ defmodule Newbee.TUI do
           end
         else
           if state.awaiting_permission do
-            if key in [:escape, :ctrl_c] do
+            if key in [:esc, :escape, :ctrl_c] do
               # 已被上面的 guard 覆盖，此分支仅兜底
               Newbee.DEE.Kernel.interrupt(state.kernel)
               send(state.kernel, {:permission_reply, false})
@@ -252,7 +252,6 @@ defmodule Newbee.TUI do
 
               loop(paint(state), reader)
             end
-          else
             case handle_key(state, reader, key) do
               :quit -> :ok
               {state, force} -> loop(paint(state, force), reader)
@@ -427,6 +426,20 @@ defmodule Newbee.TUI do
           {%{state | page: max(state.page - 1, 0)}, true}
 
         :escape ->
+          if state.busy do
+            Newbee.DEE.Kernel.interrupt(state.kernel)
+            if state.submit_kind == :shell and is_pid(state.submit_pid) do
+              Process.exit(state.submit_pid, :kill)
+              state = state |> push_line("\e[31m⏹ shell 已中断\e[0m") |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil}) |> maybe_start_next()
+              {state, false}
+            else
+              {state |> push_line("\e[31m⏹ 已请求中断…\e[0m"), false}
+            end
+          else
+            {%{state | line_ed: Line.clear(state.line_ed)}, false}
+          end
+
+        :esc ->
           if state.busy do
             Newbee.DEE.Kernel.interrupt(state.kernel)
             if state.submit_kind == :shell and is_pid(state.submit_pid) do
@@ -1306,6 +1319,4 @@ defmodule Newbee.TUI do
   end
 end
 
-# MARKER_TEST_123
 
-# MARKER_PATCH2
