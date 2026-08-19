@@ -82,7 +82,7 @@ defmodule Newbee.Markdown do
           Regex.match?(@fence_start, line) ->
             [_, _ticks, lang] = Regex.run(@fence_start, line)
             label = if lang == "", do: "```", else: "```" <> lang
-            render_blocks(rest, {:fence, lang}, ["\e[2m" <> label <> "\e[0m" | acc])
+            render_blocks(rest, {:fence, lang}, ["\e[36m" <> label <> "\e[0m" | acc])
 
           Regex.match?(@heading, line) ->
             [_, hashes, body] = Regex.run(@heading, line)
