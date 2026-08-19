@@ -725,13 +725,14 @@ defmodule Newbee.DEE.Kernel do
       {:halt, {:halt, {:interrupted, nil}, state}}
     else
       Newbee.DebugLog.log(:tool, "eval done status=#{eval_result.status} title=#{title}")
+      # warning 单独徽标化：transcript 不刷屏，Bus 另发 :tool_warnings 供 TUI 折叠
+      warnings = Map.get(eval_result, :warnings, "")
+      if warnings != "" and warnings != nil, do: emit(state, {:tool_warnings, warnings})
       rendered = Newbee.DEE.Result.render(eval_result)
 
       if eval_result.status == :error do
         emit(state, {:tool_error, rendered})
-        # 失败抗体自动生成（§6.3）：真实失败沉淀为回归断言
         maybe_auto_antibody(state, code, eval_result)
-        # worker 供线索（§3.8）：同签名反复失败 → 自动写进化线索
         {state, hints} = maybe_worker_hint(state, eval_result)
         Enum.each(hints, &emit(state, {:worker_hint, &1}))
       end
@@ -749,9 +750,6 @@ defmodule Newbee.DEE.Kernel do
   end
 
   defp eval_interrupted?(%{status: :error, error: "interrupted"}), do: true
-  defp eval_interrupted?(_), do: false
-
-  # advisor（§3.8）：每 3 步对最近 assistant 输出插评（concern/blocker），只读不干预
   defp maybe_advisor(%{advisor: nil} = state), do: state
 
   defp maybe_advisor(state) do

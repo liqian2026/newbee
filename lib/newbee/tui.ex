@@ -51,7 +51,11 @@ defmodule Newbee.TUI do
             bindings_cache_at: 0,
             spinner_idx: 0,
             turn_started_at: nil,
-            shell_started_at: nil
+            shell_started_at: nil,
+            search_mode: false,
+            search_query: "",
+            search_idx: 0,
+            search_orig: ""
 
   @scrollback 5_000
 
@@ -310,163 +314,194 @@ defmodule Newbee.TUI do
 
   # 普通按键处理（权限确认由 loop 先拦截）。返回 :quit | {state, force_paint?}。
   defp handle_key(state, reader, key) do
-    case key do
-      :ctrl_a ->
-        {%{state | line_ed: Line.home(state.line_ed)}, false}
+    if state.search_mode do
+      # 搜索态：Ctrl-T 直接退出搜索并切窗格；Ctrl-R 退出搜索并切思考流，避免搜索独占
+      case key do
+        :ctrl_t ->
+          state = %{state | search_mode: false, search_query: "", search_idx: 0, search_orig: ""}
+          {%{state | pane: next_pane(state.pane)}, true}
 
-      :ctrl_e ->
-        {%{state | line_ed: Line.to_end(state.line_ed)}, false}
+        :ctrl_r ->
+          state = %{state | search_mode: false, search_query: "", search_idx: 0, search_orig: ""}
+          state = %{state | show_reasoning: not state.show_reasoning}
+          {push_line(state, if(state.show_reasoning, do: "\e[2m思考流：显示\e[0m", else: "\e[2m思考流：隐藏\e[0m")), true}
 
-      :ctrl_b ->
-        {%{state | line_ed: Line.left(state.line_ed)}, false}
+        _ ->
+          search_key(state, key)
+      end
+    else
+      case key do
+        :ctrl_a ->
+          {%{state | line_ed: Line.home(state.line_ed)}, false}
 
-      :ctrl_f ->
-        {%{state | line_ed: Line.right(state.line_ed)}, false}
+        :ctrl_e ->
+          {%{state | line_ed: Line.to_end(state.line_ed)}, false}
 
-      :ctrl_h ->
-        {%{state | line_ed: Line.backspace(state.line_ed)}, false}
+        :ctrl_b ->
+          {%{state | line_ed: Line.left(state.line_ed)}, false}
 
-      :ctrl_d ->
-        # 空行时 Ctrl-D 退出（unix 习惯），否则删后一字符
-        if state.line_ed.text == "" do
-          :quit
-        else
+        :ctrl_f ->
+          {%{state | line_ed: Line.right(state.line_ed)}, false}
+
+        :ctrl_h ->
+          {%{state | line_ed: Line.backspace(state.line_ed)}, false}
+
+        :ctrl_d ->
+          if state.line_ed.text == "", do: :quit, else: {%{state | line_ed: Line.delete(state.line_ed)}, false}
+
+        :ctrl_p ->
+          {%{state | line_ed: Line.hist_prev(state.line_ed)}, false}
+
+        :ctrl_n ->
+          {%{state | line_ed: Line.hist_next(state.line_ed)}, false}
+
+        :ctrl_c ->
+          if state.line_ed.text == "", do: :quit, else: {%{state | line_ed: Line.clear(state.line_ed)}, false}
+
+        :ctrl_l ->
+          {state, true}
+
+        :enter ->
+          {submit(state, reader), false}
+
+        :backspace ->
+          {%{state | line_ed: Line.backspace(state.line_ed)}, false}
+
+        :delete ->
           {%{state | line_ed: Line.delete(state.line_ed)}, false}
-        end
 
-      :ctrl_p ->
-        {%{state | line_ed: Line.hist_prev(state.line_ed)}, false}
+        :left ->
+          {%{state | line_ed: Line.left(state.line_ed)}, false}
 
-      :ctrl_n ->
-        {%{state | line_ed: Line.hist_next(state.line_ed)}, false}
+        :right ->
+          {%{state | line_ed: Line.right(state.line_ed)}, false}
 
-      :ctrl_c ->
-        # 空输入时 Ctrl-C 退出（codex 行为）
-        if state.line_ed.text == "", do: :quit, else: {%{state | line_ed: Line.clear(state.line_ed)}, false}
+        :home ->
+          {%{state | line_ed: Line.home(state.line_ed)}, false}
 
-      :ctrl_l ->
-        {state, true}
+        :end ->
+          {%{state | line_ed: Line.to_end(state.line_ed)}, false}
 
-      :enter ->
-        {submit(state, reader), false}
+        :ctrl_u ->
+          {%{state | line_ed: Line.cut_to_start(state.line_ed)}, false}
 
-      :backspace ->
-        {%{state | line_ed: Line.backspace(state.line_ed)}, false}
+        :ctrl_k ->
+          {%{state | line_ed: Line.cut_to_end(state.line_ed)}, false}
 
-      :delete ->
-        {%{state | line_ed: Line.delete(state.line_ed)}, false}
+        :ctrl_y ->
+          {%{state | line_ed: Line.yank(state.line_ed)}, false}
 
-      :left ->
-        {%{state | line_ed: Line.left(state.line_ed)}, false}
+        :ctrl_t ->
+          {%{state | pane: next_pane(state.pane)}, true}
 
-      :right ->
-        {%{state | line_ed: Line.right(state.line_ed)}, false}
+        :ctrl_w ->
+          {%{state | line_ed: Line.cut_word(state.line_ed)}, false}
 
-      :home ->
-        {%{state | line_ed: Line.home(state.line_ed)}, false}
+        :ctrl_r ->
+          q = state.line_ed.text
+          matches = hist_matches(state, q)
+          text = if matches == [], do: state.line_ed.text, else: Enum.at(matches, 0)
+          ed = %{state.line_ed | text: text, cur: String.length(text)}
+          {%{state | search_mode: true, search_query: q, search_idx: 0, search_orig: state.line_ed.text, line_ed: ed}, true}
 
-      :end ->
-        {%{state | line_ed: Line.to_end(state.line_ed)}, false}
-
-      :ctrl_u ->
-        {%{state | line_ed: Line.cut_to_start(state.line_ed)}, false}
-
-      :ctrl_k ->
-        {%{state | line_ed: Line.cut_to_end(state.line_ed)}, false}
-
-      :ctrl_y ->
-        {%{state | line_ed: Line.yank(state.line_ed)}, false}
-
-      :ctrl_t ->
-        # Ctrl+T 切换可选窗格（DESIGN §5.2）：绑定 / 事件日志 / 工具块
-        {%{state | pane: next_pane(state.pane)}, true}
-
-      :ctrl_w ->
-        {%{state | line_ed: Line.cut_word(state.line_ed)}, false}
-
-      :ctrl_r ->
-        state = %{state | show_reasoning: not state.show_reasoning}
-        {push_line(state, if(state.show_reasoning, do: "\e[2m思考流：显示\e[0m", else: "\e[2m思考流：隐藏\e[0m")), true}
-
-      :tab ->
-        # 空输入时 Tab = 展开/收起最近工具块（§5.1 折叠块）；有输入时 Tab = 补全
-        if state.line_ed.text == "" and state.last_block_id do
-          case Map.get(state.tool_blocks, state.last_block_id) do
-            nil ->
-              {%{state | line_ed: Line.complete(state.line_ed)}, false}
-
-            block ->
-              if Map.get(state.tool_open, block.id) do
-                {state, false}
-              else
-                state = expand_block(state, block)
-                {state, true}
-              end
-          end
-        else
-          {%{state | line_ed: Line.complete(state.line_ed)}, false}
-        end
-
-      :up ->
-        {%{state | line_ed: Line.hist_prev(state.line_ed)}, false}
-
-      :down ->
-        {%{state | line_ed: Line.hist_next(state.line_ed)}, false}
-
-      :page_up ->
-        {%{state | page: min(state.page + 1, 50)}, true}
-
-      :page_down ->
-        {%{state | page: max(state.page - 1, 0)}, true}
-
-      :escape ->
-        if state.busy do
-          # 无论当前焦点在输入行、输出区、模型流还是 run_elixir，
-          # 都走同一个非阻塞取消面。
-          Newbee.DEE.Kernel.interrupt(state.kernel)
-
-          if state.submit_kind == :shell and is_pid(state.submit_pid) do
-            Process.exit(state.submit_pid, :kill)
-
-            state =
-              state
-              |> push_line("\e[31m⏹ shell 已中断\e[0m")
-              |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil})
-              |> maybe_start_next()
-
-            {state, false}
+        :tab ->
+          if state.line_ed.text == "" and state.last_block_id do
+            case Map.get(state.tool_blocks, state.last_block_id) do
+              nil -> {%{state | line_ed: Line.complete(state.line_ed)}, false}
+              block -> if Map.get(state.tool_open, block.id), do: {state, false}, else: {expand_block(state, block), true}
+            end
           else
-            state = state |> push_line("\e[31m⏹ 已请求中断…\e[0m")
-            {state, false}
+            {%{state | line_ed: Line.complete(state.line_ed)}, false}
           end
-        else
-          # 清输入
-          {%{state | line_ed: Line.clear(state.line_ed)}, false}
-        end
 
-      {:alt, ?b} ->
-        {%{state | line_ed: Line.word_left(state.line_ed)}, false}
+        :up ->
+          {%{state | line_ed: Line.hist_prev(state.line_ed)}, false}
 
-      {:alt, ?f} ->
-        {%{state | line_ed: Line.word_right(state.line_ed)}, false}
+        :down ->
+          {%{state | line_ed: Line.hist_next(state.line_ed)}, false}
 
-      {:alt, ?d} ->
-        {%{state | line_ed: Line.delete_word_forward(state.line_ed)}, false}
+        :page_up ->
+          {%{state | page: min(state.page + 1, 50)}, true}
 
-      63 ->
-        if state.line_ed.text == "" do
-          {push_line(state, help_text()), true}
-        else
-          {%{state | line_ed: Line.insert(state.line_ed, <<63::utf8>>)}, false}
-        end
+        :page_down ->
+          {%{state | page: max(state.page - 1, 0)}, true}
 
-      ch when is_integer(ch) ->
-        {%{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}, false}
+        :escape ->
+          if state.busy do
+            Newbee.DEE.Kernel.interrupt(state.kernel)
+            if state.submit_kind == :shell and is_pid(state.submit_pid) do
+              Process.exit(state.submit_pid, :kill)
+              state = state |> push_line("\e[31m⏹ shell 已中断\e[0m") |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil}) |> maybe_start_next()
+              {state, false}
+            else
+              {state |> push_line("\e[31m⏹ 已请求中断…\e[0m"), false}
+            end
+          else
+            {%{state | line_ed: Line.clear(state.line_ed)}, false}
+          end
 
-      _unknown ->
-        {state, false}
+        {:alt, ?b} -> {%{state | line_ed: Line.word_left(state.line_ed)}, false}
+        {:alt, ?f} -> {%{state | line_ed: Line.word_right(state.line_ed)}, false}
+        {:alt, ?d} -> {%{state | line_ed: Line.delete_word_forward(state.line_ed)}, false}
+        63 -> if state.line_ed.text == "", do: {push_line(state, help_text()), true}, else: {%{state | line_ed: Line.insert(state.line_ed, <<63::utf8>>)}, false}
+        ch when is_integer(ch) -> {%{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}, false}
+        _unknown -> {state, false}
+      end
     end
   end
+
+  defp hist_matches(state, q) do
+    if q == "" do
+      []
+    else
+      state.line_ed.hist
+      |> Enum.reverse()
+      |> Enum.filter(&String.contains?(&1, q))
+    end
+  end
+
+  defp apply_search(state, q) do
+    matches = hist_matches(state, q)
+    text = if matches == [], do: state.search_orig, else: Enum.at(matches, 0)
+    ed = %{state.line_ed | text: text, cur: String.length(text)}
+    {%{state | search_query: q, search_idx: 0, line_ed: ed}, true}
+  end
+
+  defp search_key(state, :ctrl_r) do
+    matches = hist_matches(state, state.search_query)
+    if matches == [] do
+      {state, true}
+    else
+      idx = rem(state.search_idx + 1, length(matches))
+      text = Enum.at(matches, idx)
+      ed = %{state.line_ed | text: text, cur: String.length(text)}
+      {%{state | search_idx: idx, line_ed: ed}, true}
+    end
+  end
+
+  defp search_key(state, :enter) do
+    {%{state | search_mode: false, search_query: "", search_idx: 0, search_orig: ""}, true}
+  end
+
+  defp search_key(state, :escape) do
+    ed = %{state.line_ed | text: state.search_orig, cur: String.length(state.search_orig)}
+    {%{state | search_mode: false, search_query: "", search_idx: 0, search_orig: "", line_ed: ed}, true}
+  end
+
+  defp search_key(state, :ctrl_c) do
+    search_key(state, :escape)
+  end
+
+  defp search_key(state, :backspace) do
+    q = String.slice(state.search_query, 0, max(String.length(state.search_query) - 1, 0))
+    apply_search(state, q)
+  end
+
+  defp search_key(state, ch) when is_integer(ch) do
+    apply_search(state, state.search_query <> <<ch::utf8>>)
+  end
+
+  defp search_key(state, _), do: {state, true}
 
   # ── 提交 ──
 
@@ -685,12 +720,14 @@ defmodule Newbee.TUI do
 
     case String.split(combined, "\n") do
       [_] ->
-        # 没有换行, 继续缓冲
+        # 没有换行：streaming 中追加到当前行，否则开新行（实时显示，不等换行）
         if state.streaming and state.stream_kind == :text do
-          %{state | text_buffer: combined}
+          state
+          |> append_text(delta)
+          |> Map.put(:text_buffer, combined)
         else
           state
-          |> push_line("")
+          |> push_line(delta)
           |> Map.put(:streaming, true)
           |> Map.put(:stream_kind, :text)
           |> Map.put(:text_buffer, combined)
@@ -742,7 +779,7 @@ defmodule Newbee.TUI do
   def render_event(%__MODULE__{} = state, :tool_start, {:tool_start, name, title, code}) do
     state = flush_text_buffer(state)
     id = :erlang.unique_integer([:positive])
-    block = %{id: id, name: name, title: title, code: code, result: nil}
+    block = %{id: id, name: name, title: title, code: code, result: nil, started_at: System.monotonic_time(:millisecond)}
     line = tool_block_line(block)
     %{push_line(state, line) | tool_blocks: Map.put(state.tool_blocks, id, block), last_block_id: id}
   end
@@ -762,9 +799,17 @@ defmodule Newbee.TUI do
       end
 
     line = Newbee.TUI.Cards.tool_footer(text)
-    push_line(state, line)
+    dur =
+      if id do
+        case Map.get(state.tool_blocks, id) do
+          %{started_at: at} -> "\e[2m ⏱ #{format_duration((System.monotonic_time(:millisecond) - at) / 1000)}\e[0m"
+          _ -> ""
+        end
+      else
+        ""
+      end
+    push_line(state, line <> dur)
   end
-
   def render_event(%__MODULE__{} = state, :permission_ask, {:permission_ask, preview}) do
     first_line = preview |> String.split("\n") |> hd() |> String.slice(0, 80)
 
@@ -772,6 +817,23 @@ defmodule Newbee.TUI do
       push_line(state, "\e[33m? 允许执行以下代码？[y 允许 / 任意键拒绝]\e[0m \e[2m#{first_line}\e[0m")
 
     %{state | awaiting_permission: true, busy: true}
+  end
+
+  def render_event(%__MODULE__{} = state, :tool_warnings, {:tool_warnings, text}) do
+    # 编译 warnings 徽标化：transcript 只留一行，详情存 tool_blocks 供 Tab 展开
+    count = text |> String.split("\n", trim: true) |> length()
+    badge = "\e[33m⚠ 警告 #{count} 条\e[0m\e[2m [Tab 展开工具块]\e[0m"
+    state = push_line(flush_text_buffer(state), badge)
+
+    # 把 warning 落到最近工具块的 result 尾部（折叠详情）
+    case Map.get(state, :last_block_id) do
+      nil -> state
+      id ->
+        case Map.get(state.tool_blocks, id) do
+          nil -> state
+          block -> %{state | tool_blocks: Map.put(state.tool_blocks, id, %{block | warnings: text})}
+        end
+    end
   end
 
   def render_event(%__MODULE__{} = state, :file_diff, {:file_diff, path, diff, stats}) do
@@ -793,7 +855,6 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :audit, {:audit, :dangerous_code, hits}) do
-    push_line(state, "\e[31m⚖ 审计: 危险代码模式 #{inspect(hits)}\e[0m")
   end
 
   def render_event(%__MODULE__{} = state, :audit, {:audit, verdict, actor, target, ring}) do
@@ -889,6 +950,11 @@ defmodule Newbee.TUI do
   # ── 流式追加 ──
 
   # Flush 缓冲的 markdown 文本到显示行
+  # streaming 时 delta 已实时 append 到行尾，只清空缓冲避免重复
+  defp flush_text_buffer(%__MODULE__{streaming: true, stream_kind: :text} = state) do
+    %{state | text_buffer: <<>>}
+  end
+
   defp flush_text_buffer(%__MODULE__{text_buffer: <<>>} = state), do: state
 
   defp flush_text_buffer(%__MODULE__{} = state) do
@@ -972,12 +1038,14 @@ defmodule Newbee.TUI do
     # 绑定缓存：busy 时跳过查询，避免 GenServer 排队卡 paint；闲时 500ms TTL
     {_, state} = cached_bindings(state)
     {cols, rows} = terminal_size()
-    {input_view, cur_col} = input_view(state)
-    status = {status_line(state), {rows, cur_col}}
+    {input_view, cur_row, cur_col} = input_view(state)
+    input_rows = max(String.split(input_view, "\n") |> length(), 1)
+    line_no = rows - input_rows + cur_row
+    status = {status_line(state), {line_no, cur_col}}
     lines = state.lines ++ pane_lines(state.pane, state) ++ picker_lines(state.picker)
 
     screen =
-      if state.screen == nil or force or state.screen.cols != cols do
+      if state.screen == nil or force or state.screen.cols != cols or state.screen.input_rows != input_rows do
         Screen.paint_full(state.out, lines, input_view, status, cols, rows, state.page)
       else
         Screen.paint_delta(state.screen, lines, input_view, status, cols, rows, state.page)
@@ -1108,25 +1176,49 @@ defmodule Newbee.TUI do
     dots = spinner(state)
     elapsed_str = if state.busy and state.turn_started_at do
       secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
-      " · ⏱ #{format_duration(secs)}"
+      " ⏱ #{format_duration(secs)}"
     else
       ""
     end
-    page_hint = if state.page > 0, do: " · \e[33m↕ #{state.page} PgDn回底\e[0m\e[2m", else: ""
+    page_hint = if state.page > 0, do: " ↕#{state.page}", else: ""
     q = length(state.pending_inputs)
-    qpart = if q > 0, do: " · queue:#{q}", else: ""
-    "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())} · " <>
-      "tok:#{tokens} · bind:#{bindings}#{qpart} · #{Newbee.Evolution.Policy.get()}#{elapsed_str}#{page_hint}\e[0m"
+    qpart = if q > 0, do: " q:#{q}", else: ""
+    # 左：model + cwd；右：tokens/bindings/policy/elapsed（分栏，右对齐）
+    left = "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())}\e[0m"
+    right =
+      "\e[2m#{page_hint}\e[33m#{elapsed_str}\e[0m\e[2m tok:#{tokens} bind:#{bindings}#{qpart} #{Newbee.Evolution.Policy.get()}\e[0m"
+    cols = terminal_cols()
+    lw = visible_len(left)
+    rw = visible_len(right)
+    pad = max(cols - lw - rw - 2, 1)
+    left <> String.duplicate(" ", pad) <> right
+  end
+
+  # 剥 ANSI 后按可见宽度算（用于分栏对齐）
+  defp visible_len(s) do
+    s |> String.replace(~r/\e\[[0-9;]*m/, "") |> Line.width()
   end
 
   defp input_view(state) do
-    prefix = if state.busy, do: "\e[33m…\e[0m ", else: "\e[32m›\e[0m "
-
-    if state.line_ed.text == "" and not state.busy do
-      {prefix <> "\e[2m试试 /model /bindings /compact  ·  @文件  ·  !shell  ·  ?帮助\e[0m", 2}
+    if state.search_mode do
+      q = state.search_query
+      prefix = "\e[33m(reverse-i-search)`" <> q <> "':\e[0m "
+      {prefix <> state.line_ed.text, 0, 2 + Newbee.TUI.Line.width(q) + 2}
     else
-      {line, cur_col} = Line.scroll_view(state.line_ed, terminal_cols() - 4)
-      {prefix <> line, 2 + cur_col}
+      if state.line_ed.text == "" and not state.busy do
+        {"\e[2m试试 /model /bindings /compact  ·  @文件  ·  !shell  ·  ?帮助\e[0m", 0, 2}
+      else
+        prefix = if state.busy, do: "\e[33m…\e[0m ", else: "\e[32m›\e[0m "
+        row = Line.cursor_row(state.line_ed)
+        {line, cur_col} = Line.scroll_view(state.line_ed, terminal_cols() - 4)
+        # 多行：第一行带前缀，后续行两空格缩进
+        text =
+          line
+          |> String.split("\n")
+          |> Enum.with_index()
+          |> Enum.map_join("\n", fn {l, i} -> if i == 0, do: prefix <> l, else: "  " <> l end)
+        {text, row, 2 + cur_col}
+      end
     end
   end
 

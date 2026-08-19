@@ -94,28 +94,41 @@ defmodule Newbee.DEE.EvalWorker do
     case Task.yield(task, timeout) do
       nil ->
         Task.shutdown(task, :brutal_kill)
-        {%{status: :error, error: "timeout after #{timeout}ms", output: ""}, binding, count + 1}
+        {%{status: :error, error: "timeout after #{timeout}ms", output: "", warnings: ""}, binding, count + 1}
 
       {:ok, _} ->
         receive do
           {:cell_done, _, {:ok, value, new_binding}, out} ->
-            {%{status: :ok, value: safe_inspect(value), output: out}, new_binding, count + 1}
+            {warnings, clean_out} = split_warnings(out)
+            {%{status: :ok, value: safe_inspect(value), output: clean_out, warnings: warnings}, new_binding, count + 1}
 
           {:cell_done, _, {:error, msg}, out} ->
-            {%{status: :error, error: msg, output: out}, binding, count + 1}
+            {warnings, clean_out} = split_warnings(out)
+            # 异常里也可能含编译 warning 尾巴，统一拆出
+            {extra_w, clean_err} = split_warnings(msg)
+            warnings = if extra_w != "", do: warnings <> "\n" <> extra_w, else: warnings
+            {%{status: :error, error: clean_err, output: clean_out, warnings: warnings}, binding, count + 1}
         after
           1_000 ->
-            {%{status: :error, error: "cell result lost", output: ""}, binding, count + 1}
+            {%{status: :error, error: "cell result lost", output: "", warnings: ""}, binding, count + 1}
         end
 
       {:exit, :killed} ->
-        {%{status: :error, error: "interrupted", output: ""}, binding, count + 1}
+        {%{status: :error, error: "interrupted", output: "", warnings: ""}, binding, count + 1}
 
       {:exit, reason} ->
-        {%{status: :error, error: "cell task exited: #{inspect(reason)}", output: ""}, binding, count + 1}
+        {%{status: :error, error: "cell task exited: #{inspect(reason)}", output: "", warnings: ""}, binding, count + 1}
     end
   end
 
+  # 编译 warning 单独拆出：BEAM 的 warning: 行 + 后续缩进行归一处，transcript 只留徽标
+  defp split_warnings(text) when is_binary(text) do
+    lines = String.split(text, "\n")
+    {warnings, clean} = Enum.split_with(lines, &String.starts_with?(&1, "warning:"))
+    {Enum.join(warnings, "\n"), Enum.join(clean, "\n") |> String.trim_leading("\n")}
+  end
+
+  defp split_warnings(other), do: {"", to_string(other)}
   defp register_remote_active(_node, key, _pid) when is_nil(key), do: :ok
 
   defp register_remote_active(node, key, pid) do
