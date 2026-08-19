@@ -46,7 +46,10 @@ defmodule Newbee.TUI do
             out: nil,
             awaiting_permission: false,
             text_buffer: <<>>,
-            last_paint: 0
+            last_paint: 0,
+            bindings_cache: [],
+            bindings_cache_at: 0,
+            spinner_idx: 0
 
   @scrollback 5_000
 
@@ -261,6 +264,35 @@ defmodule Newbee.TUI do
   # 普通按键处理（权限确认由 loop 先拦截）。返回 :quit | {state, force_paint?}。
   defp handle_key(state, reader, key) do
     case key do
+      :ctrl_a ->
+        {%{state | line_ed: Line.home(state.line_ed)}, false}
+
+      :ctrl_e ->
+        {%{state | line_ed: Line.to_end(state.line_ed)}, false}
+
+      :ctrl_b ->
+        {%{state | line_ed: Line.left(state.line_ed)}, false}
+
+      :ctrl_f ->
+        {%{state | line_ed: Line.right(state.line_ed)}, false}
+
+      :ctrl_h ->
+        {%{state | line_ed: Line.backspace(state.line_ed)}, false}
+
+      :ctrl_d ->
+        # 空行时 Ctrl-D 退出（unix 习惯），否则删后一字符
+        if state.line_ed.text == "" do
+          :quit
+        else
+          {%{state | line_ed: Line.delete(state.line_ed)}, false}
+        end
+
+      :ctrl_p ->
+        {%{state | line_ed: Line.hist_prev(state.line_ed)}, false}
+
+      :ctrl_n ->
+        {%{state | line_ed: Line.hist_next(state.line_ed)}, false}
+
       :ctrl_c ->
         # 空输入时 Ctrl-C 退出（codex 行为）
         if state.line_ed.text == "", do: :quit, else: {%{state | line_ed: Line.clear(state.line_ed)}, false}
@@ -361,6 +393,15 @@ defmodule Newbee.TUI do
           {%{state | line_ed: Line.clear(state.line_ed)}, false}
         end
 
+      {:alt, ?b} ->
+        {%{state | line_ed: Line.word_left(state.line_ed)}, false}
+
+      {:alt, ?f} ->
+        {%{state | line_ed: Line.word_right(state.line_ed)}, false}
+
+      {:alt, ?d} ->
+        {%{state | line_ed: Line.delete_word_forward(state.line_ed)}, false}
+
       ch when is_integer(ch) ->
         {%{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}, false}
 
@@ -447,22 +488,10 @@ defmodule Newbee.TUI do
             run_submit(state, text)
 
           {:restart} ->
-            # /model 切换：重建会话内核（保留原会话，模型换新）
-            sid =
-              case :sys.get_state(state.kernel) do
-                %{session: %Newbee.Session{} = s} -> s.id
-                _ -> nil
-              end
-
-            GenServer.stop(state.kernel)
-            client2 = Newbee.LLM.Config.client_for()
-            opts = if sid, do: [session_id: sid], else: []
-
-            {:ok, kernel2} =
-              Newbee.DEE.Kernel.start_link([client: client2, auto_antibodies: true, render: fn _ -> :ok end] ++ opts)
-
-            send(self(), {:newbee_event, :tui_say, {:tui_say, "会话内核已重建（模型: #{client2.model}）"}})
-            %{state | kernel: kernel2, client: client2, busy: false}
+            # 兼容：旧版 Commands 曾返回 {:restart} 重建内核，现已改为热切（Commands 直接 :handled）
+            # 保留分支仅作兜底：热切失败才重建。
+            ctx.say.("（兼容分支）热切失败，尝试重建内核…")
+            %{state | busy: false}
 
           {:resume, id} ->
             GenServer.stop(state.kernel)
@@ -841,15 +870,15 @@ defmodule Newbee.TUI do
 
   defp schedule_paint(state) do
     now = System.monotonic_time(:millisecond)
+    # 16ms≈60fps，忙时 spinner 每帧都有机会转；闲时 30ms 也够平滑
+    thresh = if state.busy, do: 16, else: 30
 
-    if now - state.last_paint > 30 do
+    if now - state.last_paint > thresh do
       send(self(), {:paint, :now})
       %{state | last_paint: now}
     else
-      # 节流窗口内只标记不够：流末尾的最后一个 delta 若无兜底定时器，
-      # 要等下一条消息/按键才画出来（"回合完成但不显示"的残留根因）
       unless state.render_pending do
-        Process.send_after(self(), {:paint, :now}, 35)
+        Process.send_after(self(), {:paint, :now}, thresh + 5)
       end
 
       %{state | render_pending: true}
@@ -857,6 +886,10 @@ defmodule Newbee.TUI do
   end
 
   defp paint(state, force \\ false) do
+    # spinner 动画：忙时每帧递增，闲时归零
+    state = if state.busy, do: %{state | spinner_idx: state.spinner_idx + 1}, else: %{state | spinner_idx: 0}
+    # 绑定缓存：busy 时跳过查询，避免 GenServer 排队卡 paint；闲时 500ms TTL
+    {_, state} = cached_bindings(state)
     {cols, rows} = terminal_size()
     {input_view, cur_col} = input_view(state)
     status = {status_line(state), {rows, cur_col}}
@@ -951,21 +984,48 @@ defmodule Newbee.TUI do
     end
   end
 
+  # 缓存 bindings（500ms TTL + busy 时跳过查询，避免每帧 GenServer.call 卡 paint）
+  @bindings_ttl 500
+  defp cached_bindings(state) do
+    now = System.monotonic_time(:millisecond)
+
+    if state.busy do
+      {state.bindings_cache, state}
+    else
+      if now - state.bindings_cache_at < @bindings_ttl and state.bindings_cache != [] do
+        {state.bindings_cache, state}
+      else
+        bs = safe_bindings_summary()
+        {bs, %{state | bindings_cache: bs, bindings_cache_at: now}}
+      end
+    end
+  end
+
+  @spinner ~w(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+  defp spinner(state) do
+    if state.busy, do: Enum.at(@spinner, rem(state.spinner_idx, length(@spinner))) <> " ", else: ""
+  end
+
   defp status_line(state) do
     usage = state.usage
     tokens = Map.get(usage, "total_tokens", 0)
+    bs = if state.busy, do: [], else: state.bindings_cache
+    bindings = length(bs)
+    dots = spinner(state)
 
-    bindings = if state.busy, do: 0, else: length(safe_bindings_summary())
-
-    "\e[2m#{state.client.model} · #{Path.basename(File.cwd!())} · " <>
+    "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())} · " <>
       "tokens: #{tokens} · bindings: #{bindings} · queue: #{length(state.pending_inputs)} · policy: #{Newbee.Evolution.Policy.get()}\e[0m"
   end
 
   defp input_view(state) do
     prefix = if state.busy, do: "\e[33m…\e[0m ", else: "\e[32m›\e[0m "
-    {line, cur_col} = Line.scroll_view(state.line_ed, terminal_cols() - 4)
-    # 光标屏幕列 = 前缀宽(2) + 可见窗口内光标列（滚动感知，Line.cursor_col 未滚动会算错）
-    {prefix <> line, 2 + cur_col}
+
+    if state.line_ed.text == "" and not state.busy do
+      {prefix <> "\e[2m试试 /model /bindings /compact  ·  @文件  ·  !shell  ·  ?帮助\e[0m", 2}
+    else
+      {line, cur_col} = Line.scroll_view(state.line_ed, terminal_cols() - 4)
+      {prefix <> line, 2 + cur_col}
+    end
   end
 
   defp terminal_size do

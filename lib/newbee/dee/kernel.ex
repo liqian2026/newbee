@@ -45,6 +45,11 @@ defmodule Newbee.DEE.Kernel do
 
   def usage(kernel), do: GenServer.call(kernel, :usage)
 
+  @doc "热切模型：不丢会话/绑定/消息，只换 LLM client 与流式入口。返回 :ok | {:error, reason}。"
+  def switch_model(kernel, client) when is_map(client) do
+    GenServer.call(kernel, {:switch_model, client}, 5_000)
+  end
+
   @doc "从任意 TUI 焦点中断当前模型请求或代码求值。"
   def interrupt(_kernel) do
     # 这是非阻塞控制面：不能向正在 handle_call/2 中运行的 Kernel 发 call。
@@ -55,8 +60,6 @@ defmodule Newbee.DEE.Kernel do
 
   @doc "压缩对话历史（/compact，§9/§6.5）：旧消息 LLM 摘要，保留最近 8 条原文。"
   def compact(kernel), do: GenServer.call(kernel, :compact, 300_000)
-
-  # ── init ──
 
   @impl true
   def init(opts) do
@@ -108,13 +111,16 @@ defmodule Newbee.DEE.Kernel do
     # J-Space：登记当前会话，供 Newbee.Tools.JSpace 定位 ledger
     if session, do: Newbee.Session.set_current(session.id)
 
-    # 恢复会话：消息已载入，绑定灌回求值器（tombstone 项自然跳过）
+    # 恢复会话：消息已载入，绑定灌回求值器（tombstone 项自然跳过；ETF 优先，死句柄仅值还原）
     if session && prior_messages != [] do
       bindings = Newbee.Session.load_bindings(session)
 
       if bindings != [] do
         Newbee.DEE.Evaluator.restore_bindings(evaluator, bindings)
       end
+
+      # 跨版/环境差异提示：beam_snapshot.json 与当前 OTP/Elixir 不一致时在日志留痕
+      check_beam_snapshot(session)
     end
 
     prompt =
@@ -231,6 +237,17 @@ defmodule Newbee.DEE.Kernel do
   end
 
   def handle_call(:goal, _from, state), do: {:reply, state.goal, state}
+
+  def handle_call({:switch_model, client}, _from, state) do
+    # 不丢会话/绑定/消息，仅替换后续 turn 所用的 client 与 client_fun。
+    # 求值器节点不动，当前 turn 仍用旧 client 完成，下次 submit 即生效。
+    client_fun = fn messages, on_text, on_reasoning ->
+      Newbee.LLM.Client.stream_chat(client, messages, on_text, on_reasoning)
+    end
+
+    emit(state, {:model_switched, client.model})
+    {:reply, :ok, %{state | client: client, client_fun: client_fun}}
+  end
 
   # 自主目标循环：异步驱动（每轮之间可处理 mailbox，/goal clear 可插入取消）。
   @impl true
@@ -1004,6 +1021,37 @@ defmodule Newbee.DEE.Kernel do
   defp persist_bindings(state) do
     binding = Newbee.DEE.Evaluator.dump_bindings(state.evaluator)
     Newbee.Session.save_bindings(state.session, binding)
+  rescue
+    _ -> :ok
+  end
+
+  defp check_beam_snapshot(session) do
+    path = Path.join(session.dir, "beam_snapshot.json")
+
+    case File.read(path) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, snap} ->
+            cur_otp = :erlang.system_info(:otp_release) |> List.to_string()
+            cur_elixir = System.version()
+            saved_otp = snap["otp"] || snap[:otp]
+            saved_elixir = snap["elixir"] || snap[:elixir]
+
+            if saved_otp && saved_otp != cur_otp do
+              Newbee.DebugLog.log(:resume, "OTP 差异: dump=#{saved_otp} 当前=#{cur_otp}（ETS/Port 句柄可能已失效）")
+            end
+
+            if saved_elixir && saved_elixir != cur_elixir do
+              Newbee.DebugLog.log(:resume, "Elixir 差异: dump=#{saved_elixir} 当前=#{cur_elixir}")
+            end
+
+          _ ->
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
   rescue
     _ -> :ok
   end

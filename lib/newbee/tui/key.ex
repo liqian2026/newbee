@@ -60,18 +60,25 @@ defmodule Newbee.TUI.Key do
     end
   end
 
+  defp next_event(<<1>> <> rest), do: {:event, {:key, :ctrl_a}, rest}
+  defp next_event(<<2>> <> rest), do: {:event, {:key, :ctrl_b}, rest}
   defp next_event(<<3>> <> rest), do: {:event, {:key, :ctrl_c}, rest}
   defp next_event(<<4>> <> rest), do: {:event, {:key, :ctrl_d}, rest}
-  defp next_event(<<1>> <> rest), do: {:event, {:key, :ctrl_a}, rest}
   defp next_event(<<5>> <> rest), do: {:event, {:key, :ctrl_e}, rest}
+  defp next_event(<<6>> <> rest), do: {:event, {:key, :ctrl_f}, rest}
+  defp next_event(<<8>> <> rest), do: {:event, {:key, :ctrl_h}, rest}
   defp next_event(<<9>> <> rest), do: {:event, {:key, :tab}, rest}
+  defp next_event(<<11>> <> rest), do: {:event, {:key, :ctrl_k}, rest}
   defp next_event(<<12>> <> rest), do: {:event, {:key, :ctrl_l}, rest}
   defp next_event(<<13>> <> rest), do: {:event, {:key, :enter}, rest}
   # LF 也视为 Enter（部分终端/模拟输入发 \n 而非 \r）
   defp next_event(<<10>> <> rest), do: {:event, {:key, :enter}, rest}
+  defp next_event(<<14>> <> rest), do: {:event, {:key, :ctrl_n}, rest}
+  defp next_event(<<16>> <> rest), do: {:event, {:key, :ctrl_p}, rest}
+  defp next_event(<<20>> <> rest), do: {:event, {:key, :ctrl_t}, rest}
   defp next_event(<<21>> <> rest), do: {:event, {:key, :ctrl_u}, rest}
   defp next_event(<<23>> <> rest), do: {:event, {:key, :ctrl_w}, rest}
-  defp next_event(<<20>> <> rest), do: {:event, {:key, :ctrl_t}, rest}
+  defp next_event(<<25>> <> rest), do: {:event, {:key, :ctrl_y}, rest}
   defp next_event(<<127>> <> rest), do: {:event, {:key, :backspace}, rest}
 
   # ESC：进入序列解析（必须在通用 C0 吞咽子句之前）
@@ -124,7 +131,12 @@ defmodule Newbee.TUI.Key do
 
   # \e\e：Alt 组合常见双 Esc，按一次裸 Esc
   defp parse_escape(<<"\e", rest::binary>>), do: {:seq, {:key, :esc}, rest}
-  # ESC + 单字节（Alt-x 等）：安全吞
+  # ESC + 单字节（Alt-x 等）：保留 Alt 修饰，供行编辑的单词跳跃用
+  defp parse_escape(<<ch, rest::binary>>) when ch in ?a..?z or ch in ?A..?Z or ch in ?0..?9 do
+    {:seq, {:key, {:alt, ch}}, rest}
+  end
+
+  # 其余单字节 Alt/原始 ESC 组合：安全吞
   defp parse_escape(<<_::binary-size(1), rest::binary>>), do: {:seq, {:key, :unknown}, rest}
   # 只有 ESC，后续未到
   defp parse_escape(<<>>), do: :need_more

@@ -85,6 +85,63 @@ defmodule Newbee.TUI.Line do
     end
   end
 
+  @doc "Alt-B：单词左跳（跨空白到词首）"
+  def word_left(%__MODULE__{text: t, cur: c} = l) when c > 0 do
+    {pre, _} = String.split_at(t, c)
+    chars = String.to_charlist(pre)
+    idx = length(chars)
+    # 跳过词前空白
+    idx = skip_while(chars, idx - 1, &(&1 in [?\s, ?\t]), -1)
+    # 跳过单词本体
+    idx = skip_while(chars, idx, &(&1 not in [?\s, ?\t]), -1)
+    %{l | cur: idx + 1}
+  end
+
+  def word_left(l), do: l
+
+  @doc "Alt-F：单词右跳（到下一词尾）"
+  def word_right(%__MODULE__{text: t, cur: c} = l) do
+    len = String.length(t)
+
+    if c >= len do
+      l
+    else
+      chars = String.to_charlist(t)
+      idx = c
+      # 若在词内，先跳到词尾
+      idx = skip_while_forward(chars, idx, &(&1 not in [?\s, ?\t]))
+      # 再跳过空白到下词头
+      idx = skip_while_forward(chars, idx, &(&1 in [?\s, ?\t]))
+      # 再跳到该词尾
+      idx = skip_while_forward(chars, idx, &(&1 not in [?\s, ?\t]))
+      %{l | cur: min(idx, len)}
+    end
+  end
+
+  @doc "Alt-D：删光标后一词（readline 语义）"
+  def delete_word_forward(%__MODULE__{text: t, cur: c} = l) do
+    len = String.length(t)
+
+    if c >= len do
+      l
+    else
+      chars = String.to_charlist(t)
+      j = skip_while_forward(chars, c, &(&1 in [?\s, ?\t]))
+      j = skip_while_forward(chars, j, &(&1 not in [?\s, ?\t]))
+      %{l | text: String.slice(t, 0, c) <> String.slice(t, j..-1//1)}
+    end
+  end
+
+  defp skip_while(_chars, i, _pred, bound) when i <= bound, do: bound
+
+  defp skip_while(chars, i, pred, bound) do
+    if pred.(Enum.at(chars, i)), do: skip_while(chars, i - 1, pred, bound), else: i
+  end
+
+  defp skip_while_forward(chars, i, pred) do
+    if i < length(chars) and pred.(Enum.at(chars, i)), do: skip_while_forward(chars, i + 1, pred), else: i
+  end
+
   @doc "清空（提交后 / Esc）。"
   def clear(%__MODULE__{} = l), do: %{l | text: "", cur: 0, draft: nil}
 
@@ -177,6 +234,26 @@ defmodule Newbee.TUI.Line do
           end)
 
         {cands, prefix}
+
+      # /model 型号补全：/model 前缀后按 provider/model 候选
+      String.starts_with?(prefix, "/model") ->
+        models = Newbee.LLM.Config.model_candidates()
+
+        case String.split(prefix, " ", parts: 2) do
+          ["/model"] ->
+            {[], prefix}
+
+          ["/model", ""] ->
+            {Enum.map(models, &"/model #{&1}"), prefix}
+
+          ["/model", base] ->
+            base = String.trim(base)
+            cands = Enum.filter(models, &String.starts_with?(&1, base))
+            {Enum.map(cands, &"/model #{&1}"), prefix}
+
+          _ ->
+            {[], prefix}
+        end
 
       # 命令补全：行首 / 
       Regex.match?(~r{^/[a-z]*$}, prefix) and String.starts_with?(prefix, "/") ->

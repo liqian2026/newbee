@@ -178,22 +178,9 @@ defmodule Newbee.CLI do
               loop(kernel, client)
 
             {:restart} ->
-              # /model 切换：重建会话内核（保留原会话，模型换新）
-              sid =
-                case :sys.get_state(kernel) do
-                  %{session: %Newbee.Session{} = s} -> s.id
-                  _ -> nil
-                end
-
-              GenServer.stop(kernel)
-              client2 = Newbee.LLM.Config.client_for()
-              opts = if sid, do: [session_id: sid], else: []
-
-              {:ok, kernel2} =
-                Newbee.DEE.Kernel.start_link([client: client2, auto_antibodies: true, render: fn _ -> :ok end] ++ opts)
-
-              IO.puts("会话内核已重建（模型: #{client2.model}）")
-              loop(kernel2, client2)
+              # 兼容：Commands 现已热切（:handled），此分支仅兜底
+              IO.puts("（兼容）热切失败，请重试 /model")
+              loop(kernel, client)
 
             {:resume, id} ->
               GenServer.stop(kernel)

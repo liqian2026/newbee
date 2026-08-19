@@ -71,7 +71,7 @@ defmodule Newbee.Session do
     prompt
   end
 
-  @doc "绑定快照：只存可序列化值，其余 tombstone。"
+  @doc "绑定快照：落两份——`bindings.json`(JSON 可读，tombstone 标注) + `bindings.etf`(ETF 全量，term_to_binary，覆盖 PID/Ref/Fun 等，/resume 优先用 ETF)。"
   def save_bindings(%__MODULE__{dir: d}, binding) do
     safe =
       Enum.map(binding, fn
@@ -86,9 +86,19 @@ defmodule Newbee.Session do
       end)
 
     File.write!(Path.join(d, "bindings.json"), Jason.encode_to_iodata!(safe))
+    persist_etf(d, binding)
+    persist_beam_snapshot(d, binding)
   end
 
+  @doc "加载绑定：优先 `bindings.etf`（全量反序列化，safe_binary_to_term），否则回退 JSON。"
   def load_bindings(%__MODULE__{dir: d}) do
+    case load_etf(d) do
+      {:ok, binding} -> binding
+      :no_etf -> load_json_bindings(d)
+    end
+  end
+
+  defp load_json_bindings(d) do
     case File.read(Path.join(d, "bindings.json")) do
       {:ok, body} ->
         body
@@ -100,6 +110,131 @@ defmodule Newbee.Session do
 
       _ ->
         []
+    end
+  end
+
+  # ── ETF 全量 dump：term_to_binary（可保 PID/Ref/简单 Fun/Port 等的"值语义"快照）──
+  # 注意 BEAM 硬限制：外部资源（打开的文件/ETS 表/Port/NIF 资源/跨节点 PID）反序列化后
+  # 为"死句柄"，只能做值检查不能继续操作——ETf 侧已尽量保存，tombstone 仅用于不可 term_to_binary 的项。
+  defp persist_etf(dir, binding) do
+    payload = %{
+      version: 1,
+      elixir: System.version(),
+      otp: :erlang.system_info(:otp_release) |> List.to_string(),
+      saved_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      bindings: encode_etf_bindings(binding)
+    }
+
+    File.write!(Path.join(dir, "bindings.etf"), :erlang.term_to_binary(payload, compressed: 9))
+  rescue
+    _ -> :ok
+  end
+
+  defp encode_etf_bindings(binding) do
+    Enum.flat_map(binding, fn {name, v} ->
+      try do
+        bin = :erlang.term_to_binary(v, compressed: 1)
+        # 自检：safe 模式能否还原，避免落一个永远读不了的 ETF
+        _ = :erlang.binary_to_term(bin, [:safe])
+        [{to_string(name), {:etf, Base.encode64(bin)}}]
+      rescue
+        _ -> []
+      catch
+        _, _ -> []
+      end
+    end)
+  end
+
+  defp load_etf(dir) do
+    path = Path.join(dir, "bindings.etf")
+
+    case File.read(path) do
+      {:ok, bin} ->
+        try do
+          payload = :erlang.binary_to_term(bin, [:safe])
+          validate_etf_version(payload)
+          bindings = decode_etf_bindings(payload[:bindings] || payload["bindings"] || [])
+          {:ok, bindings}
+        rescue
+          _ -> :no_etf
+        catch
+          _, _ -> :no_etf
+        end
+
+      _ ->
+        :no_etf
+    end
+  end
+
+  defp decode_etf_bindings(list) when is_list(list) do
+    Enum.flat_map(list, fn
+      {name, {:etf, b64}} when is_binary(b64) ->
+        decode_etf_entry(name, b64)
+
+      [name, %{"etf" => b64}] when is_binary(b64) ->
+        decode_etf_entry(name, b64)
+
+      [name, ["etf", b64]] when is_binary(b64) ->
+        decode_etf_entry(name, b64)
+
+      _ ->
+        []
+    end)
+  end
+
+  defp decode_etf_bindings(_), do: []
+
+  defp decode_etf_entry(name, b64) do
+    bin = Base.decode64!(b64)
+    v = :erlang.binary_to_term(bin, [:safe])
+    [{String.to_atom(name), v}]
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  defp validate_etf_version(%{otp: _otp, elixir: _elixir}), do: :ok
+  defp validate_etf_version(%{"otp" => _otp, "elixir" => _elixir}), do: :ok
+  defp validate_etf_version(_), do: :ok
+
+  # ── Beam 快照（诊断/可观测）：文本摘要，非反序列化还原，仅供 /resume 时提示环境差异 ──
+  defp persist_beam_snapshot(dir, binding) do
+    snapshot = %{
+      elixir: System.version(),
+      otp: :erlang.system_info(:otp_release) |> List.to_string(),
+      erts: :erlang.system_info(:version) |> List.to_string(),
+      nodes: Node.list() |> Enum.map(&to_string/1),
+      self_node: Node.self() |> to_string(),
+      bindings_summary:
+        Enum.map(binding, fn {name, v} ->
+          %{name: to_string(name), type: type_of(v), size: byte_size_safe(v)}
+        end),
+      saved_at: DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+
+    File.write!(Path.join(dir, "beam_snapshot.json"), Jason.encode_to_iodata!(snapshot, pretty: true))
+  rescue
+    _ -> :ok
+  end
+
+  defp type_of(v) when is_binary(v), do: "binary"
+  defp type_of(v) when is_list(v), do: "list"
+  defp type_of(v) when is_map(v), do: "map"
+  defp type_of(v) when is_tuple(v), do: "tuple"
+  defp type_of(v) when is_pid(v), do: "pid"
+  defp type_of(v) when is_port(v), do: "port"
+  defp type_of(v) when is_reference(v), do: "reference"
+  defp type_of(v) when is_function(v), do: "function"
+  defp type_of(_), do: "other"
+
+  defp byte_size_safe(v) do
+    try do
+      byte_size(:erlang.term_to_binary(v))
+    rescue
+      _ -> 0
+    catch
+      _, _ -> 0
     end
   end
 

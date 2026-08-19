@@ -230,18 +230,19 @@ defmodule Newbee.TUI.Screen do
   end
 
   # 返回 [{行号(0起), 新行}]
+  # 返回 [{行号(0起), 新行}] — O(n) zip 版，旧版 Enum.at 每轮 O(n) 导致大屏卡顿
   defp diff_rows(prev, next) do
-    n = max(length(prev), length(next))
+    prev = prev || []
+    next = next || []
+    max_len = max(length(prev), length(next))
+    prev = prev ++ List.duplicate(nil, max_len - length(prev))
+    next = next ++ List.duplicate(nil, max_len - length(next))
 
-    Enum.reduce(0..(n - 1)//1, [], fn i, acc ->
-      p = Enum.at(prev, i)
-      c = Enum.at(next, i)
-
-      if p != c do
-        [{i, c || ""} | acc]
-      else
-        acc
-      end
+    prev
+    |> Enum.zip(next)
+    |> Enum.with_index()
+    |> Enum.reduce([], fn {{p, c}, i}, acc ->
+      if p != c, do: [{i, c || ""} | acc], else: acc
     end)
     |> Enum.reverse()
   end

@@ -81,6 +81,21 @@ defmodule Newbee.LLM.Config do
     end
   end
 
+  @doc "已知型号候选（供 TUI Tab 补全）：汇总各 provider 的 models 列表 + 当前 roles 已用型号，去重排序。"
+  def model_candidates do
+    cfg = load()
+
+    from_providers =
+      for {_pname, p} <- cfg["providers"] || %{}, m <- p["models"] || [], is_binary(m), do: m
+
+    from_roles =
+      for {_role, rc} <- cfg["roles"] || %{}, is_binary(rc["model"]), do: rc["model"]
+
+    (from_providers ++ from_roles)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
   # ── internals ──
 
   defp resolve_path do

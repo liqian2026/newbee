@@ -116,7 +116,7 @@ defmodule Newbee.Commands do
   defp run("model", "", ctx) do
     Newbee.LLM.Config.describe() |> Enum.each(&ctx.say.("  " <> &1))
     ctx.say.("evolution policy: #{Newbee.Evolution.Policy.get()}")
-    ctx.say.("用法: /model <provider/model-id> 切换默认模型（会重建会话内核）")
+    ctx.say.("用法: /model <provider/model-id> 热切模型（不重启，下一轮即生效）")
     :handled
   end
 
@@ -125,11 +125,25 @@ defmodule Newbee.Commands do
 
     case Newbee.LLM.Config.set_default_model(id) do
       :ok ->
-        ctx.say.("已切换默认模型为 #{id}，重建会话内核…")
-        {:restart}
+        client = Newbee.LLM.Config.client_for()
+
+        if ctx[:kernel] && Process.alive?(ctx.kernel) do
+          case Newbee.DEE.Kernel.switch_model(ctx.kernel, client) do
+            :ok ->
+              ctx.say.("✓ 已热切模型为 #{id}（#{client.model}），下一轮对话即生效，会话/绑定保留")
+              :handled
+
+            {:error, reason} ->
+              ctx.say.("模型已落盘但热切失败: #{inspect(reason)}，重启后生效")
+              :handled
+          end
+        else
+          ctx.say.("已切换默认模型为 #{id}，重启后生效")
+          :handled
+        end
 
       {:error, reason} ->
-        ctx.say.("切换失败: #{inspect(reason)}")
+        ctx.say.("切换失败: #{inspect(reason)}（格式应为 provider/model-id，如 openrouter/deepseek/deepseek-chat）")
         :handled
     end
   end
