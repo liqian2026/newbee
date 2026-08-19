@@ -913,6 +913,8 @@ defmodule Newbee.TUI do
 
   def render_event(%__MODULE__{} = state, :turn_done, _) do
     state = flush_text_buffer(state)
+    {bs, state} = cached_bindings(%{state | bindings_cache_at: 0, busy: false})
+    state = %{state | bindings_cache: bs, bindings_cache_at: System.monotonic_time(:millisecond)}
     dur_str = if state.turn_started_at do
       secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
       "\e[2m⏱ 用时 #{format_duration(secs)}\e[0m"
@@ -1181,7 +1183,7 @@ defmodule Newbee.TUI do
     if state.busy do
       {state.bindings_cache, state}
     else
-      if now - state.bindings_cache_at < @bindings_ttl and state.bindings_cache != [] do
+      if state.bindings_cache_at != 0 and now - state.bindings_cache_at < @bindings_ttl and state.bindings_cache != nil do
         {state.bindings_cache, state}
       else
         bs = safe_bindings_summary()
@@ -1199,7 +1201,7 @@ defmodule Newbee.TUI do
     usage = state.usage
     tokens = Map.get(usage, "total_tokens", 0)
     tok_str = human_tok(tokens)
-    bs = if state.busy, do: [], else: state.bindings_cache
+    bs = state.bindings_cache || []
     bindings = length(bs)
     dots = spinner(state)
     elapsed_str = if state.busy and state.turn_started_at do
