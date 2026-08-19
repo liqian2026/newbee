@@ -594,14 +594,7 @@ defmodule Newbee.TUI do
           {:submit, text} ->
             run_submit(state, text)
 
-          {:restart} ->
-            # 兼容：旧版 Commands 曾返回 {:restart} 重建内核，现已改为热切（Commands 直接 :handled）
-            # 保留分支仅作兜底：热切失败才重建。
-            ctx.say.("（兼容分支）热切失败，尝试重建内核…")
-            %{state | busy: false}
-
           {:resume, id} ->
-            GenServer.stop(state.kernel)
             {:ok, kernel2} = resume_kernel(state.client, id)
             lines = load_session_lines(id)
             %{state | kernel: kernel2, busy: false, lines: lines}

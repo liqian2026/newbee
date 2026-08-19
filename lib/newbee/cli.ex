@@ -177,13 +177,7 @@ defmodule Newbee.CLI do
             :handled ->
               loop(kernel, client)
 
-            {:restart} ->
-              # 兼容：Commands 现已热切（:handled），此分支仅兜底
-              IO.puts("（兼容）热切失败，请重试 /model")
-              loop(kernel, client)
-
             {:resume, id} ->
-              GenServer.stop(kernel)
               {:ok, kernel2} = resume_kernel(client, id)
               loop(kernel2, client)
 
