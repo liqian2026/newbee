@@ -164,7 +164,7 @@ defmodule Newbee.TUI.Screen do
 
   # ── 双缓冲 paint ──
 
-  defstruct prev: nil, cols: 0, rows: 0, port: nil
+  defstruct prev: nil, cols: 0, rows: 0, port: nil, input_rows: 1
 
   @doc """
   打开直通 stdout 的输出端口（TUI 启动时调用一次）。
@@ -183,7 +183,9 @@ defmodule Newbee.TUI.Screen do
   """
   def paint_full(port, lines, input_view, status, cols, rows, page \\ 0) do
     {status_text, {line_no, cursor_col}} = status
-    body = body_rows(lines, cols, rows, page)
+    in_lines = String.split(input_view, "\n")
+    n = max(length(in_lines), 1)
+    body = body_rows(lines, cols, max(rows - 2 - n, 1), page)
     out = ["\e[H\e[2J"]
 
     out =
@@ -192,13 +194,18 @@ defmodule Newbee.TUI.Screen do
           "\e[#{i};1H" <> l <> "\e[K"
         end)
 
-    out = out ++ ["\e[#{rows - 2};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
-    out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
-    out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
+    out = out ++ ["\e[#{rows - n - 1};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
+    out = out ++ ["\e[#{rows - n};1H" <> String.duplicate("─", cols) <> "\e[K"]
+
+    out =
+      out ++
+        (Enum.with_index(in_lines, 1)
+         |> Enum.map(fn {l, i} -> "\e[#{rows - n + i};1H\e[K" <> String.slice(l, 0, max(cols, 0)) end))
+
     # 光标定位到输入行后重新显示（启动时 \e[?25l 隐藏，每帧补 \e[?25h）
     out = out ++ ["\e[#{line_no};#{cursor_col}H\e[?25h"]
     Port.command(port, out)
-    %__MODULE__{prev: body, cols: cols, rows: rows, port: port}
+    %__MODULE__{prev: body, cols: cols, rows: rows, port: port, input_rows: n}
   end
 
   @doc """
@@ -206,25 +213,31 @@ defmodule Newbee.TUI.Screen do
   """
   def paint_delta(screen, lines, input_view, status, cols, rows, page \\ 0) do
     {status_text, {line_no, cursor_col}} = status
-    body = body_rows(lines, cols, rows, page)
+    in_lines = String.split(input_view, "\n")
+    n = max(length(in_lines), 1)
+    body = body_rows(lines, cols, max(rows - 2 - n, 1), page)
     # 屏幕上第 i 行（1 起）
     out =
       diff_rows(screen.prev, body)
       |> Enum.map(fn {i, l} -> "\e[#{i + 1};1H" <> l <> "\e[K" end)
 
-    out = out ++ ["\e[#{rows - 2};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
-    out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
-    out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
+    out = out ++ ["\e[#{rows - n - 1};1H\e[K" <> String.slice(status_text, 0, max(cols, 0)) <> "\e[K"]
+    out = out ++ ["\e[#{rows - n};1H" <> String.duplicate("─", cols) <> "\e[K"]
+
+    out =
+      out ++
+        (Enum.with_index(in_lines, 1)
+         |> Enum.map(fn {l, i} -> "\e[#{rows - n + i};1H\e[K" <> String.slice(l, 0, max(cols, 0)) end))
+
     # 光标定位到输入行后重新显示（启动时 \e[?25l 隐藏，每帧补 \e[?25h）
     out = out ++ ["\e[#{line_no};#{cursor_col}H\e[?25h"]
     Port.command(screen.port, out)
-    %__MODULE__{prev: body, cols: cols, rows: rows, port: screen.port}
+    %__MODULE__{prev: body, cols: cols, rows: rows, port: screen.port, input_rows: n}
   end
 
   # 输出区取末尾 need 行（聊天 TUI 永远锚定最新内容）；page>0 时向上翻 need×page 行。
   # 旧实现取【前】N 行：transcript 超过一屏后新内容永远不上屏（"输出一半不显示"根因）。
-  defp body_rows(lines, cols, rows, page) do
-    need = max(rows - 3, 1)
+  defp body_rows(lines, cols, need, page) do
     {tail, _top?} = wrap_tail(lines, cols, need * (page + 1))
     Enum.take(tail, need)
   end

@@ -74,6 +74,7 @@ defmodule Newbee.TUI.Key do
   # LF 也视为 Enter（部分终端/模拟输入发 \n 而非 \r）
   defp next_event(<<10>> <> rest), do: {:event, {:key, :enter}, rest}
   defp next_event(<<14>> <> rest), do: {:event, {:key, :ctrl_n}, rest}
+  defp next_event(<<18>> <> rest), do: {:event, {:key, :ctrl_r}, rest}
   defp next_event(<<16>> <> rest), do: {:event, {:key, :ctrl_p}, rest}
   defp next_event(<<20>> <> rest), do: {:event, {:key, :ctrl_t}, rest}
   defp next_event(<<21>> <> rest), do: {:event, {:key, :ctrl_u}, rest}

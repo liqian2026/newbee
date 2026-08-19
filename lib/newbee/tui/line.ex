@@ -14,8 +14,7 @@ defmodule Newbee.TUI.Line do
 
   @doc "插入文本（粘贴同路径），光标落到插入内容之后。"
   def insert(%__MODULE__{text: t, cur: c} = l, ins) do
-    # 粘贴/输入含换行时折成单行（单行输入框；多行需求走 paste 分段或编辑器）
-    ins = String.replace(ins, "\n", " ")
+    # 粘贴/输入含换行时保留（多行输入框；Enter 发送整段）
     {pre, post} = String.split_at(t, c)
     %{l | text: pre <> ins <> post, cur: c + String.length(ins)}
   end
@@ -310,23 +309,60 @@ defmodule Newbee.TUI.Line do
   defp do_width([], acc), do: acc
   defp do_width([cp | rest], acc), do: do_width(rest, acc + char_width(cp))
 
-  @doc "光标屏幕列（含 “› ” 前缀 2 列）。"
-  def cursor_col(%__MODULE__{text: t, cur: c}), do: 2 + width(String.slice(t, 0, c))
+  @doc "光标屏幕列（含前缀 2 列；多行时光标所在行内列宽）。"
+  def cursor_col(%__MODULE__{text: t, cur: c}) do
+    before = String.slice(t, 0, c)
+    line = before |> String.split("
+") |> List.last() || ""
+    2 + width(line)
+  end
+
+  @doc "光标所在行号（0 起），用于多行输入定位。"
+  def cursor_row(%__MODULE__{text: t, cur: c}) do
+    String.slice(t, 0, c) |> String.split("
+") |> length() |> Kernel.-(1)
+  end
 
   @doc """
   横向滚动窗口：{可见文本, 光标在窗口内的列}。
   行宽超出 max_cols 时以光标为中心开窗，模拟 readline 滚动。
   """
-  def scroll_view(%__MODULE__{text: t, cur: c}, max_cols) do
-    total = width(t)
-
-    if total <= max_cols do
-      {t, width(String.slice(t, 0, c))}
+  def scroll_view(%__MODULE__{text: t, cur: c} = l, max_cols) do
+    if String.contains?(t, "\n") do
+      # 多行：仅对光标所在行做横向滚动窗口，其余行原样
+      rows = String.split(t, "\n")
+      row = cursor_row(l)
+      cur_line = Enum.at(rows, row) || ""
+      # 光标在当前行内的字符偏移
+      before = String.slice(t, 0, c)
+      row_before = before |> String.split("\n") |> Enum.take(row) |> Enum.join("\n")
+      in_line = max(c - String.length(row_before) - (if row > 0, do: 1, else: 0), 0)
+      {line, col} =
+        if width(cur_line) <= max_cols do
+          {cur_line, width(String.slice(cur_line, 0, in_line))}
+        else
+          cur_w = width(String.slice(cur_line, 0, in_line))
+          start = max(cur_w - div(max_cols, 2), 0) |> min(max(width(cur_line) - max_cols, 0))
+          {slice_by_width(cur_line, start, max_cols), max(cur_w - start, 0)}
+        end
+      {List.replace_at(rows, row, line) |> Enum.join("\n"), col}
     else
-      cur_w = width(String.slice(t, 0, c))
-      start = max(cur_w - div(max_cols, 2), 0) |> min(total - max_cols)
-      {slice_by_width(t, start, max_cols), max(cur_w - start, 0)}
+      total = width(t)
+
+      if total <= max_cols do
+        {t, width(String.slice(t, 0, c))}
+      else
+        cur_w = width(String.slice(t, 0, c))
+        start = max(cur_w - div(max_cols, 2), 0) |> min(total - max_cols)
+        {slice_by_width(t, start, max_cols), max(cur_w - start, 0)}
+      end
     end
+  end
+
+  # 光标在第 row 行时的行首偏移（字符数）
+  defp line_offset(t, row) do
+    rows = String.split(t, "\n") |> Enum.take(row)
+    if rows == [], do: 0, else: Enum.join(rows, "\n") |> String.length() |> Kernel.+(1)
   end
 
   defp slice_by_width(s, offset, w) do

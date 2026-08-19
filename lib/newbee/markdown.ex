@@ -17,7 +17,7 @@ defmodule Newbee.Markdown do
   # ── 正则 ──
 
   # 围栏代码块开/闭行
-  @fence_start ~r/^\s*`{3}\S*$/
+  @fence_start ~r/^\s*(`{3})([^\s`]*)\s*$/
   @fence_end ~r/^\s*`{3}\s*$/
   # ATX 标题
   @heading ~r/^(\#{1,6})\s+(.*)$/
@@ -57,12 +57,18 @@ defmodule Newbee.Markdown do
 
   defp render_blocks([], _mode, acc), do: Enum.reverse(acc)
 
-  # fence 内：原样输出灰色，直到闭合 ```
-  defp render_blocks([line | rest], :fence, acc) do
+  # fence 内：elixir/exs 语法高亮，其余灰色，直到闭合 ```
+  defp render_blocks([line | rest], {:fence, lang}, acc) do
     if Regex.match?(@fence_end, line) do
       render_blocks(rest, :normal, ["\e[2m```\e[0m" | acc])
     else
-      render_blocks(rest, :fence, ["\e[38;5;187m" <> line <> "\e[0m" | acc])
+      colored =
+        if lang in ["elixir", "exs", "ex", "iex"] do
+          Newbee.TUI.Highlight.elixir(line)
+        else
+          "\e[38;5;187m" <> line <> "\e[0m"
+        end
+      render_blocks(rest, {:fence, lang}, [colored | acc])
     end
   end
 
@@ -74,7 +80,9 @@ defmodule Newbee.Markdown do
       nil ->
         cond do
           Regex.match?(@fence_start, line) ->
-            render_blocks(rest, :fence, ["\e[2m" <> line <> "\e[0m" | acc])
+            [_, _ticks, lang] = Regex.run(@fence_start, line)
+            label = if lang == "", do: "```", else: "```" <> lang
+            render_blocks(rest, {:fence, lang}, ["\e[2m" <> label <> "\e[0m" | acc])
 
           Regex.match?(@heading, line) ->
             [_, hashes, body] = Regex.run(@heading, line)
