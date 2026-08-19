@@ -258,6 +258,14 @@ defmodule Newbee.TUI do
 
       {:paint, :now} ->
         loop(paint(state), reader)
+
+      :spinner_tick ->
+        if state.busy do
+          Process.send_after(self(), :spinner_tick, 80)
+          loop(paint(state), reader)
+        else
+          loop(state, reader)
+        end
     end
   end
 
@@ -586,6 +594,7 @@ defmodule Newbee.TUI do
         end
       end)
 
+    Process.send_after(self(), :spinner_tick, 80)
     %{state | busy: true, submit_pid: caller, submit_kind: :turn}
   end
 
