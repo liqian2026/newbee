@@ -750,8 +750,9 @@ defmodule Newbee.DEE.Kernel do
   end
 
   defp eval_interrupted?(%{status: :error, error: "interrupted"}), do: true
-  defp maybe_advisor(%{advisor: nil} = state), do: state
+  defp eval_interrupted?(_), do: false
 
+  defp maybe_advisor(%{advisor: nil} = state), do: state
   defp maybe_advisor(state) do
     if rem(state.steps, 3) == 0 do
       text =
