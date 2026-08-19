@@ -258,8 +258,45 @@ defmodule Newbee.TUI.Screen do
     |> Enum.reverse()
   end
 
-  # 状态栏按可见宽度截断（不切半个 ANSI 转义，避免 \e[ 吞掉后段）
+  # 状态栏按可见宽度截断：ANSI 转义不占宽，且不在转义/双宽字符中间切断。
+  # 旧实现直接走 Line.slice_by_width，把 \e[2m 里的 [ 2 m 各计 1 列，
+  # 状态栏右栏（tok/bind/policy）被多算的 20+ 列顶出屏幕。
   defp slice_by_width(text, cols) do
-    Newbee.TUI.Line.slice_by_width(text, 0, max(cols, 0))
+    max = max(cols, 0)
+
+    text
+    |> ansi_chunks()
+    |> Enum.reject(&(&1 == :nl))
+    |> take_chunks(max, [])
+    |> Enum.reverse()
+    |> Enum.map_join(fn {cps, style} ->
+      if style == [] do
+        cps
+      else
+        "\e[" <> Enum.join(style, ";") <> "m" <> cps <> "\e[0m"
+      end
+    end)
+  end
+
+  defp take_chunks(_chunks, w, acc) when w <= 0, do: acc
+  defp take_chunks([], _w, acc), do: acc
+
+  defp take_chunks([{text, style} | rest], w, acc) do
+    {kept, rem} = take_cps(String.to_charlist(text), w, [])
+    acc = if kept == [], do: acc, else: [{List.to_string(kept), style} | acc]
+    take_chunks(rest, rem, acc)
+  end
+
+  defp take_cps(_chars, w, acc) when w <= 0, do: {Enum.reverse(acc), 0}
+  defp take_cps([], w, acc), do: {Enum.reverse(acc), w}
+
+  defp take_cps([cp | rest], w, acc) do
+    cw = Line.char_width(cp)
+
+    if w >= cw do
+      take_cps(rest, w - cw, [cp | acc])
+    else
+      {Enum.reverse(acc), w}
+    end
   end
 end

@@ -204,7 +204,7 @@ defmodule Newbee.TUI do
     receive do
       # Esc 在 busy 时优先抢占：即使 mailbox 里已排了若干 :text/:tool_result，
       # 也先杀 evaluator/LLM，再丢弃滞后文本，避免"已取消还在流"
-      {:key, key} when key in [:esc, :escape] and state.busy ->
+      {:key, key} when key in [:esc, :escape] and state.busy and is_nil(state.picker) ->
         Newbee.DEE.Kernel.interrupt(state.kernel)
 
         if state.submit_kind == :shell and is_pid(state.submit_pid) do
