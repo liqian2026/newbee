@@ -187,11 +187,19 @@ defmodule Newbee.Commands do
   defp run("approve", arg, ctx) do
     id = if arg == "", do: :all, else: String.to_integer(arg)
 
-    case Newbee.Staging.approve(id) do
-      {:ok, []} -> ctx.say.("（无暂存改动）")
-      {:ok, written} -> ctx.say.("已落盘: #{Enum.join(written, ", ")}")
-      {:error, :not_staged} -> ctx.say.("没有对应暂存项")
-      {:error, :outside_project} -> ctx.say.("有暂存项在工程树外，已拒绝落盘")
+    try do
+      case Newbee.Staging.approve(id) do
+        {:ok, []} -> ctx.say.("（无暂存改动）")
+        {:ok, written} -> ctx.say.("已落盘: #{Enum.join(written, ", ")}")
+        {:error, :not_staged} -> ctx.say.("没有对应暂存项")
+        {:error, {:outside_project, msg}} -> ctx.say.("有暂存项在工程树外，已拒绝落盘: #{msg}")
+        {:error, :outside_project} -> ctx.say.("有暂存项在工程树外，已拒绝落盘")
+        {:error, other} -> ctx.say.("approve 失败: #{inspect(other)}（暂存保留）")
+      end
+    rescue
+      e -> ctx.say.("approve 异常: #{inspect(e)}（TUI 未退出，暂存保留）")
+    catch
+      :exit, reason -> ctx.say.("approve 超时: #{inspect(reason)}（TUI 未退出，暂存保留）")
     end
 
     :handled
@@ -200,15 +208,21 @@ defmodule Newbee.Commands do
   defp run("reject", arg, ctx) do
     id = if arg == "", do: :all, else: String.to_integer(arg)
 
-    case Newbee.Staging.reject(id) do
-      {:ok, []} -> ctx.say.("（无暂存改动）")
-      {:ok, dropped} -> ctx.say.("已丢弃: #{Enum.join(dropped, ", ")}")
-      {:error, :not_staged} -> ctx.say.("没有对应暂存项")
+    try do
+      case Newbee.Staging.reject(id) do
+        {:ok, []} -> ctx.say.("（无暂存改动）")
+        {:ok, dropped} -> ctx.say.("已丢弃: #{Enum.join(dropped, ", ")}")
+        {:error, :not_staged} -> ctx.say.("没有对应暂存项")
+        {:error, other} -> ctx.say.("reject 失败: #{inspect(other)}")
+      end
+    rescue
+      e -> ctx.say.("reject 异常: #{inspect(e)}")
+    catch
+      :exit, reason -> ctx.say.("reject 超时: #{inspect(reason)}")
     end
 
     :handled
   end
-
   defp run("diff", arg, ctx) do
     range = if arg == "", do: "HEAD", else: String.trim(arg)
 

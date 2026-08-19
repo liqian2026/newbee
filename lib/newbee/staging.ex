@@ -130,14 +130,16 @@ defmodule Newbee.Staging do
   end
 
   defp try_approve(entry) do
-    Newbee.Tools.Fs.guard_path!(entry.path)
-    File.mkdir_p!(Path.dirname(entry.path))
-    File.write!(entry.path, entry.content)
-    {:ok, entry.path}
+    path = entry[:path] || entry["path"]
+    content = entry[:content] || entry["content"]
+    Newbee.Tools.Fs.guard_path!(path)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, content || "")
+    {:ok, path}
   rescue
-    ArgumentError -> {:error, :outside_project}
+    e in ArgumentError -> {:error, {:outside_project, Exception.message(e)}}
+    _ -> {:error, :outside_project}
   end
-
   defp put_entry(state, entry) do
     state = Map.put(state, entry.id, entry)
     persist(state)
