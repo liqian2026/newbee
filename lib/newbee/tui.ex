@@ -36,6 +36,7 @@ defmodule Newbee.TUI do
             render_pending: false,
             tool_blocks: %{},
             last_block_id: nil,
+            show_reasoning: true,
             tool_open: %{},
             usage: %{},
             pane: nil,
@@ -219,7 +220,8 @@ defmodule Newbee.TUI do
         loop(state, reader)
 
       {:key, :ctrl_t} ->
-        state = %{state | pane: toggle_pane(state.pane)}
+        state = %{state | show_reasoning: not state.show_reasoning}
+        state = push_line(state, if(state.show_reasoning, do: "\e[2m思考流：显示\e[0m", else: "\e[2m思考流：隐藏\e[0m"))
         paint(state, true)
         loop(state, reader)
 
@@ -422,14 +424,18 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :reasoning, {:reasoning, delta}) do
-    if state.streaming and state.stream_kind == :reasoning do
-      append_text(state, delta)
-    else
+    if not state.show_reasoning do
       state
-      |> push_line("")
-      |> Map.put(:streaming, true)
-      |> Map.put(:stream_kind, :reasoning)
-      |> append_text(delta, "\e[2m")
+    else
+      if state.streaming and state.stream_kind == :reasoning do
+        append_text(state, delta)
+      else
+        state
+        |> push_line("")
+        |> Map.put(:streaming, true)
+        |> Map.put(:stream_kind, :reasoning)
+        |> append_text(delta, "\e[2m")
+      end
     end
   end
 
@@ -598,10 +604,6 @@ defmodule Newbee.TUI do
   end
 
   # Ctrl-T 窗格：绑定清单 / 事件日志 / 工具块
-  defp toggle_pane(nil), do: :bindings
-  defp toggle_pane(:bindings), do: :events
-  defp toggle_pane(:events), do: :tools
-  defp toggle_pane(:tools), do: nil
 
   defp pane_lines(:bindings, _state) do
     bs =
@@ -665,14 +667,31 @@ defmodule Newbee.TUI do
   end
 
   defp terminal_size do
-    # erl -noshell 下无法 ioctl；外层脚本传入或默认 80x24
-    cols = terminal_cols()
-    rows = String.to_integer(System.get_env("NEWBEE_ROWS") || "24")
+    # erl -noshell 下无法 ioctl；尺寸由 bin/newbee 探测注入（NEWBEE_ROWS/COLS），
+    # 回退到交互 shell 的 COLUMNS/LINES，最后 80x24
+    cols = int_env("NEWBEE_COLS") || int_env("COLUMNS") || 80
+    rows = int_env("NEWBEE_ROWS") || int_env("LINES") || 24
     {cols, rows}
   end
 
   defp terminal_cols do
-    String.to_integer(System.get_env("NEWBEE_COLS") || "100")
+    int_env("NEWBEE_COLS") || int_env("COLUMNS") || 80
+  end
+
+  defp int_env(name) do
+    case System.get_env(name) do
+      nil ->
+        nil
+
+      "" ->
+        nil
+
+      v ->
+        case Integer.parse(v) do
+          {n, ""} when n > 0 -> n
+          _ -> nil
+        end
+    end
   end
 
   defp tty? do

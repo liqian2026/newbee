@@ -188,6 +188,7 @@ defmodule Newbee.TUI.Screen do
     out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
     out = out ++ ["\e[#{line_no};#{cursor_col}H"]
     IO.write(out)
+    :io.flush()
     %__MODULE__{prev: body, cols: cols, rows: rows}
   end
 
@@ -207,6 +208,7 @@ defmodule Newbee.TUI.Screen do
     out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
     out = out ++ ["\e[#{line_no};#{cursor_col}H"]
     IO.write(out)
+    :io.flush()
     %__MODULE__{prev: body, cols: cols, rows: rows}
   end
 

@@ -2,7 +2,7 @@
 # newbee 启动脚本
 # 用法：./bin/newbee [子命令] [参数]
 #   ./bin/newbee            → mix newbee（CLI）
-#   ./bin/newbee tui        → mix newbee.tui
+#   ./bin/newbee tui        → mix newbee.tui（全屏 TUI；自动 raw 模式 + 尺寸探测）
 #   ./bin/newbee daemon     → mix newbee.daemon
 #   ./bin/newbee bench      → mix newbee.bench
 #   ./bin/newbee <args>     → mix newbee <args>（透传，如 ./bin/newbee -r <id>）
@@ -21,11 +21,47 @@ export NEWBEE_CWD="$PWD"
 
 cd "$NEWBEE_ROOT"
 
-# 解析子命令
 case "${1:-}" in
-  tui)     shift; exec mix newbee.tui "$@" ;;
-  daemon)  shift; exec mix newbee.daemon "$@" ;;
-  bench)   shift; exec mix newbee.bench "$@" ;;
-  "")      exec mix newbee ;;
-  *)       exec mix newbee "$@" ;;
+  tui)
+    # ── 全屏 TUI：必须 raw 模式 + 真实终端尺寸 ──
+    # 1) 探测尺寸（脚本层有控制终端，stty 可用）
+    if SIZE="$(stty size 2>/dev/null)"; then
+      export NEWBEE_ROWS="${SIZE%% *}"
+      export NEWBEE_COLS="${SIZE##* }"
+    else
+      export NEWBEE_ROWS="${LINES:-24}"
+      export NEWBEE_COLS="${COLUMNS:-100}"
+    fi
+
+    # 2) raw 模式：逐键直达 BEAM（BEAM 自身失去 ctty，无法自设）
+    stty raw -echo 2>/dev/null || true
+
+    # 3) 退出/中断时恢复终端
+    restore_tty() { stty sane 2>/dev/null || true; }
+    trap restore_tty EXIT INT TERM HUP
+
+    shift
+    mix newbee.tui "$@"
+    STATUS=$?
+    restore_tty
+    exit "$STATUS"
+    ;;
+
+  daemon)
+    shift
+    exec mix newbee.daemon "$@"
+    ;;
+
+  bench)
+    shift
+    exec mix newbee.bench "$@"
+    ;;
+
+  "")
+    exec mix newbee
+    ;;
+
+  *)
+    exec mix newbee "$@"
+    ;;
 esac

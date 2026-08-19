@@ -65,11 +65,11 @@ defmodule Newbee.LLM.Client do
 
     result =
       case do_request(build_req.(body), on_text, on_reasoning, @overload_retries) do
-        {:error, %Req.TransportError{reason: :timeout}} ->
-          # 池内连接可能已冷掉：后台重拨（慢握手）后重试一次
-          Newbee.DebugLog.log(:llm, "transport timeout, prewarming+retry")
+        {:error, %Req.TransportError{reason: reason}} when reason in [:timeout, :closed] ->
+          # 冷连接/池连接被服务端关闭：只重拨一次，避免重复整轮重试造成长时间等待
+          Newbee.DebugLog.log(:llm, "transport #{reason}, prewarming+single retry")
           prewarm(client)
-          do_request(build_req.(body), on_text, on_reasoning, @overload_retries)
+          do_request(build_req.(body), on_text, on_reasoning, 0)
 
         other ->
           other
