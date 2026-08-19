@@ -40,6 +40,7 @@ defmodule Newbee.TUI do
             tool_open: %{},
             usage: %{},
             pane: nil,
+            out: nil,
             last_paint: 0
 
   @scrollback 5_000
@@ -62,11 +63,21 @@ defmodule Newbee.TUI do
 
     {:ok, kernel} = Newbee.DEE.Kernel.start_link(client: client, render: fn _ -> :ok end)
 
+    # 输出走独立 fd 端口：IO.getn 挂起时 group leader 会排队所有输出
+    # （"不输入就不输出"的根因），端口直写 tty 与输入解耦。
+    out = Screen.open_port()
+
     # 备用屏 + 隐藏光标 + 括号粘贴模式（粘贴不再被逐键解释）
-    IO.write("\e[?1049h\e[?25l\e[?2004h")
+    Port.command(out, "\e[?1049h\e[?25l\e[?2004h")
 
     hist = Newbee.TUI.History.load()
-    state = %__MODULE__{kernel: kernel, client: client, line_ed: %Line{hist: hist, hcur: length(hist)}}
+
+    state = %__MODULE__{
+      kernel: kernel,
+      client: client,
+      out: out,
+      line_ed: %Line{hist: hist, hcur: length(hist)}
+    }
 
     state =
       state
@@ -79,10 +90,10 @@ defmodule Newbee.TUI do
     reader = spawn_link(fn -> reader_loop(parent, <<>>, :normal, <<>>) end)
 
     try do
-      paint(state, true)
-      loop(state, reader)
+      loop(paint(state, true), reader)
     after
-      IO.write("\e[?2004l\e[?25h\e[?1049l")
+      # reader 此刻可能仍阻塞在 IO.getn：绝不能用 IO.write（会死锁到下一按键）
+      Port.command(out, "\e[?2004l\e[?25h\e[?1049l")
       Newbee.Bus.unsubscribe()
     end
   end
@@ -157,13 +168,11 @@ defmodule Newbee.TUI do
           :ok
         else
           state = %{state | line_ed: Line.clear(state.line_ed)}
-          paint(state)
-          loop(state, reader)
+          loop(paint(state), reader)
         end
 
       {:key, :ctrl_l} ->
-        paint(state, true)
-        loop(state, reader)
+        loop(paint(state, true), reader)
 
       {:key, :enter} ->
         state = submit(state, reader)
@@ -176,111 +185,91 @@ defmodule Newbee.TUI do
 
       {:key, :backspace} ->
         state = %{state | line_ed: Line.backspace(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :delete} ->
         state = %{state | line_ed: Line.delete(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :left} ->
         state = %{state | line_ed: Line.left(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :right} ->
         state = %{state | line_ed: Line.right(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :home} ->
         state = %{state | line_ed: Line.home(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :end} ->
         state = %{state | line_ed: Line.to_end(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :ctrl_u} ->
         state = %{state | line_ed: Line.cut_to_start(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :ctrl_k} ->
         state = %{state | line_ed: Line.cut_to_end(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :ctrl_y} ->
         state = %{state | line_ed: Line.yank(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :ctrl_t} ->
         state = %{state | show_reasoning: not state.show_reasoning}
         state = push_line(state, if(state.show_reasoning, do: "\e[2m思考流：显示\e[0m", else: "\e[2m思考流：隐藏\e[0m"))
-        paint(state, true)
-        loop(state, reader)
+        loop(paint(state, true), reader)
 
       {:key, :ctrl_w} ->
         state = %{state | line_ed: Line.cut_word(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :tab} ->
         state = %{state | line_ed: Line.complete(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :up} ->
         state = %{state | line_ed: Line.hist_prev(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :down} ->
         state = %{state | line_ed: Line.hist_next(state.line_ed)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, :page_up} ->
         state = %{state | page: min(state.page + 1, 50)}
-        paint(state, true)
-        loop(state, reader)
+        loop(paint(state, true), reader)
 
       {:key, :page_down} ->
         state = %{state | page: max(state.page - 1, 0)}
-        paint(state, true)
-        loop(state, reader)
+        loop(paint(state, true), reader)
 
       {:key, :escape} ->
         if state.busy do
           # 中断模型执行
           Newbee.LLM.Client.interrupt()
           state = state |> push_line("\e[31m⏹ 已请求中断…\e[0m")
-          paint(state)
-          loop(state, reader)
+          loop(paint(state), reader)
         else
           # 清输入
           state = %{state | line_ed: Line.clear(state.line_ed)}
-          paint(state)
-          loop(state, reader)
+          loop(paint(state), reader)
         end
 
       {:key, ch} when is_integer(ch) ->
         state = %{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:key, _unknown} ->
         loop(state, reader)
 
       {:paste, text} when byte_size(text) > 0 ->
         state = %{state | line_ed: Line.insert(state.line_ed, text)}
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
 
       {:paste, _empty} ->
         loop(state, reader)
@@ -294,8 +283,7 @@ defmodule Newbee.TUI do
         loop(state, reader)
 
       {:paint, :now} ->
-        paint(state)
-        loop(state, reader)
+        loop(paint(state), reader)
     end
   end
 
@@ -314,8 +302,9 @@ defmodule Newbee.TUI do
         |> push_line("\e[32m›\e[0m " <> text)
         |> Map.put(:line_ed, %Line{hist: state.line_ed.hist, hcur: length(state.line_ed.hist)})
         |> Map.put(:busy, true)
+        |> Map.put(:page, 0)
 
-      paint(state)
+      state = paint(state)
 
       ctx = %{say: fn line -> send(self(), {:newbee_event, :tui_say, {:tui_say, line}}) end, kernel: state.kernel}
 
@@ -583,6 +572,12 @@ defmodule Newbee.TUI do
       send(self(), {:paint, :now})
       %{state | last_paint: now}
     else
+      # 节流窗口内只标记不够：流末尾的最后一个 delta 若无兜底定时器，
+      # 要等下一条消息/按键才画出来（"回合完成但不显示"的残留根因）
+      unless state.render_pending do
+        Process.send_after(self(), {:paint, :now}, 35)
+      end
+
       %{state | render_pending: true}
     end
   end
@@ -595,9 +590,9 @@ defmodule Newbee.TUI do
 
     screen =
       if state.screen == nil or force or state.screen.cols != cols do
-        Screen.paint_full(lines, input_view, status, cols, rows)
+        Screen.paint_full(state.out, lines, input_view, status, cols, rows, state.page)
       else
-        Screen.paint_delta(state.screen, lines, input_view, status, cols, rows)
+        Screen.paint_delta(state.screen, lines, input_view, status, cols, rows, state.page)
       end
 
     %{state | screen: screen, render_pending: false}

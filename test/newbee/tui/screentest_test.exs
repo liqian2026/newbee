@@ -54,5 +54,58 @@ defmodule Newbee.TUI.ScreenTest do
     refute complete?
   end
 
+  test "paint_full 锚定末尾：超屏后首行不可见、末行必上屏" do
+    # 回归：旧实现取【前】N 行，transcript 超一屏后新输出永远不上屏
+    tmp = Path.join(System.tmp_dir!(), "newbee_screen_#{:erlang.unique_integer([:positive])}.bin")
+
+    port =
+      Port.open({:spawn_executable, "/bin/bash"}, [:binary, :exit_status, args: ["-c", "cat > #{tmp}"]])
+
+    lines = Enum.map(1..50, &"line#{&1}")
+    status = {"status", {10, 1}}
+
+    Screen.paint_full(port, lines, "› ", status, 80, 10)
+    out = await_file(tmp, "line50")
+
+    assert out =~ "line44"
+    refute out =~ "line43"
+    File.rm(tmp)
+  end
+
+  test "paint_delta 只重写变化行且内容正确" do
+    tmp = Path.join(System.tmp_dir!(), "newbee_screen_#{:erlang.unique_integer([:positive])}.bin")
+
+    port =
+      Port.open({:spawn_executable, "/bin/bash"}, [:binary, :exit_status, args: ["-c", "cat > #{tmp}"]])
+
+    status = {"status", {10, 1}}
+
+    screen = Screen.paint_full(port, ["a", "b"], "› ", status, 80, 10)
+    Screen.paint_delta(screen, ["a", "b", "c"], "› ", status, 80, 10)
+    out = await_file(tmp, "\e[3;1Hc\e[K")
+
+    # 增绘帧包含新行 c 的行写入
+    assert out =~ "\e[3;1Hc\e[K"
+    File.rm!(tmp)
+  end
+
+  # 端口落盘是异步的：轮询直到文件出现预期内容
+  defp await_file(path, marker, deadline \\ 5_000) do
+    case File.read(path) do
+      {:ok, content} ->
+        if String.contains?(content, marker) do
+          content
+        else
+          if deadline <= 0, do: flunk("file never got #{inspect(marker)}: #{inspect(content)}")
+          Process.sleep(50)
+          await_file(path, marker, deadline - 50)
+        end
+
+      _ ->
+        Process.sleep(50)
+        await_file(path, marker, deadline - 50)
+    end
+  end
+
   defp plain(s), do: String.replace(s, ~r/\e\[[0-9;]*[A-Za-z~]/, "")
 end

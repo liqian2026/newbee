@@ -164,17 +164,26 @@ defmodule Newbee.TUI.Screen do
 
   # ── 双缓冲 paint ──
 
-  defstruct prev: nil, cols: 0, rows: 0
+  defstruct prev: nil, cols: 0, rows: 0, port: nil
 
   @doc """
-  全量重画（首帧 / resize / 翻页跳变）。
+  打开直通 stdout 的输出端口（TUI 启动时调用一次）。
+
+  必须绕过 group leader：输入 reader 的 `IO.getn` 挂起期间，OTP `user` IO 服务器
+  会把所有后续 put_chars 排队到下一次按键才处理——即"不输入就不输出"的根因。
+  fd 端口直写 tty，与输入等待完全解耦。
+  """
+  def open_port, do: Port.open({:fd, 1, 1}, [:binary, :out])
+
+  @doc """
+  全量重画（首帧 / resize / 翻页跳变）。port 来自 open_port/0。
 
   布局（自底向上）：第 rows 行 = 输入行，rows-1 = 分隔线，rows-2 = 状态栏，
   1..rows-3 = 正文输出区。status 为 {status_text, {line_no, cursor_col}}。
   """
-  def paint_full(lines, input_view, status, cols, rows) do
+  def paint_full(port, lines, input_view, status, cols, rows, page \\ 0) do
     {status_text, {line_no, cursor_col}} = status
-    body = wrap(lines, cols) |> Enum.take(max(rows - 3, 1))
+    body = body_rows(lines, cols, rows, page)
     out = ["\e[H\e[2J"]
 
     out =
@@ -187,17 +196,16 @@ defmodule Newbee.TUI.Screen do
     out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
     out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
     out = out ++ ["\e[#{line_no};#{cursor_col}H"]
-    IO.write(:stdio, out)
-    _ = :io.request(:stdio, :flush)
-    %__MODULE__{prev: body, cols: cols, rows: rows}
+    Port.command(port, out)
+    %__MODULE__{prev: body, cols: cols, rows: rows, port: port}
   end
 
   @doc """
   增量重画：只重写与上一帧不同的行。
   """
-  def paint_delta(screen, lines, input_view, status, cols, rows) do
+  def paint_delta(screen, lines, input_view, status, cols, rows, page \\ 0) do
     {status_text, {line_no, cursor_col}} = status
-    body = wrap(lines, cols) |> Enum.take(max(rows - 3, 1))
+    body = body_rows(lines, cols, rows, page)
     # 屏幕上第 i 行（1 起）
     out =
       diff_rows(screen.prev, body)
@@ -207,9 +215,16 @@ defmodule Newbee.TUI.Screen do
     out = out ++ ["\e[#{rows - 1};1H" <> String.duplicate("─", cols) <> "\e[K"]
     out = out ++ ["\e[#{rows};1H\e[K" <> input_view]
     out = out ++ ["\e[#{line_no};#{cursor_col}H"]
-    IO.write(:stdio, out)
-    _ = :io.request(:stdio, :flush)
-    %__MODULE__{prev: body, cols: cols, rows: rows}
+    Port.command(screen.port, out)
+    %__MODULE__{prev: body, cols: cols, rows: rows, port: screen.port}
+  end
+
+  # 输出区取末尾 need 行（聊天 TUI 永远锚定最新内容）；page>0 时向上翻 need×page 行。
+  # 旧实现取【前】N 行：transcript 超过一屏后新内容永远不上屏（"输出一半不显示"根因）。
+  defp body_rows(lines, cols, rows, page) do
+    need = max(rows - 3, 1)
+    {tail, _top?} = wrap_tail(lines, cols, need * (page + 1))
+    Enum.take(tail, need)
   end
 
   # 返回 [{行号(0起), 新行}]
