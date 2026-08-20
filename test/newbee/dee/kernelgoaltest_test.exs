@@ -212,4 +212,55 @@ defmodule Newbee.DEE.KernelGoalTest do
     GenServer.stop(kernel)
     GenServer.stop(ev)
   end
+
+  test "瞬态上游错误：重试后继续并完成目标" do
+    Newbee.Bus.subscribe()
+    {:ok, ev} = Evaluator.start(mode: :local)
+
+    {:ok, kernel} =
+      Kernel.start_link(
+        client: %{},
+        evaluator: ev,
+        session: false,
+        client_fun:
+          scripted([
+            fn _m, _o -> {:error, {:stream_error, :timeout, "partial"}} end,
+            fn _m, _o -> {:ok, done_msg("重试后完成"), %{}} end
+          ])
+      )
+
+    assert :ok = Kernel.set_goal(kernel, "目标", retry_delay: 0)
+    assert_receive {:newbee_event, :goal_retry, {:goal_retry, 1}}
+    assert_receive {:newbee_event, :goal_done, {:goal_done, "重试后完成"}}
+    assert Kernel.goal(kernel) == nil
+
+    GenServer.stop(kernel)
+    GenServer.stop(ev)
+  end
+
+  test "瞬态上游错误耗尽重试后取消目标" do
+    Newbee.Bus.subscribe()
+    {:ok, ev} = Evaluator.start(mode: :local)
+
+    {:ok, kernel} =
+      Kernel.start_link(
+        client: %{},
+        evaluator: ev,
+        client_fun:
+          scripted([
+            fn _m, _o -> {:error, {:upstream_error, :overloaded}} end,
+            fn _m, _o -> {:error, {:upstream_error, :overloaded}} end,
+            fn _m, _o -> {:error, {:upstream_error, :overloaded}} end
+          ])
+      )
+
+    assert :ok = Kernel.set_goal(kernel, "目标", max_error_retries: 2, retry_delay: 0)
+    assert_receive {:newbee_event, :goal_retry, {:goal_retry, 1}}
+    assert_receive {:newbee_event, :goal_retry, {:goal_retry, 2}}
+    assert_receive {:newbee_event, :goal_cancelled, {:goal_cancelled, :error}}
+    assert Kernel.goal(kernel) == nil
+
+    GenServer.stop(kernel)
+    GenServer.stop(ev)
+  end
 end

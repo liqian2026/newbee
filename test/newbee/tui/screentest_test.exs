@@ -25,6 +25,26 @@ defmodule Newbee.TUI.ScreenTest do
     assert [_one] = Screen.wrap([colored], 12)
   end
 
+  test "状态栏 ANSI 不占宽，右栏 tok/bind/policy 不被截断" do
+    # 回归：状态栏按可见宽度截断时曾把 \e[2m 里的 [ 2 m 各计 1 列，
+    # 导致右栏 tok/bind/policy 被多算的 20+ 列顶出屏幕。
+    tmp = Path.join(System.tmp_dir!(), "newbee_screen_status_#{:erlang.unique_integer([:positive])}.bin")
+
+    port =
+      Port.open({:spawn_executable, "/bin/bash"}, [:binary, :exit_status, args: ["-c", "cat > #{tmp}"]])
+
+    left = "\e[2mdeepseek-v4-flash · newbee\e[0m"
+    right = "\e[2m\e[33m ⏱ 1.5s\e[0m\e[2m tok:12.3M bind:0 hint\e[0m"
+    status_text = left <> String.duplicate(" ", 20) <> right
+    status = {status_text, {10, 1}}
+
+    Screen.paint_full(port, ["body"], "› ", status, 80, 10)
+    out = await_file(tmp, "hint")
+
+    assert out =~ "tok:12.3M bind:0 hint"
+    File.rm!(tmp)
+  end
+
   test "折行保留 ANSI 样式" do
     rows = Screen.wrap(["\e[32m" <> String.duplicate("a", 20) <> "\e[0m"], 8)
     assert Enum.all?(rows, &String.starts_with?(&1, "\e["))

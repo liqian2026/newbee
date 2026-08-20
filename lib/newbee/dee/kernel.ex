@@ -224,7 +224,17 @@ defmodule Newbee.DEE.Kernel do
         |> push_msg(%{"role" => "system", "content" => goal_system_prompt(text)})
         |> push_msg(%{"role" => "user", "content" => "（自主目标模式启动）目标：#{text}\n请开始自主工作，直到达成目标。"})
 
-      goal = %{text: text, rounds: 0, max_rounds: max_rounds, idle: 0, msg_len: length(state.messages)}
+      goal = %{
+        text: text,
+        rounds: 0,
+        max_rounds: max_rounds,
+        idle: 0,
+        msg_len: length(state.messages),
+        error_retries: 0,
+        max_error_retries: Keyword.get(opts, :max_error_retries, 3),
+        retry_delay: Keyword.get(opts, :retry_delay, 250)
+      }
+
       emit(state, {:goal_start, text})
       send(self(), :goal_next)
       {:reply, :ok, %{state | goal: goal}}
@@ -274,10 +284,10 @@ defmodule Newbee.DEE.Kernel do
   # 目标模式：模型以纯文本结束 → 自动开始下一轮（轮数上限 + 停滞提醒保护）
   defp after_turn({:text, content}, state) do
     g = state.goal
-    added = Enum.slice(state.messages, g.msg_len..-1//1)
+    added = Enum.slice(state.messages, g.msg_len, length(state.messages) - g.msg_len)
     idle = if Enum.any?(added, &(&1["role"] == "tool")), do: 0, else: g.idle + 1
     rounds = g.rounds + 1
-    state = %{state | goal: %{g | rounds: rounds, idle: idle}}
+    state = %{state | goal: %{g | rounds: rounds, idle: idle, error_retries: 0}}
 
     if rounds >= g.max_rounds do
       emit(state, {:goal_limit, g.max_rounds})
@@ -311,7 +321,7 @@ defmodule Newbee.DEE.Kernel do
   defp after_turn({:ask, question}, state) do
     # 目标保留：用户回答后的 submit 出口会自动续跑
     emit(state, {:goal_ask, question})
-    {{:ask, question}, state}
+    {{:ask, question}, %{state | goal: %{state.goal | error_retries: 0}}}
   end
 
   defp after_turn({:interrupted, content}, state) do
@@ -320,9 +330,25 @@ defmodule Newbee.DEE.Kernel do
   end
 
   defp after_turn({:error, e}, state) do
-    emit(state, {:goal_cancelled, :error})
-    {{:error, e}, %{state | goal: nil}}
+    g = state.goal
+
+    if retryable_goal_error?(e) and g.error_retries < g.max_error_retries do
+      retries = g.error_retries + 1
+      state = %{state | goal: %{g | error_retries: retries}}
+      emit(state, {:goal_retry, retries})
+      Process.send_after(self(), :goal_next, g.retry_delay)
+      {{:error, e}, state}
+    else
+      emit(state, {:goal_cancelled, :error})
+      {{:error, e}, %{state | goal: nil}}
+    end
   end
+
+  defp retryable_goal_error?({:stream_error, _reason, _content}), do: true
+  defp retryable_goal_error?({:stream_error, _reason}), do: true
+  defp retryable_goal_error?({:upstream_error, _reason}), do: true
+  defp retryable_goal_error?(:upstream_error), do: true
+  defp retryable_goal_error?(_), do: false
 
   defp goal_system_prompt(text) do
     """
@@ -753,6 +779,7 @@ defmodule Newbee.DEE.Kernel do
   defp eval_interrupted?(_), do: false
 
   defp maybe_advisor(%{advisor: nil} = state), do: state
+
   defp maybe_advisor(state) do
     if rem(state.steps, 3) == 0 do
       text =
@@ -876,8 +903,7 @@ defmodule Newbee.DEE.Kernel do
       task = build_task(state.messages)
       traj = build_traj(state.messages)
 
-      score_opts =
-        if p.complete_fn, do: [scale: p.scale, complete_fn: p.complete_fn], else: [scale: p.scale]
+      score_opts = if p.complete_fn, do: [scale: p.scale, complete_fn: p.complete_fn], else: [scale: p.scale]
 
       result =
         try do
@@ -937,8 +963,7 @@ defmodule Newbee.DEE.Kernel do
     task = build_task(state.messages)
     traj = build_traj(state.messages)
 
-    score_opts =
-      if p.complete_fn, do: [scale: p.scale, complete_fn: p.complete_fn], else: [scale: p.scale]
+    score_opts = if p.complete_fn, do: [scale: p.scale, complete_fn: p.complete_fn], else: [scale: p.scale]
 
     result =
       try do

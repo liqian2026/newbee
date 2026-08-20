@@ -11,39 +11,21 @@ defmodule Newbee.Codec.FallbackParser do
   从模型输出文本提取 Elixir 代码块。
 
   返回 `{blocks, cleaned}`：
-    - blocks: 代码字符串列表（```elixir / ``` 围栏，按出现顺序）
-    - cleaned: 去掉代码块后的剩余文本（块位置替换为占位提示）
+    - blocks: 明确标注为 ```elixir 的代码字符串列表，按出现顺序
+    - cleaned: 去掉 Elixir 代码块后的剩余文本
   """
   def extract(text) when is_binary(text) do
-    {blocks, cleaned_parts} =
-      text
-      |> String.split(~r/```(?:elixir)?\s*\n?/)
-      |> do_extract()
-
-    {blocks, cleaned_parts}
+    regex = ~r/```elixir[ \t]*\n(?<code>.*?)```/is
+    blocks = Regex.scan(regex, text, capture: :all_names) |> Enum.map(&(&1 |> List.first() |> String.trim_trailing()))
+    cleaned = Regex.replace(regex, text, "")
+    {blocks, cleaned}
   end
 
   def extract(_), do: {[], ""}
 
-  # 围栏把文本切成 奇数段=代码 偶数段=普通（第一段普通）
-  defp do_extract(parts) do
-    parts
-    |> Enum.with_index()
-    |> Enum.reduce({[], []}, fn
-      {part, i}, {blocks, cleaned} when rem(i, 2) == 1 ->
-        # 围栏内（注意：闭合 ``` 已作为分隔符被吞，需去掉尾部的 ``` 残片）
-        code = String.trim_trailing(part)
-        {blocks ++ [code], cleaned}
-
-      {part, _}, {blocks, cleaned} ->
-        {blocks, cleaned ++ [part]}
-    end)
-    |> then(fn {b, c} -> {b, Enum.join(c, "")} end)
-  end
-
-  @doc "文本是否含 elixir 代码块。"
+  @doc "文本是否含明确标注的 elixir 代码块。"
   def has_block?(text) when is_binary(text) do
-    Regex.match?(~r/```(?:elixir)?\s*\n/, text)
+    Regex.match?(~r/```elixir[ \t]*\n/i, text)
   end
 
   def has_block?(_), do: false

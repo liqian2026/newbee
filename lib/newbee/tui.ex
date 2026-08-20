@@ -18,7 +18,7 @@ defmodule Newbee.TUI do
   交互（对齐 codex / pi）：
   - Enter 发送 · `\` 续行 · ↑/↓ 历史 · Tab 补全（@路径 / 命令）
   - Esc 中断模型执行 · Ctrl-C 清输入/退出 · Ctrl-L 重绘
-  - PgUp/PgDn 翻屏 · Tab 展开/折叠工具块
+  - PgUp/PgDn 翻屏 · Ctrl-O 展开/折叠工具块
   """
 
   alias Newbee.TUI.{Key, Line, Screen}
@@ -40,7 +40,7 @@ defmodule Newbee.TUI do
             tool_blocks: %{},
             last_block_id: nil,
             show_reasoning: true,
-            tool_open: %{},
+            expanded: %{},
             usage: %{},
             pane: nil,
             out: nil,
@@ -98,7 +98,9 @@ defmodule Newbee.TUI do
       state
       |> push_line("\e[1mnewbee\e[0m TUI - #{client.model} · policy=#{Newbee.Evolution.Policy.get()}")
       |> push_line("\e[2m命令: #{Enum.join(Newbee.Commands.commands(), " ")}\e[0m")
-      |> push_line("\e[2m↑↓ 历史 · Ctrl-R 搜历史 · PgUp/PgDn 翻屏 · Tab 补全 · Esc 中断 · Ctrl-C 退出 · Ctrl-L 重绘 · Ctrl-T 窗格/队列\e[0m")
+      |> push_line(
+        "\e[2m↑↓ 历史 · Ctrl-R 搜历史 · PgUp/PgDn 翻屏 · Tab 补全 · Ctrl-O 展开代码 · Esc 中断 · Ctrl-C 退出 · Ctrl-L 重绘 · Ctrl-T 窗格/队列\e[0m"
+      )
       |> push_line("\e[2msession: #{session_id(kernel)}\e[0m")
 
     parent = self()
@@ -220,7 +222,11 @@ defmodule Newbee.TUI do
           end
 
         # 丢弃已排队的滞后渲染事件，防"取消后仍吐字"
-        state = flush_pending_events(state) |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil}) |> maybe_start_next()
+        state =
+          flush_pending_events(state)
+          |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil})
+          |> maybe_start_next()
+
         loop(paint(state), reader)
 
       {:key, key} ->
@@ -402,17 +408,15 @@ defmodule Newbee.TUI do
           matches = hist_matches(state, q)
           text = if matches == [], do: state.line_ed.text, else: Enum.at(matches, 0)
           ed = %{state.line_ed | text: text, cur: String.length(text)}
-          {%{state | search_mode: true, search_query: q, search_idx: 0, search_orig: state.line_ed.text, line_ed: ed}, true}
+
+          {%{state | search_mode: true, search_query: q, search_idx: 0, search_orig: state.line_ed.text, line_ed: ed},
+           true}
 
         :tab ->
-          if state.line_ed.text == "" and state.last_block_id do
-            case Map.get(state.tool_blocks, state.last_block_id) do
-              nil -> {%{state | line_ed: Line.complete(state.line_ed)}, false}
-              block -> if Map.get(state.tool_open, block.id), do: {state, false}, else: {expand_block(state, block), true}
-            end
-          else
-            {%{state | line_ed: Line.complete(state.line_ed)}, false}
-          end
+          {%{state | line_ed: Line.complete(state.line_ed)}, false}
+
+        :ctrl_o ->
+          {toggle_block(state), true}
 
         :up ->
           {%{state | line_ed: Line.hist_prev(state.line_ed)}, false}
@@ -429,9 +433,16 @@ defmodule Newbee.TUI do
         :escape ->
           if state.busy do
             Newbee.DEE.Kernel.interrupt(state.kernel)
+
             if state.submit_kind == :shell and is_pid(state.submit_pid) do
               Process.exit(state.submit_pid, :kill)
-              state = state |> push_line("\e[31m⏹ shell 已中断\e[0m") |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil}) |> maybe_start_next()
+
+              state =
+                state
+                |> push_line("\e[31m⏹ shell 已中断\e[0m")
+                |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil})
+                |> maybe_start_next()
+
               {state, false}
             else
               {state |> push_line("\e[31m⏹ 已请求中断…\e[0m"), false}
@@ -443,9 +454,16 @@ defmodule Newbee.TUI do
         :esc ->
           if state.busy do
             Newbee.DEE.Kernel.interrupt(state.kernel)
+
             if state.submit_kind == :shell and is_pid(state.submit_pid) do
               Process.exit(state.submit_pid, :kill)
-              state = state |> push_line("\e[31m⏹ shell 已中断\e[0m") |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil}) |> maybe_start_next()
+
+              state =
+                state
+                |> push_line("\e[31m⏹ shell 已中断\e[0m")
+                |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil})
+                |> maybe_start_next()
+
               {state, false}
             else
               {state |> push_line("\e[31m⏹ 已请求中断…\e[0m"), false}
@@ -454,12 +472,25 @@ defmodule Newbee.TUI do
             {%{state | line_ed: Line.clear(state.line_ed)}, false}
           end
 
-        {:alt, ?b} -> {%{state | line_ed: Line.word_left(state.line_ed)}, false}
-        {:alt, ?f} -> {%{state | line_ed: Line.word_right(state.line_ed)}, false}
-        {:alt, ?d} -> {%{state | line_ed: Line.delete_word_forward(state.line_ed)}, false}
-        63 -> if state.line_ed.text == "", do: {push_line(state, help_text()), true}, else: {%{state | line_ed: Line.insert(state.line_ed, <<63::utf8>>)}, false}
-        ch when is_integer(ch) -> {%{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}, false}
-        _unknown -> {state, false}
+        {:alt, ?b} ->
+          {%{state | line_ed: Line.word_left(state.line_ed)}, false}
+
+        {:alt, ?f} ->
+          {%{state | line_ed: Line.word_right(state.line_ed)}, false}
+
+        {:alt, ?d} ->
+          {%{state | line_ed: Line.delete_word_forward(state.line_ed)}, false}
+
+        63 ->
+          if state.line_ed.text == "",
+            do: {push_line(state, help_text()), true},
+            else: {%{state | line_ed: Line.insert(state.line_ed, <<63::utf8>>)}, false}
+
+        ch when is_integer(ch) ->
+          {%{state | line_ed: Line.insert(state.line_ed, <<ch::utf8>>)}, false}
+
+        _unknown ->
+          {state, false}
       end
     end
   end
@@ -483,6 +514,7 @@ defmodule Newbee.TUI do
 
   defp search_key(state, :ctrl_r) do
     matches = hist_matches(state, state.search_query)
+
     if matches == [] do
       {state, true}
     else
@@ -567,7 +599,11 @@ defmodule Newbee.TUI do
         state = paint(state)
 
         ctx =
-          %{say: fn line -> send(self(), {:newbee_event, :tui_say, {:tui_say, line}}) end, kernel: state.kernel}
+          %{
+            say: fn line -> send(self(), {:newbee_event, :tui_say, {:tui_say, line}}) end,
+            kernel: state.kernel,
+            client: state.client
+          }
 
         case Newbee.Commands.handle(text, ctx) do
           :quit ->
@@ -598,7 +634,7 @@ defmodule Newbee.TUI do
           {:resume, id} ->
             {:ok, kernel2} = resume_kernel(state.client, id)
             lines = load_session_lines(id)
-            %{state | kernel: kernel2, busy: false, lines: lines}
+            %{state | kernel: kernel2, busy: false, lines: lines, expanded: %{}}
 
           {:resume_picker, metas} ->
             %{state | picker: %{items: metas, index: 0}, busy: false}
@@ -655,7 +691,7 @@ defmodule Newbee.TUI do
         GenServer.stop(state.kernel)
         {:ok, kernel} = resume_kernel(state.client, meta.id)
         lines = load_session_lines(meta.id)
-        {%{state | picker: nil, kernel: kernel, busy: false, lines: lines}, true}
+        {%{state | picker: nil, kernel: kernel, busy: false, lines: lines, expanded: %{}}, true}
     end
   end
 
@@ -717,8 +753,13 @@ defmodule Newbee.TUI do
   end
 
   defp message_to_lines(%{"role" => "user", "content" => c}), do: ["\e[32m›\e[0m " <> String.slice(c, 0, 2000)]
-  defp message_to_lines(%{"role" => "assistant", "content" => c}) when is_binary(c) and c != "", do: String.split(c, "\n") |> Enum.map(&Newbee.Markdown.render/1)
-  defp message_to_lines(%{"role" => "assistant", "tool_calls" => calls}) when is_list(calls), do: Enum.map(calls, &"\e[36m⏺ #{&1["function"]["name"]}\e[0m")
+
+  defp message_to_lines(%{"role" => "assistant", "content" => c}) when is_binary(c) and c != "",
+    do: String.split(c, "\n") |> Enum.map(&Newbee.Markdown.render/1)
+
+  defp message_to_lines(%{"role" => "assistant", "tool_calls" => calls}) when is_list(calls),
+    do: Enum.map(calls, &"\e[36m⏺ #{&1["function"]["name"]}\e[0m")
+
   defp message_to_lines(%{"role" => "tool", "content" => c}), do: ["\e[2m⎿ #{String.slice(c, 0, 400)}\e[0m"]
   defp message_to_lines(%{"role" => "system", "content" => c}), do: ["\e[2m#{String.slice(c, 0, 300)}\e[0m"]
   defp message_to_lines(_), do: []
@@ -800,7 +841,16 @@ defmodule Newbee.TUI do
   def render_event(%__MODULE__{} = state, :tool_start, {:tool_start, name, title, code}) do
     state = flush_text_buffer(state)
     id = :erlang.unique_integer([:positive])
-    block = %{id: id, name: name, title: title, code: code, result: nil, started_at: System.monotonic_time(:millisecond)}
+
+    block = %{
+      id: id,
+      name: name,
+      title: title,
+      code: code,
+      result: nil,
+      started_at: System.monotonic_time(:millisecond)
+    }
+
     line = tool_block_line(block)
     %{push_line(state, line) | tool_blocks: Map.put(state.tool_blocks, id, block), last_block_id: id}
   end
@@ -820,6 +870,7 @@ defmodule Newbee.TUI do
       end
 
     line = Newbee.TUI.Cards.tool_footer(text)
+
     dur =
       if id do
         case Map.get(state.tool_blocks, id) do
@@ -829,8 +880,11 @@ defmodule Newbee.TUI do
       else
         ""
       end
-    push_line(state, line <> dur)
+
+    state = push_line(state, line <> dur)
+    refresh_bindings(state)
   end
+
   def render_event(%__MODULE__{} = state, :permission_ask, {:permission_ask, preview}) do
     first_line = preview |> String.split("\n") |> hd() |> String.slice(0, 80)
 
@@ -841,14 +895,16 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :tool_warnings, {:tool_warnings, text}) do
-    # 编译 warnings 徽标化：transcript 只留一行，详情存 tool_blocks 供 Tab 展开
+    # 编译 warnings 徽标化：transcript 只留一行，详情存 tool_blocks 供 Ctrl-O 展开
     count = text |> String.split("\n", trim: true) |> length()
-    badge = "\e[33m⚠ 警告 #{count} 条\e[0m\e[2m [Tab 展开工具块]\e[0m"
+    badge = "\e[33m⚠ 警告 #{count} 条\e[0m\e[2m [Ctrl-O 展开工具块]\e[0m"
     state = push_line(flush_text_buffer(state), badge)
 
     # 把 warning 落到最近工具块的 result 尾部（折叠详情）
     case Map.get(state, :last_block_id) do
-      nil -> state
+      nil ->
+        state
+
       id ->
         case Map.get(state.tool_blocks, id) do
           nil -> state
@@ -900,12 +956,15 @@ defmodule Newbee.TUI do
 
   def render_event(%__MODULE__{} = state, :interrupted, {:interrupted, content}) do
     state = flush_text_buffer(state)
-    dur_str = if state.turn_started_at do
-      secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
-      "\e[2m⏱ 用时 #{format_duration(secs)} · 已中断\e[0m"
-    else
-      "\e[31m⏹ 已中断\e[0m"
-    end
+
+    dur_str =
+      if state.turn_started_at do
+        secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
+        "\e[2m⏱ 用时 #{format_duration(secs)} · 已中断\e[0m"
+      else
+        "\e[31m⏹ 已中断\e[0m"
+      end
+
     state = push_line(state, dur_str)
     state = %{state | turn_started_at: nil}
     if content, do: push_line(state, content), else: state
@@ -913,14 +972,16 @@ defmodule Newbee.TUI do
 
   def render_event(%__MODULE__{} = state, :turn_done, _) do
     state = flush_text_buffer(state)
-    {bs, state} = cached_bindings(%{state | bindings_cache_at: 0, busy: false})
-    state = %{state | bindings_cache: bs, bindings_cache_at: System.monotonic_time(:millisecond)}
-    dur_str = if state.turn_started_at do
-      secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
-      "\e[2m⏱ 用时 #{format_duration(secs)}\e[0m"
-    else
-      nil
-    end
+    state = refresh_bindings(state)
+
+    dur_str =
+      if state.turn_started_at do
+        secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
+        "\e[2m⏱ 用时 #{format_duration(secs)}\e[0m"
+      else
+        nil
+      end
+
     state = if dur_str, do: push_line(state, dur_str), else: state
     notify("newbee", "回合完成")
     %{state | busy: false, submit_pid: nil, submit_kind: nil, turn_started_at: nil}
@@ -1007,11 +1068,27 @@ defmodule Newbee.TUI do
 
   # ── 工具块 ──
 
-  # Tab 展开工具块：完整代码 + 完整结果追加进 transcript（§5.1 折叠块）
+  # Ctrl-O 展开/折叠工具块：完整代码 + 完整结果追加进 transcript，再按收回（§5.1 折叠块）。
+  # 展开块的行区间记在 state.expanded（block_id => {start, count}），折叠时按区间删除。
+  defp toggle_block(state) do
+    case state.last_block_id && Map.get(state.tool_blocks, state.last_block_id) do
+      nil ->
+        state
+
+      block ->
+        if Map.has_key?(state.expanded, block.id) do
+          collapse_block(state, block.id)
+        else
+          expand_block(state, block)
+        end
+    end
+  end
+
   defp expand_block(state, block) do
+    start = length(state.lines)
+
     state =
       state
-      |> Map.put(:tool_open, Map.put(state.tool_open, block.id, true))
       |> push_line("")
       |> push_line("\e[36m┌─\e[0m \e[1m⏺ 完整代码 [#{block.name} #{block.title}]\e[0m")
 
@@ -1019,14 +1096,39 @@ defmodule Newbee.TUI do
     state =
       Enum.reduce(String.split(Newbee.TUI.Highlight.elixir(block.code), "\n"), state, &push_line(&2, &1))
 
-    case block.result do
+    state =
+      case block.result do
+        nil ->
+          state
+
+        result ->
+          state
+          |> push_line("\e[36m└─⎿\e[0m 完整结果")
+          |> then(fn s -> Enum.reduce(String.split(result, "\n"), s, &push_line(&2, &1)) end)
+      end
+
+    count = length(state.lines) - start
+    %{state | expanded: Map.put(state.expanded, block.id, {start, count})}
+  end
+
+  defp collapse_block(state, block_id) do
+    case Map.get(state.expanded, block_id) do
       nil ->
         state
 
-      result ->
-        state
-        |> push_line("\e[36m└─⎿\e[0m 完整结果")
-        |> then(fn s -> Enum.reduce(String.split(result, "\n"), s, &push_line(&2, &1)) end)
+      {start, count} ->
+        {head, tail} = Enum.split(state.lines, start)
+        lines = head ++ Enum.drop(tail, count)
+
+        # 移除区间之后的其它展开块，起始索引同步下移 count
+        expanded =
+          state.expanded
+          |> Map.delete(block_id)
+          |> Enum.reduce(%{}, fn {id, {s, c}}, acc ->
+            if s > start, do: Map.put(acc, id, {s - count, c}), else: Map.put(acc, id, {s, c})
+          end)
+
+        %{state | lines: lines, expanded: expanded}
     end
   end
 
@@ -1082,7 +1184,7 @@ defmodule Newbee.TUI do
 
   defp pane_lines(:bindings, state) do
     # 模型/工具运行时 evaluator 正在占用 GenServer，不排队同步查询。
-    bs = if state.busy, do: [], else: safe_bindings_summary()
+    bs = if state.busy, do: [], else: safe_bindings_summary() || []
     ["\e[1;36m[窗格] 绑定 (#{length(bs)})\e[0m" | Enum.map(bs, &"  #{&1.name} : #{&1.type} (#{&1.size} bytes)")]
   end
 
@@ -1097,7 +1199,11 @@ defmodule Newbee.TUI do
 
   defp pane_lines(:tools, state) do
     blocks = Map.values(state.tool_blocks)
-    ["\e[1;36m[窗格] 工具块 (#{length(blocks)})\e[0m" | Enum.map(blocks, &"  #{&1.name}: #{&1.title} (#{String.slice(to_string(&1.code || ""), 0, 60)})")]
+
+    [
+      "\e[1;36m[窗格] 工具块 (#{length(blocks)})\e[0m"
+      | Enum.map(blocks, &"  #{&1.name}: #{&1.title} (#{String.slice(to_string(&1.code || ""), 0, 60)})")
+    ]
   end
 
   defp pane_lines(:queue, state) do
@@ -1141,18 +1247,18 @@ defmodule Newbee.TUI do
   defp safe_bindings_summary do
     case Process.whereis(Newbee.DEE.Evaluator) do
       nil ->
-        []
+        nil
 
       pid ->
         try do
           case Newbee.DEE.Evaluator.bindings_summary(pid, 50) do
             bs when is_list(bs) -> bs
-            _ -> []
+            _ -> nil
           end
         rescue
-          _ -> []
+          _ -> nil
         catch
-          :exit, _ -> []
+          :exit, _ -> nil
         end
     end
   end
@@ -1163,6 +1269,7 @@ defmodule Newbee.TUI do
   end
 
   defp format_duration(secs) when secs < 60, do: :io_lib.format("~.1fs", [secs]) |> IO.iodata_to_binary()
+
   defp format_duration(secs) do
     m = trunc(secs / 60)
     s = secs - m * 60
@@ -1174,6 +1281,11 @@ defmodule Newbee.TUI do
       "      Ctrl-U/K cut | Ctrl-Y paste | Ctrl-W/Alt-D delete word | PgUp/Dn scroll | Ctrl-T pane | /reasoning 思考流 | Ctrl-R 历史搜索"
   end
 
+  # 强制刷新一次 bindings（tool_result/turn_done 后调用：求值器此刻空闲，查询不会排队超时）
+  defp refresh_bindings(state) do
+    {bs, state} = cached_bindings(%{state | bindings_cache_at: 0, busy: false})
+    %{state | bindings_cache: bs, bindings_cache_at: System.monotonic_time(:millisecond)}
+  end
 
   # 缓存 bindings（500ms TTL + busy 时跳过查询，避免每帧 GenServer.call 卡 paint）
   @bindings_ttl 500
@@ -1186,8 +1298,13 @@ defmodule Newbee.TUI do
       if state.bindings_cache_at != 0 and now - state.bindings_cache_at < @bindings_ttl and state.bindings_cache != nil do
         {state.bindings_cache, state}
       else
-        bs = safe_bindings_summary()
-        {bs, %{state | bindings_cache: bs, bindings_cache_at: now}}
+        case safe_bindings_summary() do
+          nil ->
+            {state.bindings_cache || [], state}
+
+          bs ->
+            {bs, %{state | bindings_cache: bs, bindings_cache_at: now}}
+        end
       end
     end
   end
@@ -1204,12 +1321,15 @@ defmodule Newbee.TUI do
     bs = state.bindings_cache || []
     bindings = length(bs)
     dots = spinner(state)
-    elapsed_str = if state.busy and state.turn_started_at do
-      secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
-      " ⏱ #{format_duration(secs)}"
-    else
-      ""
-    end
+
+    elapsed_str =
+      if state.busy and state.turn_started_at do
+        secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
+        " ⏱ #{format_duration(secs)}"
+      else
+        ""
+      end
+
     page_hint = if state.page > 0, do: " ↕#{state.page}", else: ""
     q = length(state.pending_inputs)
     qpart = if q > 0, do: " q:#{q}", else: ""
@@ -1231,12 +1351,17 @@ defmodule Newbee.TUI do
       else
         {left, lw}
       end
+
     pad = max(cols - lw - rw - 2, 1)
     left <> String.duplicate(" ", pad) <> right
   end
 
-  defp human_tok(n) when is_integer(n) and n >= 1_000_000_000, do: :io_lib.format("~.1fB", [n / 1_000_000_000]) |> IO.iodata_to_binary()
-  defp human_tok(n) when is_integer(n) and n >= 1_000_000, do: :io_lib.format("~.1fM", [n / 1_000_000]) |> IO.iodata_to_binary()
+  defp human_tok(n) when is_integer(n) and n >= 1_000_000_000,
+    do: :io_lib.format("~.1fB", [n / 1_000_000_000]) |> IO.iodata_to_binary()
+
+  defp human_tok(n) when is_integer(n) and n >= 1_000_000,
+    do: :io_lib.format("~.1fM", [n / 1_000_000]) |> IO.iodata_to_binary()
+
   defp human_tok(n) when is_integer(n) and n >= 1_000, do: :io_lib.format("~.1fK", [n / 1_000]) |> IO.iodata_to_binary()
   defp human_tok(n), do: to_string(n || 0)
   # 剥 ANSI 后按可见宽度算（用于分栏对齐）
@@ -1262,6 +1387,7 @@ defmodule Newbee.TUI do
           |> String.split("\n")
           |> Enum.with_index()
           |> Enum.map_join("\n", fn {l, i} -> if i == 0, do: prefix <> l, else: "  " <> l end)
+
         {text, row, 2 + cur_col}
       end
     end
@@ -1314,5 +1440,3 @@ defmodule Newbee.TUI do
     end
   end
 end
-
-

@@ -16,6 +16,19 @@ defmodule Newbee.TUI.CardsTest do
     assert Cards.tool_preview("") == nil
   end
 
+  test "tool_preview 折叠态前 3 行，仅超 3 行才省略号" do
+    p3 = Cards.tool_preview("l1\nl2\nl3")
+    assert p3 =~ "l1"
+    assert p3 =~ "l3"
+    refute p3 =~ "…"
+
+    p5 = Cards.tool_preview("l1\nl2\nl3\nl4\nl5")
+    assert p5 =~ "l1"
+    assert p5 =~ "l3"
+    refute p5 =~ "l4"
+    assert p5 =~ "…"
+  end
+
   test "tool_footer 成功显示测试统计" do
     footer = Cards.tool_footer("✓ ok\nCompiling 1 file\n8 tests, 0 failures")
     assert footer =~ "└─ ✓"

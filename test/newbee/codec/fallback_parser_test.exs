@@ -11,10 +11,10 @@ defmodule Newbee.Codec.FallbackParserTest do
     assert cleaned =~ "然后继续"
   end
 
-  test "裸 ``` 围栏也识别" do
-    text = "```\nIO.puts(\"hi\")\n```"
-    {blocks, _cleaned} = FallbackParser.extract(text)
-    assert blocks == ["IO.puts(\"hi\")"]
+  test "裸围栏和 ASCII 图不执行" do
+    text = "```\n┌─────┐\n│ 图表 │\n└─────┘\n```"
+    assert {[], ^text} = FallbackParser.extract(text)
+    refute FallbackParser.has_block?(text)
   end
 
   test "多块按顺序提取" do

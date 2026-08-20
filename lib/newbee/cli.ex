@@ -165,7 +165,7 @@ defmodule Newbee.CLI do
           IO.puts(if ok, do: "✓ 已允许执行", else: "✗ 已拒绝执行")
           loop(kernel, client)
         else
-          ctx = %{say: &IO.puts/1}
+          ctx = %{say: &IO.puts/1, client: client}
 
           case Newbee.Commands.handle(input, ctx |> Map.put(:kernel, kernel)) do
             :quit ->

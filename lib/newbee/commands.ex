@@ -4,7 +4,7 @@ defmodule Newbee.Commands do
   /resume 需要重建 kernel ——由调用方传入 restart fun。
   """
 
-  @commands ~w(/model /bindings /tokens /rules /dump /resume /reset /approve
+  @commands ~w(/model /bindings /tokens /rules /status /dump /resume /reset /approve
     /reject /log /snapshot /rollback /evolve /policy /genes /bench /goal /diff
     /undo /session /init /tools /permissions /compact /quit)
 
@@ -169,6 +169,11 @@ defmodule Newbee.Commands do
     :handled
   end
 
+  defp run("status", _, ctx) do
+    ctx.say.(Newbee.Status.render(ctx[:client]))
+    :handled
+  end
+
   defp run("resume", "", _ctx) do
     {:resume_picker, Newbee.Session.list_with_meta(20)}
   end
@@ -223,6 +228,7 @@ defmodule Newbee.Commands do
 
     :handled
   end
+
   defp run("diff", arg, ctx) do
     range = if arg == "", do: "HEAD", else: String.trim(arg)
 

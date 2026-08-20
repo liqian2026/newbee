@@ -10,12 +10,13 @@ defmodule Newbee.TUI.Cards do
   end
 
   @doc """
-  工具块代码预览（前 3 行，语法高亮，│ 缩进，超长省略）。
+  工具块代码预览（折叠态：前 3 行，语法高亮，│ 缩进，超长省略）。
   返回 nil 表示无代码可显示。
   """
   def tool_preview(code) when is_binary(code) do
-    preview = code |> String.split("\n") |> Enum.take(3) |> Enum.join("\n")
-    ellipsis = if String.contains?(code, "\n"), do: " …", else: ""
+    lines = String.split(code, "\n")
+    preview = lines |> Enum.take(3) |> Enum.join("\n")
+    ellipsis = if length(lines) > 3, do: " …", else: ""
 
     if preview == "" do
       nil
