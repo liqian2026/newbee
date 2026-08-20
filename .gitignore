@@ -9,3 +9,5 @@ newbee-*.tar
 /tmp/
 
 /.newbee/
+.env
+.env.*
