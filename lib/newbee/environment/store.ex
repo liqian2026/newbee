@@ -61,6 +61,29 @@ defmodule Newbee.Environment.Store do
 
     unless File.exists?(path(:environment)) do
       write_atomic!(path(:environment), Jason.encode_to_iodata!(fresh_environment(), pretty: true))
+    else
+      # 已有快照但 active 空（旧文件或被清空）→ 原地热补内置基线，不丢 revision/checkpoint
+      case File.read(path(:environment)) do
+        {:ok, body} ->
+          case Jason.decode(body) do
+            {:ok, %{"active" => active} = env} when is_map(active) ->
+              if map_size(active) == 0 do
+                builtin = Newbee.Plugins.builtin_active_map()
+                patched = Map.put(env, "active", Map.merge(builtin, active))
+                patched =
+                  case env["manifest"] do
+                    %{"active" => mactive, "revision" => rev} when is_map(mactive) and rev == 0 ->
+                      if map_size(mactive) == 0, do: Map.put(patched, "manifest", Map.put(env["manifest"], "active", builtin)), else: patched
+                    %{"active" => mactive} when is_map(mactive) ->
+                      if map_size(mactive) == 0, do: Map.put(patched, "manifest", Map.put(env["manifest"], "active", builtin)), else: patched
+                    _ -> patched
+                  end
+                write_atomic!(path(:environment), Jason.encode_to_iodata!(patched, pretty: true))
+              end
+            _ -> :ok
+          end
+        _ -> :ok
+      end
     end
 
     cleanup_temp_files(root())
