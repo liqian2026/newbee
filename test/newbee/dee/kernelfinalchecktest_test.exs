@@ -1,7 +1,8 @@
-defmodule Newbee.DEE.KernelFinalCheckTest do
+defmodule Newbee.Agent.LoopFinalCheckTest do
   use ExUnit.Case, async: false
   import Newbee.TestScripted
-  alias Newbee.DEE.{Kernel, Evaluator}
+  alias Newbee.Agent.Loop
+  alias Newbee.DEE.Evaluator
 
   defp verifier(script) do
     {:ok, agent} = Agent.start_link(fn -> script end)
@@ -23,7 +24,7 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -40,7 +41,7 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
         }
       )
 
-    assert {:done, "task done"} = Kernel.submit(kernel, "task")
+    assert {:done, "task done"} = Loop.submit(kernel, "task")
     assert_received {:newbee_event, :final_check, {:final_check, s}}
     assert s >= 12
     refute_received {:newbee_event, :final_check_low, _}
@@ -56,7 +57,7 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
 
     # 第一次 done 低分 → 提醒 → 模型再 done（这次 final_checked=true 直接过）
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -74,7 +75,7 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
         }
       )
 
-    assert {:done, "final done"} = Kernel.submit(kernel, "task")
+    assert {:done, "final done"} = Loop.submit(kernel, "task")
     assert_received {:newbee_event, :final_check, {:final_check, low}}
     assert low < 12
     assert_received {:newbee_event, :final_check_low, {:final_check_low, ^low}}
@@ -91,7 +92,7 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
     err_fn = fn _c, _m, _o -> {:error, :timeout} end
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -107,7 +108,7 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
         }
       )
 
-    assert {:done, "ok"} = Kernel.submit(kernel, "task")
+    assert {:done, "ok"} = Loop.submit(kernel, "task")
 
     GenServer.stop(kernel)
     GenServer.stop(ev)
@@ -119,7 +120,7 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -129,7 +130,7 @@ defmodule Newbee.DEE.KernelFinalCheckTest do
           ])
       )
 
-    assert {:done, "ok"} = Kernel.submit(kernel, "task")
+    assert {:done, "ok"} = Loop.submit(kernel, "task")
     refute_received {:newbee_event, :final_check, _}
 
     GenServer.stop(kernel)

@@ -8,7 +8,7 @@ defmodule Newbee.DEE.EvalWorker do
   @default_timeout 60_000
   @active_key :newbee_eval_active_task
 
-  defstruct binding: [], count: 0
+  defstruct binding: [], count: 0, quiesced: false
 
   @doc false
   def active_pid(key) do
@@ -36,11 +36,21 @@ defmodule Newbee.DEE.EvalWorker do
   def init(_), do: {:ok, %__MODULE__{}}
 
   @impl true
+  def handle_call({:eval, _code, _opts}, _from, %{quiesced: true} = state) do
+    # Binding Continuity step 0（§4.4 quiesce）：静默期拒收新 step
+    {:reply, %{status: :error, error: "generation quiescing (switch in progress)", output: "", warnings: "", quiesced: true}, state}
+  end
+
   def handle_call({:eval, code, opts}, _from, state) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     {result, new_binding, count} = run_cell(code, state.binding, timeout, state.count, opts)
+    # §9.1：绑定 GC——LRU + 大小预算，冷值逐出为 ArtifactRef（pin 不动）
+    {new_binding, _evicted} = maybe_gc(new_binding, count)
     {:reply, result, %{state | binding: new_binding, count: count}}
   end
+
+  def handle_call(:quiesce, _from, state), do: {:reply, :ok, %{state | quiesced: true}}
+  def handle_call(:unquiesce, _from, state), do: {:reply, :ok, %{state | quiesced: false}}
 
   def handle_call(:bindings_summary, _from, state) do
     {:reply, summarize(state.binding), state}
@@ -147,6 +157,15 @@ defmodule Newbee.DEE.EvalWorker do
     else
       :rpc.call(node, __MODULE__, :clear_active, [key, pid])
     end
+  end
+
+  # GC 失败绝不拖累 cell（绑定保活优先）
+  defp maybe_gc(binding, count) do
+    Newbee.Environment.BindingGC.maybe_gc(binding, count)
+  rescue
+    _ -> {binding, []}
+  catch
+    _, _ -> {binding, []}
   end
 
   def summarize(binding) do

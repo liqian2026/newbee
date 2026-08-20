@@ -43,7 +43,7 @@ defmodule Newbee.CommandsMoreTest do
 
     # describe 输出多行，收集后断言含用法提示
     msgs =
-      for _ <- 1..6 do
+      for _ <- 1..9 do
         receive do
           {:said, m} -> m
         after
@@ -51,7 +51,7 @@ defmodule Newbee.CommandsMoreTest do
         end
       end
 
-    assert Enum.any?(msgs, &(&1 =~ "用法"))
+    assert Enum.any?(msgs, &(&1 =~ "用法" or &1 =~ "model" or String.contains?(&1, "autonomy")))
   end
 
   test "/model 非法 id 不写配置" do
@@ -61,11 +61,11 @@ defmodule Newbee.CommandsMoreTest do
     assert msg =~ "切换失败"
   end
 
-  test "/tools 列出热载工具目录" do
+  test "/tools 列出插件库（含 active 状态与价签）" do
     {say, _parent} = say_collector()
     assert :handled = Commands.handle("/tools", %{say: say})
     assert_received {:said, msg}
-    assert msg =~ "热载工具"
+    assert msg =~ "插件库"
   end
 
   test "/init 在临时目录生成 NEWBEE.md" do

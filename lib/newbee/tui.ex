@@ -76,7 +76,7 @@ defmodule Newbee.TUI do
     Newbee.Bus.subscribe()
 
     {:ok, kernel} =
-      Newbee.DEE.Kernel.start_link(client: client, auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(client: client, evaluator: Newbee.Environment.Boot.evaluator_or_fallback(), auto_antibodies: true, render: fn _ -> :ok end)
 
     # 输出走独立 fd 端口：IO.getn 挂起时 group leader 会排队所有输出
     # （"不输入就不输出"的根因），端口直写 tty 与输入解耦。
@@ -96,7 +96,7 @@ defmodule Newbee.TUI do
 
     state =
       state
-      |> push_line("\e[1mnewbee\e[0m TUI - #{client.model} · policy=#{Newbee.Evolution.Policy.get()}")
+      |> push_line("\e[1mnewbee\e[0m TUI - #{client.model} · policy=#{Newbee.Environment.Autonomy.get()}")
       |> push_line("\e[2m命令: #{Enum.join(Newbee.Commands.commands(), " ")}\e[0m")
       |> push_line(
         "\e[2m↑↓ 历史 · Ctrl-R 搜历史 · PgUp/PgDn 翻屏 · Tab 补全 · Ctrl-O 展开代码 · Esc 中断 · Ctrl-C 退出 · Ctrl-L 重绘 · Ctrl-T 窗格/队列\e[0m"
@@ -207,7 +207,7 @@ defmodule Newbee.TUI do
       # Esc 在 busy 时优先抢占：即使 mailbox 里已排了若干 :text/:tool_result，
       # 也先杀 evaluator/LLM，再丢弃滞后文本，避免"已取消还在流"
       {:key, key} when key in [:esc, :escape] and state.busy and is_nil(state.picker) ->
-        Newbee.DEE.Kernel.interrupt(state.kernel)
+        Newbee.Agent.Loop.interrupt(state.kernel)
 
         if state.submit_kind == :shell and is_pid(state.submit_pid) do
           Process.exit(state.submit_pid, :kill)
@@ -242,7 +242,7 @@ defmodule Newbee.TUI do
           if state.awaiting_permission do
             if key in [:esc, :escape, :ctrl_c] do
               # 已被上面的 guard 覆盖，此分支仅兜底
-              Newbee.DEE.Kernel.interrupt(state.kernel)
+              Newbee.Agent.Loop.interrupt(state.kernel)
               send(state.kernel, {:permission_reply, false})
               state = state |> Map.put(:awaiting_permission, false) |> push_line("\e[31m⏹ 已拒绝并中断\e[0m")
               loop(paint(state), reader)
@@ -432,7 +432,7 @@ defmodule Newbee.TUI do
 
         :escape ->
           if state.busy do
-            Newbee.DEE.Kernel.interrupt(state.kernel)
+            Newbee.Agent.Loop.interrupt(state.kernel)
 
             if state.submit_kind == :shell and is_pid(state.submit_pid) do
               Process.exit(state.submit_pid, :kill)
@@ -453,7 +453,7 @@ defmodule Newbee.TUI do
 
         :esc ->
           if state.busy do
-            Newbee.DEE.Kernel.interrupt(state.kernel)
+            Newbee.Agent.Loop.interrupt(state.kernel)
 
             if state.submit_kind == :shell and is_pid(state.submit_pid) do
               Process.exit(state.submit_pid, :kill)
@@ -710,7 +710,7 @@ defmodule Newbee.TUI do
     # 异步跑 turn：主循环继续处理输入/中断
     caller =
       spawn_link(fn ->
-        case Newbee.DEE.Kernel.submit(state.kernel, text) do
+        case Newbee.Agent.Loop.submit(state.kernel, text) do
           {:done, summary} ->
             send(parent, {:newbee_event, :done, {:done, summary}})
             send(parent, {:newbee_event, :turn_done, {:turn_done, nil}})
@@ -738,7 +738,7 @@ defmodule Newbee.TUI do
 
   defp resume_kernel(client, id) do
     {:ok, kernel} =
-      Newbee.DEE.Kernel.start_link(client: client, session_id: id, auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(client: client, evaluator: Newbee.Environment.Boot.evaluator_or_fallback(session_id: id), session_id: id, auto_antibodies: true, render: fn _ -> :ok end)
 
     meta = Newbee.Session.meta(id)
     send(self(), {:newbee_event, :tui_say, {:tui_say, "已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}"}})
@@ -1004,11 +1004,11 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :progress, {:progress, score, scores}) do
-    push_line(state, "\e[2m进度 #{Float.round(score, 1)}/20 #{Newbee.Evolution.Progress.render_scores(scores)}\e[0m")
+    push_line(state, "\e[2m进度 #{Float.round(score, 1)}/20 #{Newbee.Agent.Progress.render_scores(scores)}\e[0m")
   end
 
   def render_event(%__MODULE__{} = state, :progress_stall, {:progress_stall, scores}) do
-    push_line(state, "\e[33m⚠ 进度停滞: #{Newbee.Evolution.Progress.render_scores(scores)}\e[0m")
+    push_line(state, "\e[33m⚠ 进度停滞: #{Newbee.Agent.Progress.render_scores(scores)}\e[0m")
   end
 
   def render_event(%__MODULE__{} = state, :goal_round, {:goal_round, round}) do
@@ -1245,7 +1245,7 @@ defmodule Newbee.TUI do
 
   # 首帧可能早于 evaluator peer 完成启动；状态栏/窗格不能把一次超时升级成 TUI 崩溃。
   defp safe_bindings_summary do
-    case Process.whereis(Newbee.DEE.Evaluator) do
+    case Newbee.Environment.EvaluatorPool.current() || Process.whereis(Newbee.DEE.Evaluator) do
       nil ->
         nil
 
@@ -1335,7 +1335,7 @@ defmodule Newbee.TUI do
     qpart = if q > 0, do: " q:#{q}", else: ""
     left = "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())}\e[0m"
     # 人性化 tok + 窄屏自适应：右栏过长时优先缩 model 名，仍保证 tok/bind/policy 可见
-    right_core = "tok:#{tok_str} bind:#{bindings}#{qpart} #{Newbee.Evolution.Policy.get()}"
+    right_core = "tok:#{tok_str} bind:#{bindings}#{qpart} #{Newbee.Environment.Autonomy.get()}"
     right = "\e[2m#{page_hint}\e[33m#{elapsed_str}\e[0m\e[2m #{right_core}\e[0m"
     cols = max(terminal_cols(), 40)
     lw = visible_len(left)

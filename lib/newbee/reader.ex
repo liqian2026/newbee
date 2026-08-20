@@ -75,12 +75,14 @@ defmodule Newbee do
         File.regular?(path) ->
           case File.read(path) do
             {:ok, body} when byte_size(body) <= 512 * 1024 ->
-              {:ok, body}
+              {:ok, Newbee.Trust.envelope(body, "file:" <> path) |> Newbee.Trust.render()}
 
             {:ok, body} ->
-              {:ok,
-               binary_part(body, 0, 512 * 1024) <>
-                 "\n… [截断: #{byte_size(body)} bytes > 512KB，用 Fs 分段读取] …\n"}
+              truncated =
+                binary_part(body, 0, 512 * 1024) <>
+                  "\n… [截断: #{byte_size(body)} bytes > 512KB，用 Fs 分段读取] …\n"
+
+              {:ok, Newbee.Trust.envelope(truncated, "file:" <> path) |> Newbee.Trust.render()}
 
             {:error, reason} ->
               {:error, reason}
@@ -222,17 +224,26 @@ defmodule Newbee do
         _ -> 200
       end
 
-    events = Newbee.EventLog.read(n)
-    {:ok, Enum.map_join(events, "\n", &"[#{&1["topic"]}] #{inspect(&1["event"]) |> String.slice(0, 200)}")}
+    # 优先项目 Event Store（唯一权威，§4.6）；无项目流时回退全局事件日志
+    project_events = Newbee.EventStore.replay(Newbee.Environment.Store.path(:events)) |> Enum.take(-n)
+
+    if project_events != [] do
+      {:ok, Enum.map_join(project_events, "\n", &"[#{&1.topic}] ##{&1.id} #{inspect(&1.data) |> String.slice(0, 200)}")}
+    else
+      events = Newbee.EventLog.read(n)
+      {:ok, Enum.map_join(events, "\n", &"[#{&1["topic"]}] #{inspect(&1["event"]) |> String.slice(0, 200)}")}
+    end
   end
 
+  # URL 读取经受控 transport（§12：域名白名单 + Host 执行网络）+ trust envelope
   defp read_url(url) do
-    case Req.get(url, receive_timeout: 30_000, retry: false) do
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        {:ok, String.slice(body, 0, 512 * 1024)}
+    case Newbee.Host.Shell.execute_request_plan(%{url: url, method: "get", headers: [], body: nil}) do
+      {:ok, body} when is_binary(body) ->
+        content = String.slice(body, 0, 512 * 1024)
+        {:ok, Newbee.Trust.envelope(content, "url:" <> url) |> Newbee.Trust.render()}
 
-      {:ok, %{status: status}} ->
-        {:error, {:http_error, status}}
+      {:ok, body} ->
+        {:ok, Newbee.Trust.envelope(inspect(body), "url:" <> url) |> Newbee.Trust.render()}
 
       {:error, reason} ->
         {:error, reason}

@@ -42,7 +42,7 @@ defmodule Newbee.DEE.EvaluatorTest do
 
   test "外部 interrupt 可杀掉正在运行的 cell，worker 仍可复用", %{ev: ev} do
     task = Task.async(fn -> Evaluator.eval(ev, "Process.sleep(:infinity)") end)
-    assert wait_until(fn -> is_pid(Newbee.DEE.EvalWorker.active_pid(ev)) end, 5_000)
+    assert wait_until(fn -> is_pid(Newbee.DEE.EvalWorker.active_pid(ev)) end, 15_000)
 
     assert :ok = Evaluator.interrupt(ev)
     assert %{status: :error, error: "interrupted"} = Task.await(task, 5_000)

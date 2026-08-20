@@ -5,8 +5,8 @@ defmodule Newbee.Commands do
   """
 
   @commands ~w(/model /bindings /tokens /rules /status /dump /resume /reset /approve
-    /reject /log /snapshot /rollback /evolve /policy /genes /bench /goal /diff
-    /undo /session /init /tools /permissions /compact /quit)
+    /reject /log /environment /evolve /autonomy /bundles /goal /diff
+    /undo /session /init /tools /permissions /compact /attach /quit)
 
   def commands, do: @commands
 
@@ -94,20 +94,51 @@ defmodule Newbee.Commands do
   end
 
   defp run("bindings", _, ctx) do
-    case Newbee.DEE.Evaluator.bindings_summary() do
-      [] -> ctx.say.("（空）")
-      bs -> Enum.each(bs, &ctx.say.("  #{&1.name} : #{&1.type} (#{&1.size} bytes)"))
+    # 求值路由：EvaluatorPool（generation 路由）优先，具名 Evaluator 兜底
+    case Newbee.Environment.EvaluatorPool.current() || Process.whereis(Newbee.DEE.Evaluator) do
+      nil ->
+        ctx.say.("（求值器未启动）")
+
+      pid ->
+        summary =
+          if pid == Newbee.Environment.EvaluatorPool.current() do
+            Newbee.Environment.EvaluatorPool.bindings_summary(pid)
+          else
+            Newbee.DEE.Evaluator.bindings_summary(pid)
+          end
+
+        case summary do
+          [] ->
+            ctx.say.("（空）")
+
+          bs ->
+            Enum.each(bs, fn b ->
+              state_note = if b[:type] == :artifact_ref, do: " [已逐出→ArtifactRef]", else: ""
+              ctx.say.("  #{b.name} : #{b.type} (#{b.size} bytes)#{state_note}")
+            end)
+        end
     end
 
     :handled
   end
 
   defp run("tokens", _arg, ctx) do
-    usage = Newbee.DEE.Kernel.usage(ctx.kernel)
+    usage = Newbee.Agent.Loop.usage(ctx.kernel)
     ctx.say.("usage: #{inspect(usage)}")
 
-    if Process.whereis(Newbee.Evolution.Metrics) do
-      ctx.say.("metrics: #{inspect(Newbee.Evolution.Metrics.summary())}")
+    tags =
+      try do
+        Newbee.Environment.Fitness.price_tags()
+      rescue
+        _ -> %{}
+      end
+
+    if tags != %{} do
+      ctx.say.("价签（fitness 投影）:")
+
+      Enum.each(tags, fn {rid, tag} ->
+        ctx.say.("  #{rid}: #{tag}")
+      end)
     end
 
     :handled
@@ -115,7 +146,7 @@ defmodule Newbee.Commands do
 
   defp run("model", "", ctx) do
     Newbee.LLM.Config.describe() |> Enum.each(&ctx.say.("  " <> &1))
-    ctx.say.("evolution policy: #{Newbee.Evolution.Policy.get()}")
+    ctx.say.("autonomy: #{Newbee.Environment.Autonomy.get()} · capability: #{Newbee.Permissions.get()}")
     ctx.say.("用法: /model <provider/model-id> 热切模型（不重启，下一轮即生效）")
     :handled
   end
@@ -128,7 +159,7 @@ defmodule Newbee.Commands do
         client = Newbee.LLM.Config.client_for()
 
         if ctx[:kernel] && Process.alive?(ctx.kernel) do
-          case Newbee.DEE.Kernel.switch_model(ctx.kernel, client) do
+          case Newbee.Agent.Loop.switch_model(ctx.kernel, client) do
             :ok ->
               ctx.say.("✓ 已热切模型为 #{id}（#{client.model}），下一轮对话即生效，会话/绑定保留")
               :handled
@@ -159,12 +190,33 @@ defmodule Newbee.Commands do
 
   defp run("dump", _, ctx) do
     info = Newbee.DEE.Evaluator.info()
-    ctx.say.("环境自画像")
+    ctx.say.("环境自画像（当前 active 组合树）")
     ctx.say.("  求值器: #{info.mode} #{inspect(info.node)} restarts=#{info.restarts} alive=#{info.alive}")
-    ctx.say.("  热载工具: #{length(Newbee.DEE.Tools.HotLoader.tool_files())} 个")
+
+    if Process.whereis(Newbee.Environment.Coordinator) do
+      env = Newbee.Environment.Coordinator.current()
+      ctx.say.("  revision: #{env.revision} · checkpoint #{env.checkpoint} · autonomy #{env.autonomy}")
+      ctx.say.("  active releases:")
+
+      Enum.each(env.active, fn {plugin_id, release_id} ->
+        tag =
+          try do
+            Newbee.Environment.Fitness.price_tag(release_id)
+          rescue
+            _ -> nil
+          end
+
+        ctx.say.("    #{plugin_id} @ #{release_id}#{if tag, do: " · " <> tag, else: ""}")
+      end)
+
+      if env.degraded != [] do
+        ctx.say.("  ⚠ degraded revisions: #{inspect(env.degraded)}")
+      end
+    else
+      ctx.say.("  Coordinator 未启动（无环境状态）")
+    end
+
     ctx.say.("  沉睡规则: #{length(Newbee.DEE.Rules.list())} 条")
-    ctx.say.("  JIT 阶梯: #{inspect(Enum.map(Newbee.Evolution.JIT.list(), &{&1.id, &1.level}))}")
-    ctx.say.("  快照: #{inspect(Newbee.Evolution.Snapshot.list() |> Enum.take(3))}")
     ctx.say.("  会话: #{inspect(Newbee.Session.list() |> Enum.take(5))}")
     :handled
   end
@@ -190,24 +242,43 @@ defmodule Newbee.Commands do
   end
 
   defp run("approve", arg, ctx) do
-    id = if arg == "", do: :all, else: String.to_integer(arg)
+    arg = String.trim(arg)
 
-    try do
-      case Newbee.Staging.approve(id) do
-        {:ok, []} -> ctx.say.("（无暂存改动）")
-        {:ok, written} -> ctx.say.("已落盘: #{Enum.join(written, ", ")}")
-        {:error, :not_staged} -> ctx.say.("没有对应暂存项")
-        {:error, {:outside_project, msg}} -> ctx.say.("有暂存项在工程树外，已拒绝落盘: #{msg}")
-        {:error, :outside_project} -> ctx.say.("有暂存项在工程树外，已拒绝落盘")
-        {:error, other} -> ctx.say.("approve 失败: #{inspect(other)}（暂存保留）")
-      end
-    rescue
-      e -> ctx.say.("approve 异常: #{inspect(e)}（TUI 未退出，暂存保留）")
-    catch
-      :exit, reason -> ctx.say.("approve 超时: #{inspect(reason)}（TUI 未退出，暂存保留）")
+    cond do
+      # /approve <change_id>：manual 档下激活待批 Change（§8.1 授权事件）
+      String.starts_with?(arg, "chg_") ->
+        if Process.whereis(Newbee.Environment.Coordinator) do
+          case Newbee.Environment.Coordinator.approve(arg) do
+            :ok -> ctx.say.("✓ Change #{arg} 已激活（授权事件已入 Event Store）")
+            {:error, reason} -> ctx.say.("激活失败: #{inspect(reason)}")
+          end
+        else
+          ctx.say.("Coordinator 未启动")
+        end
+
+        :handled
+
+      # /approve pending：列出待批 Change
+      arg == "pending" ->
+        if Process.whereis(Newbee.Environment.Coordinator) do
+          pending =
+            Newbee.Environment.Coordinator.changes()
+            |> Enum.filter(&(&1.status in [:canary, :evaluating] and &1.evaluation_result != nil))
+
+          if pending == [] do
+            ctx.say.("（无待批 Change）")
+          else
+            Enum.each(pending, fn c ->
+              ctx.say.("  #{c.change_id} [#{c.status}] #{c.reason} — /approve #{c.change_id} 激活")
+            end)
+          end
+        end
+
+        :handled
+
+      true ->
+        approve_staging(arg, ctx)
     end
-
-    :handled
   end
 
   defp run("reject", arg, ctx) do
@@ -229,18 +300,12 @@ defmodule Newbee.Commands do
     :handled
   end
 
-  defp run("diff", arg, ctx) do
-    range = if arg == "", do: "HEAD", else: String.trim(arg)
-
-    case System.cmd("git", ["diff", "--stat", range, "HEAD"], stderr_to_stdout: true) do
-      {out, 0} ->
-        ctx.say.("会话累计 diff（#{range}..HEAD）:")
-        ctx.say.(String.trim(out) |> String.slice(0, 2_000))
-
-      _ ->
-        ctx.say.("git diff 不可用（非 git 仓库？）")
+  defp run("diff", _arg, ctx) do
+    case System.cmd("git", ["diff", "--stat", "HEAD"], stderr_to_stdout: true) do
+      {out, 0} when out != "" -> ctx.say.(String.trim(out) |> String.slice(0, 2_000))
+      {_, 0} -> ctx.say.("（无改动）")
+      {_, _} -> ctx.say.("git diff 不可用（非 git 仓库？）")
     end
-
     :handled
   end
 
@@ -250,53 +315,92 @@ defmodule Newbee.Commands do
     :handled
   end
 
-  defp run("snapshot", arg, ctx) do
-    if arg == "" do
-      ctx.say.("快照: #{inspect(Newbee.Evolution.Snapshot.list())}")
-      ctx.say.("用法: /snapshot <name> 创建快照")
-    else
-      case Newbee.Evolution.Snapshot.create(arg) do
-        {:ok, name} -> ctx.say.("已创建快照: #{name}")
-        {:error, reason} -> ctx.say.("快照失败: #{inspect(reason)}")
-      end
+  # /environment（§10）：版本图 / 回退。兼容映射旧 /snapshot /rollback。
+  defp run("environment", arg, ctx) do
+    [sub | rest] = String.split(String.trim(arg), " ", parts: 2)
+    sub_arg = List.first(rest) || ""
+
+    unless Process.whereis(Newbee.Environment.Coordinator) do
+      ctx.say.("Coordinator 未启动")
+      throw(:handled)
+    end
+
+    case sub do
+      "revisions" ->
+        revs = Newbee.Environment.Coordinator.revisions()
+        current = Newbee.Environment.Coordinator.current()
+
+        if revs == [] do
+          ctx.say.("（无历史 revision——环境尚未变更）")
+        else
+          ctx.say.("版本图（当前 rev #{current.revision}）:")
+
+          Enum.each(revs, fn r ->
+            marker = if r["rev"] == current.revision, do: "▶", else: " "
+            ctx.say.(" #{marker} rev #{r["rev"]} [#{r["health"]}] #{map_size(r["active"])} 插件 · change #{r["change_id"]} · #{r["created_at"]}")
+          end)
+        end
+
+      "rollback" ->
+        case Integer.parse(String.trim(sub_arg)) do
+          {n, ""} ->
+            case Newbee.Environment.Coordinator.rollback({:revision, n}, "user /environment rollback #{n}") do
+              {:ok, change} ->
+                ctx.say.("已回退到 rev #{n}（change #{change.change_id}；回退只动环境指针，外部副作用不在恢复范围，§12）")
+
+              {:error, reason} ->
+                ctx.say.("回退失败: #{inspect(reason)}")
+            end
+
+          _ ->
+            ctx.say.("用法: /environment rollback <rev>（/environment revisions 查看版本图）")
+        end
+
+      "" ->
+        env = Newbee.Environment.Coordinator.current()
+        ctx.say.("Environment: rev #{env.revision} · active #{map_size(env.active)} 插件 · autonomy #{env.autonomy}")
+        ctx.say.("用法: /environment revisions · /environment rollback <rev>")
+
+      other ->
+        ctx.say.("未知子命令: #{other}（revisions | rollback <rev>）")
     end
 
     :handled
+  catch
+    :handled -> :handled
   end
 
-  defp run("rollback", arg, ctx) do
-    if arg == "" do
-      ctx.say.("快照: #{inspect(Newbee.Evolution.Snapshot.list())}")
-      ctx.say.("用法: /rollback <name>")
-    else
-      {:ok, name} = Newbee.Evolution.Snapshot.restore(arg)
-      ctx.say.("已回滚到: #{name}（求值器已重建，工具按快照热载）")
-    end
-
-    :handled
-  end
+  # 兼容映射：/snapshot → /environment revisions；/rollback <rev> → /environment rollback
+  defp run("snapshot", _arg, ctx), do: run("environment", "revisions", ctx)
+  defp run("rollback", arg, ctx), do: run("environment", "rollback " <> arg, ctx)
 
   defp run("evolve", hint, ctx) do
-    if hint != "", do: Newbee.Evolution.Evolver.hint(hint, %{source: :user})
+    if hint != "" do
+      # /evolve <描述>：向 Adapter 投递 need（§10）
+      {:ok, mid} = Newbee.Agent.Protocol.need(hint, sender: "user", urgency: :normal)
+      ctx.say.("已投递 need（#{mid}）")
+    end
 
-    ctx.say.("evolver 开始合成（线索+热教训+指标）…")
+    ctx.say.("adapter 开始一轮（need 消息 + JIT 热度 → 合成 → Verifier 门 → Autonomy 判定）…")
 
-    case Newbee.Evolution.Evolver.run_once() do
+    case Newbee.Agent.Adapter.run_once() do
       {:skipped, reason} ->
         ctx.say.("跳过: #{reason}")
 
+      {:error, reason} ->
+        ctx.say.("失败: #{inspect(reason)}")
+
       {:suggested, proposals} ->
-        # 档位 :hint：只产出建议，不自动发布
-        ctx.say.("进化建议（档位 :hint，未自动发布；/policy background 可自动合并）:")
+        ctx.say.("进化建议（autonomy=observe，未激活；/autonomy manual|autonomous 后过门才激活）:")
 
         Enum.each(proposals, fn p ->
           ctx.say.("  💡 #{p["type"]} #{p["id"] || p["name"] || inspect(p)}")
         end)
 
-      results ->
+      {:processed, results} ->
         Enum.each(results, fn
-          {:published, what} -> ctx.say.("  ✅ 已发布: #{inspect(what)}")
-          {:rejected, what, why} -> ctx.say.("  ❌ 否决: #{inspect(what)} — #{inspect(why)}")
+          {:ok, change_id} -> ctx.say.("  📦 Change #{change_id} 已进入评测（/environment revisions 跟踪）")
+          {:error, reason} -> ctx.say.("  ❌ #{inspect(reason)}")
         end)
     end
 
@@ -307,12 +411,19 @@ defmodule Newbee.Commands do
     if File.exists?("NEWBEE.md") do
       ctx.say.("NEWBEE.md 已存在（跳过；删除后可重新生成）")
     else
-      map = Newbee.DEE.RepoMap.build(".")
+      map = Newbee.Plugins.RepoMap.build(".")
+
+      common =
+        if File.exists?("mix.exs") do
+          "- 测试: mix test\n- 编译: mix compile\n- 格式化: mix format"
+        else
+          "- 测试/编译: 按项目语言运行（例如 cargo test、pytest、go test）"
+        end
 
       content =
         "# NEWBEE.md\n\n## 项目说明\n（由 newbee /init 生成，可编辑——本文件会被注入会话 prompt，§5.4）\n\n## 工程结构\n" <>
           map <>
-          "\n\n## 常用命令\n- 测试: mix test\n- 编译: mix compile\n- 格式化: mix format\n"
+          "\n\n## 常用命令\n" <> common <> "\n"
 
       File.write!("NEWBEE.md", content)
       ctx.say.("已生成 NEWBEE.md（会注入会话 prompt；同样支持 AGENTS.md / CLAUDE.md）")
@@ -322,34 +433,53 @@ defmodule Newbee.Commands do
   end
 
   defp run("tools", "", ctx) do
-    files = Newbee.DEE.Tools.HotLoader.tool_files()
-    ctx.say.("热载工具（#{length(files)} 个，全局+项目）:")
+    # 插件库（§10）：含各 release 价签/fitness
+    ctx.say.("插件库:")
 
-    Enum.each(files, fn f ->
-      mod = f |> Path.basename(".ex") |> Macro.camelize()
-      ctx.say.("  #{mod} ← #{f}")
+    tags =
+      try do
+        Newbee.Environment.Fitness.price_tags()
+      rescue
+        _ -> %{}
+      end
+
+    active =
+      if Process.whereis(Newbee.Environment.Coordinator) do
+        Newbee.Environment.Coordinator.current().active
+      else
+        %{}
+      end
+
+    Enum.each(Newbee.Plugins.list(), fn t ->
+      release_id = active[t.plugin_id]
+      tag = if release_id, do: tags[release_id], else: nil
+      state = if release_id, do: "active", else: "builtin"
+      ctx.say.("  [#{t.kind}] #{t.plugin_id} (#{state})#{if tag, do: " " <> tag, else: ""}: #{t.summary}")
     end)
 
-    ctx.say.("内置工具见 Newbee.DEE.Tools.list()；/tools <模块名> 看详情")
+    ctx.say.("/tools <模块名> 看详情；按需 Newbee.read(\"tool://模块名\") 取全文")
     :handled
   end
 
   defp run("tools", name, ctx) do
-    mod = String.to_atom("Elixir.Newbee.Tools." <> Macro.camelize(String.trim(name)))
+    case Newbee.Plugins.describe(String.trim(name)) do
+      %{name: n, summary: sum, plugin_id: pid} ->
+        ctx.say.("#{n} [#{pid}]: #{sum}")
 
-    if Code.ensure_loaded?(mod) do
-      docs = Newbee.DEE.Tools.describe(mod)
-      ctx.say.("#{docs.name}: #{docs.summary}")
+        mod = Newbee.Plugins.module_for(name)
 
-      case :code.which(mod) do
-        path when is_binary(path) or is_list(path) ->
-          ctx.say.("  源码: #{if is_list(path), do: List.to_string(path), else: path}")
+        if mod do
+          case :code.which(mod) do
+            path when is_binary(path) or is_list(path) ->
+              ctx.say.("  源码: #{if is_list(path), do: List.to_string(path), else: path}")
 
-        _ ->
-          :ok
-      end
-    else
-      ctx.say.("未找到工具模块: #{name}")
+            _ ->
+              :ok
+          end
+        end
+
+      nil ->
+        ctx.say.("未找到插件: #{name}")
     end
 
     :handled
@@ -378,7 +508,7 @@ defmodule Newbee.Commands do
 
   defp run("compact", _, ctx) do
     if ctx.kernel do
-      case Newbee.DEE.Kernel.compact(ctx.kernel) do
+      case Newbee.Agent.Loop.compact(ctx.kernel) do
         {:ok, n} -> ctx.say.("已压缩 #{n} 条历史（环境状态与绑定不受影响，§5.3/§6.5）")
         {:error, e} -> ctx.say.("压缩失败: #{inspect(e)}")
       end
@@ -395,7 +525,7 @@ defmodule Newbee.Commands do
     if ctx.kernel do
       case String.trim(arg) do
         "" ->
-          case Newbee.DEE.Kernel.goal(ctx.kernel) do
+          case Newbee.Agent.Loop.goal(ctx.kernel) do
             nil ->
               ctx.say.("（无自主目标）用法: /goal <目标描述> 启动 · /goal clear 取消")
 
@@ -404,11 +534,11 @@ defmodule Newbee.Commands do
           end
 
         "clear" ->
-          Newbee.DEE.Kernel.clear_goal(ctx.kernel)
+          Newbee.Agent.Loop.clear_goal(ctx.kernel)
           ctx.say.("自主目标已取消")
 
         text ->
-          case Newbee.DEE.Kernel.set_goal(ctx.kernel, text) do
+          case Newbee.Agent.Loop.set_goal(ctx.kernel, text) do
             :ok ->
               ctx.say.("已启动自主目标（异步运行；/goal 查看状态 · /goal clear 取消）")
 
@@ -423,21 +553,26 @@ defmodule Newbee.Commands do
     :handled
   end
 
-  # ── /undo：回滚到最近快照（快照即"上一个 git/工具版本"的回滚单元）──
+  # ── /undo：回退到上一 revision（§10：环境版本回退只恢复环境自身）──
 
   defp run("undo", _, ctx) do
-    case Newbee.Evolution.Snapshot.list() do
-      [] ->
-        ctx.say.("没有可回滚的快照——先用 /snapshot <name> 创建；也可 /rollback <name> 指定")
+    if Process.whereis(Newbee.Environment.Coordinator) do
+      current = Newbee.Environment.Coordinator.current()
 
-      [latest | _] ->
-        case Newbee.Evolution.Snapshot.restore(latest) do
-          {:ok, name} ->
-            ctx.say.("已回滚到快照 #{name}（求值器已重建，工具/规则/提示按快照恢复）")
+      if current.revision >= 1 do
+        case Newbee.Environment.Coordinator.rollback({:revision, current.revision - 1}, "user /undo") do
+          {:ok, change} ->
+            ctx.say.("已回退到 rev #{current.revision - 1}（change #{change.change_id}）")
+            ctx.say.("注意：回退只恢复环境自身；已发生的外部副作用不在恢复范围（§12 可逆性分级）")
 
           {:error, reason} ->
-            ctx.say.("回滚失败: #{inspect(reason)}")
+            ctx.say.("回退失败: #{inspect(reason)}")
         end
+      else
+        ctx.say.("（已在最早 revision，无可回退）")
+      end
+    else
+      ctx.say.("Coordinator 未启动")
     end
 
     :handled
@@ -488,50 +623,107 @@ defmodule Newbee.Commands do
     end
   end
 
-  defp run("policy", arg, ctx) do
-    if arg == "" do
-      ctx.say.("当前档位: #{Newbee.Evolution.Policy.get()}（可选: #{inspect(Newbee.Evolution.Policy.levels())}）")
-    else
-      level = String.to_atom(arg)
+  # /autonomy（§8.1）：Autonomy 档位 observe/manual/autonomous/emergency_stop。
+  # 自治是挣来的：升 autonomous 前先检查证据，不足则提示（仍允许强制，但如实告知）。
+  defp run("autonomy", arg, ctx) do
+    alias Newbee.Environment.Autonomy
 
-      if level in Newbee.Evolution.Policy.levels() do
-        Newbee.Evolution.Policy.set(level)
-        ctx.say.("进化档位: #{level}")
-      else
-        ctx.say.("非法档位，可选: #{inspect(Newbee.Evolution.Policy.levels())}")
-      end
+    case String.trim(arg) do
+      "" ->
+        ctx.say.("当前档位: #{Autonomy.get()}（可选: #{inspect(Autonomy.levels())}）")
+        ctx.say.("  observe 只建议 · manual 过门后需 /approve · autonomous 自动激活 · emergency_stop 冻结")
+
+      "emergency_stop" ->
+        Newbee.Host.Shell.emergency_stop()
+        ctx.say.("⛔ emergency_stop：环境变更已冻结，仅允许回退")
+
+      "autonomous!" ->
+        Autonomy.set(:autonomous)
+        ctx.say.("已强制升 autonomous（安全网厚度不足，风险自负）")
+
+      level_str ->
+        level = String.to_atom(level_str)
+
+        cond do
+          level not in Autonomy.levels() ->
+            ctx.say.("非法档位，可选: #{inspect(Autonomy.levels())}")
+
+          level == :autonomous ->
+            evidence =
+              if Process.whereis(Newbee.Environment.Coordinator) do
+                Newbee.Environment.Coordinator.autonomy_evidence()
+              else
+                %{verified_antibodies: 0, replay_coverage: 0.0, recent_changes: []}
+              end
+
+            if Autonomy.suggest_upgrade?(evidence) do
+              Autonomy.set(:autonomous)
+              ctx.say.("✓ 安全网足够厚（已验证抗体 #{evidence.verified_antibodies}，回放覆盖 #{evidence.replay_coverage}）——已升 autonomous")
+            else
+              ctx.say.("⚠ 自治是挣来的（§8.1）：当前证据 已验证抗体=#{evidence.verified_antibodies} 回放覆盖=#{evidence.replay_coverage}")
+              ctx.say.("  未达建议阈值。确认仍要升级请再输入: /autonomy autonomous!")
+            end
+
+          true ->
+            Autonomy.set(level)
+            ctx.say.("Autonomy 档位: #{level}")
+        end
     end
 
     :handled
   end
 
-  defp run("genes", _, ctx) do
-    case Newbee.Evolution.Gene.list() do
+  # 兼容映射：/policy → /autonomy
+  defp run("policy", arg, ctx), do: run("autonomy", arg, ctx)
+
+  defp run("bundles", _, ctx) do
+    case Newbee.GlobalStore.bundles() do
       [] ->
-        ctx.say.("（基因库为空；/evolve 产出后可 export 打包）")
+        ctx.say.("（基因库为空；P5：L3 工具+规则+prompt 打成 bundle 带 fitness 跨用户分享）")
 
-      genes ->
-        Enum.each(genes, &ctx.say.("  #{&1.name}@#{&1.version} fitness=#{inspect(&1.fitness)} from=#{&1.provenance}"))
+      bundles ->
+        Enum.each(bundles, &ctx.say.("  #{&1["name"]}@#{&1["version"]} releases=#{length(&1["releases"] || [])} from=#{inspect(&1["provenance"])}"))
     end
 
     :handled
   end
+
+  # 兼容映射
+  defp run("genes", arg, ctx), do: run("bundles", arg, ctx)
 
   defp run("bench", _, ctx) do
-    ctx.say.("跑 bench 任务集（真实 LLM，可能要几分钟）…")
-    client = Newbee.LLM.Config.client_for()
-    report = Newbee.Evolution.Bench.run_tasks(client)
-    ctx.say.("bench: #{report.passed}/#{report.total} 通过, #{report.tokens} tokens")
+    ctx.say.("公开基准请用 mix 任务: mix newbee.bench（抗体回放 + 任务集）")
+    :handled
+  end
 
-    Enum.each(report.details, fn d ->
-      ctx.say.("  #{if d.passed, do: "✅", else: "❌"} #{d.id} (#{d.tokens} tok)")
-    end)
-
+  defp run("attach", _, ctx) do
+    ctx.say.("daemon 常驻中；重连请退出后运行: newbee attach（TUI 只是探视窗，§4.1）")
     :handled
   end
 
   defp run(unknown, _, ctx) do
     ctx.say.("未知命令: /#{unknown}（#{Enum.join(@commands, " ")}）")
+    :handled
+  end
+
+  defp approve_staging(arg, ctx) do
+    id = if arg == "", do: :all, else: String.to_integer(arg)
+
+    try do
+      case Newbee.Staging.approve(id) do
+        {:ok, []} -> ctx.say.("（无暂存改动）")
+        {:ok, written} -> ctx.say.("已落盘: #{Enum.join(written, ", ")}")
+        {:error, :not_staged} -> ctx.say.("没有对应暂存项")
+        {:error, {:outside_project, msg}} -> ctx.say.("有暂存项在工程树外，已拒绝落盘: #{msg}")
+        {:error, :outside_project} -> ctx.say.("有暂存项在工程树外，已拒绝落盘")
+        {:error, other} -> ctx.say.("approve 失败: #{inspect(other)}（暂存保留）")
+      end
+    rescue
+      e -> ctx.say.("approve 异常: #{inspect(e)}（TUI 未退出，暂存保留）")
+    catch
+      :exit, reason -> ctx.say.("approve 超时: #{inspect(reason)}（TUI 未退出，暂存保留）")
+    end
+
     :handled
   end
 

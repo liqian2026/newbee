@@ -29,38 +29,31 @@ defmodule Mix.Tasks.Newbee.Doctor do
     key_hint = if client.api_key, do: "已配置", else: "缺失!"
     IO.puts("API key: #{key_hint}（#{String.slice(client.api_key || "", 0, 8)}…）")
 
-    IO.puts("工具目录: #{Newbee.DEE.Tools.HotLoader.global_dir()} (#{length(Newbee.DEE.Tools.HotLoader.tool_files())} 个工具)")
+    IO.puts("内置插件: #{length(Newbee.Plugins.list())} 个")
+    env = if Process.whereis(Newbee.Environment.Coordinator), do: Newbee.Environment.Coordinator.current(), else: nil
+    IO.puts("Environment: #{if env, do: "rev #{env.revision} · active #{map_size(env.active)} 插件 · autonomy=#{env.autonomy}", else: "未启动"}")
     IO.puts("会话: #{length(Newbee.Session.list())} 个")
     IO.puts("规则: #{length(Newbee.DEE.Rules.list())} 条")
-    IO.puts("快照: #{length(Newbee.Evolution.Snapshot.list())} 个")
-    IO.puts("基因: #{length(Newbee.Evolution.Gene.list())} 个")
+    IO.puts("Bundles（基因库）: #{length(Newbee.GlobalStore.bundles())} 个")
 
     # 价签与指标（§9.11 / §6.1，可观测看板）
-    price_summary =
+    price_tags =
       try do
-        Newbee.Evolution.PriceTags.summary()
+        Newbee.Environment.Fitness.price_tags()
       rescue
         _ -> %{}
       catch
         _, _ -> %{}
       end
 
-    IO.puts("价签: #{map_size(price_summary)} 个工具")
+    IO.puts("价签（fitness 投影）: #{map_size(price_tags)} 个 release")
 
-    Enum.each(price_summary, fn {name, %{calls: c, errors: e, ms: ms}} ->
-      IO.puts("  - #{name}: #{c} 次, #{e} 错, #{ms}ms 均耗时")
+    Enum.each(price_tags, fn {release_id, tag} ->
+      IO.puts("  - #{release_id}: #{tag}")
     end)
 
-    metrics =
-      try do
-        Newbee.Evolution.Metrics.summary()
-      rescue
-        _ -> %{}
-      catch
-        _, _ -> %{}
-      end
-
-    IO.puts("指标: #{inspect(metrics)}")
+    antibodies = Newbee.Environment.Antibodies.all()
+    IO.puts("抗体: #{length(antibodies)} 条（已验证 #{Newbee.Environment.Antibodies.verified_count()}）")
     IO.puts("敏感文件: 已脱敏（model.json/.env/apiKey/secret/token → [REDACTED]，请用 Host.safe_config/0）")
     IO.puts("高危命令: ask 档拦截 rm -rf / rm -r / / git push（lenient 放行，deny 拒绝）")
     IO.puts("测试: #{length(Path.wildcard("test/**/*_test.exs"))} 个测试文件")

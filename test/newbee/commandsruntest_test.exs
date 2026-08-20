@@ -11,13 +11,13 @@ defmodule Newbee.CommandsRunTest do
     refute msg =~ "未知命令"
   end
 
-  test "带参数命令正确分发（/policy off）" do
+  test "带参数命令正确分发（/autonomy observe）" do
     said = self()
     say = fn line -> send(said, {:said, line}) end
-    assert :handled = Commands.handle("/policy off", %{say: say})
+    assert :handled = Commands.handle("/autonomy observe", %{say: say})
     assert_received {:said, msg}
     refute msg =~ "未知命令"
-    Newbee.Evolution.Policy.set(:background)
+    Newbee.Environment.Autonomy.set(:manual)
   end
 
   test "未知命令仍然报错" do

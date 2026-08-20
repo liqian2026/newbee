@@ -15,7 +15,7 @@ defmodule Newbee.Goal do
 
   @doc "单轮驱动：提交一段文本（或继续指令），返回 submit 结果。"
   def continue(kernel, text) do
-    Newbee.DEE.Kernel.submit(kernel, text)
+    Newbee.Agent.Loop.submit(kernel, text)
   end
 
   defp do_run(_kernel, _text, max_rounds, round) when round > max_rounds do
@@ -25,7 +25,7 @@ defmodule Newbee.Goal do
   defp do_run(kernel, text, max_rounds, round) do
     input = if round == 1, do: text, else: "（自主模式第 #{round} 轮：目标未达成，请继续工作。达成后调用 done。）"
 
-    case Newbee.DEE.Kernel.submit(kernel, input) do
+    case Newbee.Agent.Loop.submit(kernel, input) do
       {:done, summary} -> {:done, summary}
       {:ask, q} -> {:ask, q}
       {:text, _} -> do_run(kernel, text, max_rounds, round + 1)

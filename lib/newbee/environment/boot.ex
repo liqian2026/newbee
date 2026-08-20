@@ -1,0 +1,205 @@
+defmodule Newbee.Environment.Boot do
+  @moduledoc """
+  启动恢复（DESIGN §11.5）：
+
+  ```text
+  discover project root → ensure/read environment.json → validate schema/active revision
+  → resolve release 依赖图 → materialize active release set
+  → boot candidate generation → health/self-test → Binding 快照恢复
+  → switch active generation → build worker projection → resume 未完成消息
+  ```
+
+  失败则逐级回退 known-good revision + 标 degraded + 保留证据（§8.4）。
+  不覆盖损坏 manifest（Store 原子写 + 事件流重放兜底）。
+  """
+
+  require Logger
+
+  alias Newbee.Environment.{Coordinator, EvaluatorPool, PluginManager, Store}
+  alias Newbee.Agent.Protocol
+
+  @doc """
+  完整启动序列。opts: evaluator_opts（测试用 mode: :local）、session_id（绑定恢复）。
+  返回 {:ok, %{coordinator, pool, manifest, pending_needs}} | {:error, reason}。
+  """
+  def start(opts \\ []) do
+    with :ok <- ensure_coordinator(),
+         {:ok, manifest_state} <- validate_and_resolve(),
+         {:ok, pool} <- boot_pool(manifest_state, opts),
+         :ok <- restore_bindings(pool, opts),
+         {:ok, pending} <- resume_messages() do
+      {:ok,
+       %{
+         coordinator: Coordinator,
+         pool: pool,
+         revision: manifest_state.revision,
+         active: manifest_state.active,
+         pending_needs: pending
+       }}
+    end
+  end
+
+  @doc """
+  CLI/TUI 入口：Boot 成功返回 pool；失败降级为独立具名求值器
+  （前端永远可用，环境功能降级）。`log` 控制是否输出降级提示。
+  """
+  def evaluator_or_fallback(opts \\ []) do
+    case start(opts) do
+      {:ok, %{pool: pool}} ->
+        pool
+
+      {:error, reason} ->
+        if Keyword.get(opts, :log, true) do
+          IO.puts("\e[33m⚠ 环境启动降级: #{inspect(reason)}（standalone evaluator）\e[0m")
+        end
+
+        case Process.whereis(Newbee.DEE.Evaluator) do
+          nil ->
+            {:ok, ev} = Newbee.DEE.Evaluator.start(name: Newbee.DEE.Evaluator)
+            ev
+
+          pid ->
+            pid
+        end
+    end
+  end
+
+  # ── step 1-2: store + coordinator（事件流重放恢复 manifest）──
+
+  defp ensure_coordinator do
+    case Process.whereis(Coordinator) do
+      nil ->
+        case Coordinator.start_link([]) do
+          {:ok, _} -> :ok
+          {:error, {:already_started, _}} -> :ok
+          {:error, reason} -> {:error, {:coordinator_boot_failed, reason}}
+        end
+
+      _pid ->
+        :ok
+    end
+  end
+
+  # ── step 3-4: schema 校验 + 依赖图解析 + active set 确认 ──
+
+  defp validate_and_resolve do
+    with {:ok, env} <- Store.load_environment(),
+         {:ok, _env} <- Store.migrate(env) do
+      current = Coordinator.current()
+
+      case resolve_active(current.active) do
+        :ok -> {:ok, current}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  # 依赖图解析：active set 内每个 release 的依赖必须可解析（§8.4 同规则）
+  defp resolve_active(active) do
+    releases =
+      Enum.reduce_while(active, {:ok, []}, fn {_pid, rid}, {:ok, acc} ->
+        case PluginManager.fetch_or_builtin(rid) do
+          {:ok, r} -> {:cont, {:ok, [r | acc]}}
+          {:error, _} -> {:halt, {:error, {:unresolvable_release, rid}}}
+        end
+      end)
+
+    case releases do
+      {:ok, rs} ->
+        case PluginManager.topo_sort(rs) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      err ->
+        err
+    end
+  end
+
+  # ── step 5-7: boot generation（失败 → known-good 逐级回退 + degraded）──
+
+  defp boot_pool(current, opts) do
+    case EvaluatorPool.current() do
+      nil ->
+        evaluator_opts = Keyword.get(opts, :evaluator_opts, [])
+
+        case EvaluatorPool.start(
+               revision: current.revision,
+               active_map: current.active,
+               evaluator_opts: evaluator_opts
+             ) do
+          {:ok, pool} ->
+            EvaluatorPool.register_default(pool)
+
+            # pool 起来了但 generation boot 可能失败（init 不崩溃，active=nil）
+            case EvaluatorPool.active(pool) do
+              nil -> recover_pool(pool, current)
+              _gen -> {:ok, pool}
+            end
+
+          {:error, reason} ->
+            {:error, {:pool_boot_failed, reason}}
+        end
+
+      pool ->
+        {:ok, pool}
+    end
+  end
+
+  # generation 启动失败：回退最近 known-good revision 重建（§15.9）
+  defp recover_pool(pool, failed_current) do
+    Logger.error("generation boot failed at rev #{failed_current.revision}，回退 known-good")
+
+    case Coordinator.recover_known_good(failed_current.revision, "boot health check failed") do
+      {:ok, good_rev, _change} ->
+        recovered = Coordinator.current()
+
+        case EvaluatorPool.boot_candidate(pool, recovered.revision, recovered.active) do
+          {:ok, _} ->
+            case EvaluatorPool.switch(pool) do
+              {:ok, _} -> {:ok, pool}
+              {:error, reason} -> {:error, {:recovery_switch_failed, reason}}
+            end
+
+          {:error, reason} ->
+            {:error, {:recovery_boot_failed, reason, recovered_to: good_rev}}
+        end
+
+      {:error, reason} ->
+        {:error, {:no_known_good, reason}}
+    end
+  end
+
+  # ── step 8: Binding 快照恢复（会话恢复时）──
+
+  defp restore_bindings(pool, opts) do
+    case Keyword.get(opts, :session_id) do
+      nil ->
+        :ok
+
+      session_id ->
+        session = Newbee.Session.open(session_id)
+
+        case Newbee.Session.load_bindings(session) do
+          [] -> :ok
+          bindings -> EvaluatorPool.restore_bindings(pool, bindings) |> then(fn _ -> :ok end)
+        end
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # ── step 10: resume 未完成消息（§11.5：adapter 的 need 队列不丢）──
+
+  defp resume_messages do
+    pending = Protocol.pending_needs()
+
+    if pending != [] do
+      Logger.info("恢复 #{length(pending)} 条未消费 need 消息")
+    end
+
+    {:ok, pending}
+  rescue
+    _ -> {:ok, []}
+  end
+end

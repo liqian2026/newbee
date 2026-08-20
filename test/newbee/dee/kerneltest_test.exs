@@ -1,6 +1,7 @@
-defmodule Newbee.DEE.KernelTest do
+defmodule Newbee.Agent.LoopTest do
   use ExUnit.Case, async: true
-  alias Newbee.DEE.{Kernel, Evaluator}
+  alias Newbee.Agent.Loop
+  alias Newbee.DEE.Evaluator
 
   defp tool_msg(code, id \\ "call_1") do
     %{
@@ -47,18 +48,18 @@ defmodule Newbee.DEE.KernelTest do
     ]
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
         client_fun: scripted(script)
       )
 
-    assert {:done, "算完了"} = Kernel.submit(kernel, "算个 42")
+    assert {:done, "算完了"} = Loop.submit(kernel, "算个 42")
     # 绑定持久
     assert Enum.any?(Evaluator.bindings_summary(ev), &(&1.name == :x))
     # token 记账
-    assert Kernel.usage(kernel)["total_tokens"] == 15
+    assert Loop.usage(kernel)["total_tokens"] == 15
   end
 
   test "模型只输出文本时 turn 结束" do
@@ -71,8 +72,8 @@ defmodule Newbee.DEE.KernelTest do
       end
     ]
 
-    {:ok, kernel} = Kernel.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
-    assert {:text, "直接回答"} = Kernel.submit(kernel, "hi")
+    {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
+    assert {:text, "直接回答"} = Loop.submit(kernel, "hi")
   end
 
   test "done 工具调用也回填 tool 响应（历史不留悬空 tool_calls）" do
@@ -80,9 +81,9 @@ defmodule Newbee.DEE.KernelTest do
     script = [fn _m, _t -> {:ok, done_msg("完"), %{}} end]
 
     {:ok, kernel} =
-      Kernel.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
+      Loop.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
 
-    assert {:done, "完"} = Kernel.submit(kernel, "x")
+    assert {:done, "完"} = Loop.submit(kernel, "x")
 
     last = :sys.get_state(kernel).messages |> List.last()
     assert last["role"] == "tool"
@@ -109,14 +110,14 @@ defmodule Newbee.DEE.KernelTest do
     ]
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session_id: sid,
         client_fun: scripted(script)
       )
 
-    assert {:text, "ok"} = Kernel.submit(kernel, "继续")
+    assert {:text, "ok"} = Loop.submit(kernel, "继续")
     File.rm(s.transcript)
   end
 
@@ -125,7 +126,7 @@ defmodule Newbee.DEE.KernelTest do
     sid = "test_prefix_resume_#{System.unique_integer([:positive, :monotonic])}_#{System.system_time(:microsecond)}"
 
     {:ok, first} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session_id: sid,
@@ -135,12 +136,12 @@ defmodule Newbee.DEE.KernelTest do
         end
       )
 
-    assert {:text, "one"} = Kernel.submit(first, "first")
+    assert {:text, "one"} = Loop.submit(first, "first")
     first_prompt = :sys.get_state(first).messages |> List.first() |> Map.fetch!("content")
     GenServer.stop(first)
 
     {:ok, resumed} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session_id: sid,
@@ -150,7 +151,7 @@ defmodule Newbee.DEE.KernelTest do
         end
       )
 
-    assert {:text, "two"} = Kernel.submit(resumed, "second")
+    assert {:text, "two"} = Loop.submit(resumed, "second")
   end
 
   test "Esc 中断：client 返回 {:interrupted, content} 时 turn 立即终止" do
@@ -163,8 +164,8 @@ defmodule Newbee.DEE.KernelTest do
       end
     ]
 
-    {:ok, kernel} = Kernel.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
-    assert {:interrupted, "部分生成"} = Kernel.submit(kernel, "hi")
+    {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
+    assert {:interrupted, "部分生成"} = Loop.submit(kernel, "hi")
 
     # 部分生成的 assistant 消息不入历史（避免悬空 tool_calls）
     msgs = :sys.get_state(kernel).messages
@@ -177,8 +178,8 @@ defmodule Newbee.DEE.KernelTest do
 
     {:ok, ev} = Evaluator.start(mode: :local)
     script = [fn _messages, _on_text -> {:ok, %{"role" => "assistant", "content" => "ok", "tool_calls" => []}, %{}} end]
-    {:ok, kernel} = Kernel.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
-    assert {:text, "ok"} = Kernel.submit(kernel, "hi")
+    {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
+    assert {:text, "ok"} = Loop.submit(kernel, "hi")
     refute Newbee.LLM.Client.interrupted?()
   end
 
@@ -191,11 +192,11 @@ defmodule Newbee.DEE.KernelTest do
       end
     ]
 
-    {:ok, kernel} = Kernel.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
+    {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
 
     # 提交前预置中断：第一个工具调用前就会 halt
     Newbee.LLM.Client.interrupt()
-    assert {:interrupted, nil} = Kernel.submit(kernel, "hi")
+    assert {:interrupted, nil} = Loop.submit(kernel, "hi")
     refute Newbee.LLM.Client.interrupted?()
   end
 

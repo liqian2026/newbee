@@ -71,6 +71,12 @@ defmodule Newbee.DEE.Evaluator do
   end
 
   def bindings_summary(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :bindings_summary, timeout)
+
+  @doc "Binding Continuity step 0（§4.4）：进入静默——拒收新 step。"
+  def quiesce(server \\ __MODULE__), do: GenServer.call(server, :quiesce, 30_000)
+
+  @doc "取消静默（切换取消时恢复旧 generation 接流量）。"
+  def unquiesce(server \\ __MODULE__), do: GenServer.call(server, :unquiesce, 30_000)
   def reset(server \\ __MODULE__), do: GenServer.call(server, :reset)
   def dump_bindings(server \\ __MODULE__), do: GenServer.call(server, :dump_bindings)
   def restore_bindings(server \\ __MODULE__, binding), do: GenServer.call(server, {:restore_bindings, binding})
@@ -228,6 +234,20 @@ defmodule Newbee.DEE.Evaluator do
     end
   end
 
+  def handle_call(:quiesce, _from, state) do
+    case remote_call(primary_target(state), :quiesce) do
+      {:ok, res} -> {:reply, res, state}
+      _ -> {:reply, :ok, state}
+    end
+  end
+
+  def handle_call(:unquiesce, _from, state) do
+    case remote_call(primary_target(state), :unquiesce) do
+      {:ok, res} -> {:reply, res, state}
+      _ -> {:reply, :ok, state}
+    end
+  end
+
   def handle_call(:info, _from, state) do
     {:reply,
      %{
@@ -343,12 +363,14 @@ defmodule Newbee.DEE.Evaluator do
             {:ok, _} ->
               filter_env(node)
               # 宿主契约（§3.4）：把主节点名注入节点 env，供 Newbee.Host 代理
+              :rpc.call(node, :persistent_term, :put, [{Newbee.Host, :main_node}, Node.self()], @rpc_boot_timeout)
+              :rpc.call(node, :persistent_term, :put, [{Newbee.Host, :main_node}, Node.self()], @rpc_boot_timeout)
               :rpc.call(node, :os, :putenv, [~c"NEWBEE_MAIN_NODE", Atom.to_charlist(Node.self())], @rpc_boot_timeout)
 
               case :rpc.call(node, Newbee.DEE.EvalWorker, :start, [[]], @rpc_boot_timeout) do
                 {:ok, worker} ->
                   Newbee.DebugLog.log(:boot, "worker up #{inspect(worker)}")
-                  Newbee.DEE.Tools.HotLoader.load_into_node(node)
+                  Newbee.Environment.Generation.load_active_into(node)
                   # 注意：保留 state.restarts —— maybe_reboot 在 boot 前自增，
                   # 若这里清零会把重启计数抹掉（restarts >= 1 断言）。
                   {:ok, %{state | peer: peer, node: node, worker: worker, boot_error: nil}}
@@ -577,6 +599,9 @@ defmodule Newbee.DEE.Evaluator do
   # ── env ──
 
   defp ensure_distribution! do
+    if :persistent_term.get({Newbee.Host, :main_node}, nil) == nil and Node.alive?() do
+      :persistent_term.put({Newbee.Host, :main_node}, Node.self())
+    end
     unless Node.alive?() do
       name = String.to_atom("newbee_#{:crypto.strong_rand_bytes(8) |> Base.encode32(case: :lower, padding: false)}")
 

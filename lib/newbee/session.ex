@@ -8,6 +8,7 @@ defmodule Newbee.Session do
 
   @root Path.join(System.user_home!(), ".newbee/sessions")
   @artifacts Path.join(System.user_home!(), ".newbee/session-artifacts")
+  @index Path.join(@root, ".index.json")
 
   @doc "当前活动会话 id（kernel 启动时登记；无会话返回 nil）。"
   def current_id, do: :persistent_term.get({__MODULE__, :current}, nil)
@@ -27,8 +28,9 @@ defmodule Newbee.Session do
   end
 
   @doc "追加一条消息到 transcript。"
-  def append(%__MODULE__{transcript: t}, %{"role" => _} = msg) do
+  def append(%__MODULE__{transcript: t, id: id}, %{"role" => _} = msg) do
     File.write!(t, [Jason.encode_to_iodata!(msg), "\n"], [:append])
+    touch_index(id)
   end
 
   @doc "重写整个 transcript（/compact 用：摘要 + 最近消息）。"
@@ -132,18 +134,24 @@ defmodule Newbee.Session do
 
   defp encode_etf_bindings(binding) do
     Enum.flat_map(binding, fn {name, v} ->
-      try do
-        bin = :erlang.term_to_binary(v, compressed: 1)
-        # 自检：safe 模式能否还原，避免落一个永远读不了的 ETF
-        _ = :erlang.binary_to_term(bin, [:safe])
-        [{to_string(name), {:etf, Base.encode64(bin)}}]
-      rescue
-        _ -> []
-      catch
-        _, _ -> []
+      if migratable?(v) do
+        try do
+          bin = :erlang.term_to_binary(v, compressed: 1)
+          _ = :erlang.binary_to_term(bin, [:safe])
+          [{to_string(name), {:etf, Base.encode64(bin)}}]
+        rescue
+          _ -> []
+        catch
+          _, _ -> []
+        end
+      else
+        []
       end
     end)
   end
+
+  defp migratable?(v) when is_pid(v) or is_port(v) or is_reference(v) or is_function(v), do: false
+  defp migratable?(_), do: true
 
   defp load_etf(dir) do
     path = Path.join(dir, "bindings.etf")
@@ -187,7 +195,7 @@ defmodule Newbee.Session do
   defp decode_etf_entry(name, b64) do
     bin = Base.decode64!(b64)
     v = :erlang.binary_to_term(bin, [:safe])
-    [{String.to_atom(name), v}]
+    if migratable?(v), do: [{String.to_atom(name), v}], else: []
   rescue
     _ -> []
   catch
@@ -238,15 +246,39 @@ defmodule Newbee.Session do
     end
   end
 
+  @doc "会话总数（廉价：单次 File.ls；/status 用）。"
+  def count do
+    case File.ls(@root) do
+      {:ok, files} -> Enum.count(files, &String.ends_with?(&1, ".jsonl"))
+      _ -> 0
+    end
+  end
+
   @doc "列出会话元信息（新→旧，默认最多 20 个）：id / when_str / mtime / messages / title。"
   def list_with_meta(n \\ 20) do
-    @root
-    |> Path.join("*.jsonl")
-    |> Path.wildcard()
-    |> Enum.flat_map(fn fp ->
+    # 读索引（O(1)），只对最近 n 个读消息——避免 stat 全部会话文件（§9.1 极简）
+    recent =
+      case File.read(@index) do
+        {:ok, body} ->
+          case Jason.decode(body) do
+            {:ok, entries} when is_list(entries) ->
+              entries |> Enum.sort_by(& &1["mtime"], :desc) |> Enum.take(n)
+
+            _ ->
+              build_index()
+          end
+
+        _ ->
+          build_index()
+      end
+
+    recent
+    |> Enum.flat_map(fn entry ->
+      id = entry["id"]
+      fp = Path.join(@root, "#{id}.jsonl")
+
       case File.stat(fp) do
         {:ok, stat} ->
-          id = Path.basename(fp, ".jsonl")
           msgs = messages(%__MODULE__{id: id, dir: Path.join(@artifacts, id), transcript: fp})
 
           [
@@ -259,16 +291,60 @@ defmodule Newbee.Session do
             }
           ]
 
-        {:error, :enoent} ->
-          []
-
-        {:error, _} ->
+        _ ->
           []
       end
     end)
-    |> Enum.sort_by(& &1.mtime, :desc)
-    |> Enum.take(n)
   end
+
+  # 首次无索引时构建（一次性成本；后续 append 增量维护）
+  defp build_index do
+    entries =
+      @root
+      |> Path.join("*.jsonl")
+      |> Path.wildcard()
+      |> Enum.flat_map(fn fp ->
+        case File.stat(fp) do
+          {:ok, stat} -> [%{"id" => Path.basename(fp, ".jsonl"), "mtime" => posix_mtime(stat.mtime)}]
+          _ -> []
+        end
+      end)
+
+    File.mkdir_p!(@root)
+    File.write!(@index, Jason.encode_to_iodata!(entries))
+
+    entries |> Enum.sort_by(& &1["mtime"], :desc)
+  end
+
+  defp touch_index(id) do
+    entries =
+      case File.read(@index) do
+        {:ok, body} ->
+          case Jason.decode(body) do
+            {:ok, list} when is_list(list) -> list
+            _ -> []
+          end
+
+        _ ->
+          []
+      end
+
+    now = System.system_time(:second)
+    rest = Enum.reject(entries, &(&1["id"] == id))
+    File.write!(@index, Jason.encode_to_iodata!([%{"id" => id, "mtime" => now} | rest]))
+  rescue
+    _ -> :ok
+  end
+
+  defp posix_mtime(%DateTime{} = dt), do: DateTime.to_unix(dt)
+
+  defp posix_mtime({{_, _, _}, {_, _, _}} = t) do
+    :calendar.datetime_to_gregorian_seconds(t) -
+      :calendar.datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}})
+  end
+
+  defp posix_mtime(n) when is_integer(n), do: n
+  defp posix_mtime(_), do: 0
 
   @doc "单个会话的元信息（时间 / 消息数 / 标题）。"
   def meta(id) do

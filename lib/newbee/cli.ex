@@ -13,7 +13,7 @@ defmodule Newbee.CLI do
     end
 
     IO.puts("\e[1mnewbee\e[0m — 会自我进化的 Elixir 编程 Agent")
-    IO.puts("\e[2mmodel: #{client.model} · policy: #{Newbee.Evolution.Policy.get()} · cwd: #{File.cwd!()}\e[0m")
+    IO.puts("\e[2mmodel: #{client.model} · policy: #{Newbee.Environment.Autonomy.get()} · cwd: #{File.cwd!()}\e[0m")
     IO.puts("命令: #{Enum.join(Newbee.Commands.commands(), " ")}")
 
     # 预热：假 IP 代理 TLS 握手慢，先建立连接入池复用
@@ -22,13 +22,17 @@ defmodule Newbee.CLI do
     Newbee.Bus.subscribe()
     spawn_link(fn -> printer(<<>>) end)
 
+    evaluator = Newbee.Environment.Boot.evaluator_or_fallback()
+
     {:ok, kernel} =
-      Newbee.DEE.Kernel.start_link(client: client, auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(client: client, evaluator: evaluator, auto_antibodies: true, render: fn _ -> :ok end)
 
     IO.puts("\e[2msession: #{session_id(kernel)}\e[0m")
 
     loop(kernel, client)
   end
+
+
 
   # ── 事件打印（独立进程，实时流式） ──
 
@@ -159,7 +163,7 @@ defmodule Newbee.CLI do
 
       input ->
         # 权限确认流（§8 ask 档）：kernel 在等待确认时，输入即 y/n 回复
-        if Newbee.DEE.Kernel.awaiting_permission?() do
+        if Newbee.Agent.Loop.awaiting_permission?() do
           ok = String.trim(input) in ["y", "Y", "yes", "YES"]
           send(kernel, {:permission_reply, ok})
           IO.puts(if ok, do: "✓ 已允许执行", else: "✗ 已拒绝执行")
@@ -239,7 +243,7 @@ defmodule Newbee.CLI do
 
   defp resume_kernel(client, id) do
     {:ok, kernel} =
-      Newbee.DEE.Kernel.start_link(client: client, session_id: id, auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(client: client, evaluator: Newbee.Environment.Boot.evaluator_or_fallback(session_id: id), session_id: id, auto_antibodies: true, render: fn _ -> :ok end)
 
     meta = Newbee.Session.meta(id)
     IO.puts("\e[2m已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}\e[0m")
@@ -256,7 +260,7 @@ defmodule Newbee.CLI do
   end
 
   defp run_submit(kernel, text) do
-    case Newbee.DEE.Kernel.submit(kernel, text) do
+    case Newbee.Agent.Loop.submit(kernel, text) do
       {:done, summary} -> IO.puts("\n\e[1m● \e[0m" <> Newbee.Markdown.render(summary) <> "\n")
       {:ask, q} -> IO.puts("\n\e[33m? \e[0m" <> Newbee.Markdown.render(q) <> "\n")
       {:text, _} -> IO.puts("")

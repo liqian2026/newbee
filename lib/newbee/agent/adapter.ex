@@ -1,0 +1,270 @@
+defmodule Newbee.Agent.Adapter do
+  @moduledoc """
+  Adapter Agent（DESIGN §7.1）：后台进化 Agent（0..1 个）。
+
+  - **读**：事件流 + 指标 + need 消息（worker 的便宜线索）；
+  - **做所有贵的事**：诊断 → 合成候选 release → 自测 → Verifier 门；
+  - **按 Autonomy 档位激活/canary**（走 Coordinator，绝不直接碰 active manifest）；
+  - 收负反馈 → 修订或回退；
+  - **隔离边界**：不接管用户任务、不碰 worker 的 transcript/bindings；
+    上下文、evaluator、token 预算各自独立；
+  - JIT 晋升（L1→L2→L3）与 deopt 走同一 Change 生命周期（§8.5）。
+
+  分工原则：**worker 供信号，adapter 做合成，评价层做裁判。**
+  adapter 可提评价计划，不能伪造评价结果（§8.2）。
+  """
+
+  require Logger
+
+  alias Newbee.Agent.Protocol
+  alias Newbee.Environment.{Autonomy, Coordinator, Jit}
+
+  @doc """
+  一轮进化循环：收集信号 → 合成提案 → 逐提案走 Change 生命周期。
+  client_fun 可注入（测试用假客户端）。返回每个提案的处理结果。
+  """
+  def run_once(opts \\ []) do
+    coordinator = Keyword.get(opts, :coordinator, Coordinator)
+
+    if Process.whereis(coordinator) == nil do
+      {:error, :coordinator_down}
+    else
+      # adapter 独立预算（§7.1）：信号/提案数量封顶，不烧 worker 的 token
+      max_signals = Keyword.get(opts, :max_signals, 10)
+      max_proposals = Keyword.get(opts, :max_proposals, 3)
+
+      signals = collect_signals(opts) |> Enum.take(max_signals)
+
+      if signals == [] do
+        {:skipped, :no_signals}
+      else
+        proposals = synthesize(signals, opts) |> Enum.take(max_proposals)
+
+        if Autonomy.get() == :observe do
+          {:suggested, proposals}
+        else
+          results = Enum.map(proposals, &process_proposal(&1, coordinator, opts))
+          {:processed, results}
+        end
+      end
+    end
+  rescue
+    error ->
+      Logger.error("adapter run failed: #{Exception.format(:error, error, __STACKTRACE__)}")
+      {:error, {:exception, error}}
+  end
+
+  # ── 信号收集：事件流 + JIT 热度 + need 消息 ──
+
+  @doc "收集进化信号（need 消息 + JIT 热项 + 停滞线索）。"
+  def collect_signals(opts \\ []) do
+    needs =
+      Protocol.messages(kind: :need)
+      |> Enum.map(fn m ->
+        %{type: :need, capability: m["payload"]["capability"], evidence: m["payload"]["evidence"], urgency: m["payload"]["urgency"]}
+      end)
+
+    jit_hot =
+      (case Keyword.get(opts, :events) do
+         nil ->
+           # 默认从近期事件流拉取（不走 opts 传入），避免热度恒空
+           events = try do
+             Newbee.EventStore.replay(Newbee.Environment.Store.path(:events), 0)
+           rescue _ -> []
+           catch _, _ -> []
+           end
+           Jit.hot_needs(events, Keyword.get(opts, :jit_opts, []))
+         events -> Jit.hot_needs(events, Keyword.get(opts, :jit_opts, []))
+       end)
+      |> Enum.map(fn n -> %{type: :jit_hot, capability: n.capability, evidence: n.evidence, urgency: n.urgency} end)
+
+    hints = Keyword.get(opts, :hints, []) |> Enum.map(&%{type: :hint, capability: &1, urgency: :low})
+
+    needs ++ jit_hot ++ hints
+  end
+
+  # ── 合成（贵的事：诊断 + 候选生成，独立上下文与预算）──
+
+  @doc "让 adapter 角色模型把信号合成为提案（JSON 数组）。"
+  def synthesize(signals, opts) do
+    client_fun =
+      Keyword.get(opts, :client_fun, fn messages ->
+        client = Newbee.LLM.Config.client_for("adapter")
+
+        case Newbee.LLM.Client.stream_chat(client, messages, fn _ -> :ok end) do
+          {:ok, msg, _usage} -> {:ok, msg["content"] || ""}
+          {:error, e} -> {:error, e}
+        end
+      end)
+
+    prompt = """
+    你是 newbee 的 adapter（环境进化工程师）。根据 worker 信号产出环境进化提案。
+    只输出 JSON 数组，每项：
+      {"type":"rule","id":"...","pattern":"正则","injection":"命中时注入给模型的提醒"}
+      {"type":"tool","id":"...","name":"模块短名","source":"完整 Elixir 模块源码（实现 PluginContract 静态子集）"}
+      {"type":"prompt","id":"...","note":"L1 教训（what/when/why ≤2KB）"}
+
+    纪律（§3.4 补丁纪律）：小、有据（引用信号证据）、可评价。不确定就不要产出。
+    信号：#{inspect(signals, limit: 8)}
+    """
+
+    case client_fun.([%{"role" => "user", "content" => prompt}]) do
+      {:ok, content} -> parse_proposals(content)
+      {:error, e} ->
+        Logger.warning("adapter synthesize failed: #{inspect(e)}")
+        []
+    end
+  end
+
+  defp parse_proposals(content) do
+    content
+    |> String.split(~r/```[a-z]*/, trim: true)
+    |> Enum.find_value(fn chunk ->
+      case Jason.decode(String.trim(chunk)) do
+        {:ok, list} when is_list(list) -> list
+        _ -> nil
+      end
+    end)
+    |> case do
+      nil -> []
+      list -> list
+    end
+  rescue
+    _ -> []
+  end
+
+  # ── 提案 → Change 生命周期（无旁路！）──
+
+  @doc """
+  单个提案走完整生命周期：
+  propose_change → candidate_ready → （异步 Verifier）→ Autonomy 判定激活。
+  返回 {:ok, change_id} | {:error, reason}。
+  """
+  def process_proposal(proposal, coordinator \\ Coordinator, opts \\ []) do
+    with {:ok, attrs} <- proposal_to_release(proposal),
+         {:ok, change} <-
+           Coordinator.propose_change(coordinator, %{
+             reason: "adapter: #{proposal["id"]}",
+             evidence: [%{proposal: proposal["id"], type: proposal["type"]}],
+             author_agent: :adapter
+           }),
+         {:ok, release} <- Coordinator.candidate_ready(coordinator, change.change_id, attrs, opts) do
+      Protocol.candidate_ready(change.change_id, release.plugin_id, release.release_id, %{
+        "ring" => Autonomy.ring_of(release.kind)
+      })
+
+      {:ok, change.change_id}
+    else
+      {:error, reason} -> {:error, reason}
+      other -> {:error, other}
+    end
+  end
+
+  @doc "提案转 release attrs（校验；不合法提案在这里被挡）。"
+  def proposal_to_release(%{"type" => "rule", "id" => id, "pattern" => pattern, "injection" => injection}) do
+    case Regex.compile(pattern) do
+      {:ok, _} ->
+        source = rule_source(id, pattern, injection)
+
+        {:ok,
+         %{
+           plugin_id: "rule." <> slug(id),
+           kind: :rule,
+           source_files: %{"#{slug(id)}.ex" => source},
+           usage: injection
+         }}
+
+      {:error, _} ->
+        {:error, :bad_regex}
+    end
+  end
+
+  def proposal_to_release(%{"type" => "tool", "id" => id, "name" => name, "source" => source}) do
+    case Newbee.Environment.PluginContract.validate_source(source) do
+      {:ok, _} ->
+        {:ok,
+         %{
+           plugin_id: "tool." <> slug(id || name),
+           kind: :tool,
+           source_files: %{"#{slug(name)}.ex" => source}
+         }}
+
+      {:error, reasons} ->
+        {:error, {:contract_violation, reasons}}
+    end
+  end
+
+  def proposal_to_release(%{"type" => "prompt", "id" => id, "note" => note}) do
+    {:ok,
+     %{
+       plugin_id: "prompt." <> slug(id),
+       kind: :prompt,
+       source_files: %{},
+       usage: note
+     }}
+  end
+
+  def proposal_to_release(other), do: {:error, {:malformed_proposal, other}}
+
+  @doc """
+  deopt 检查（§8.5）：L3 工具判退化 → 发起降级 Change（回上级形态 release，
+  知识不丢）。返回 [{:deopted, release_id} | {:keep, release_id}]。
+  """
+  def check_deopts(release_ids, coordinator \\ Newbee.Environment.Coordinator) when is_list(release_ids) do
+    Enum.map(release_ids, fn rid ->
+      case Jit.deopt_decision(rid) do
+        {:deopt, target_form, reason} ->
+          Logger.info("deopt #{rid} → #{target_form}: #{reason}")
+          # 发起降级 Change（§8.5 知识不丢：L3 降回 L2 形态）
+          coordinator
+          |> Newbee.Environment.Coordinator.propose_change(%{
+            reason: "deopt #{rid} → #{target_form}: #{reason}",
+            evidence: [%{deopt: rid, target_form: target_form, reason: reason}],
+            author_agent: :adapter
+          })
+          |> case do
+            {:ok, change} -> {:deopted, rid, target_form, reason, change_id: change.change_id}
+            err -> {:error, rid, err}
+          end
+
+        :keep ->
+          {:keep, rid}
+      end
+    end)
+  end
+
+  # ── helpers ──
+
+  # rule release 的源码：一个实现 contract 的规则模块（pattern/injection 即数据）
+  defp rule_source(id, pattern, injection) do
+    mod = Module.concat(["Newbee", "Plugins", "Rules", Macro.camelize(slug(id))])
+
+    """
+    defmodule #{inspect(mod)} do
+      @moduledoc "沉睡规则 #{id}（JIT L2：平时零成本，触发才注入）"
+      @behaviour Newbee.Environment.PluginContract
+
+      @impl true
+      def id, do: "rule.#{slug(id)}"
+      @impl true
+      def version, do: "1.0.0"
+      @impl true
+      def describe, do: %{kind: :rule, pattern: #{inspect(pattern)}, injection: #{inspect(injection)}, scope: :all}
+      @impl true
+      def dependencies, do: []
+
+      def pattern, do: ~r"#{pattern}"
+      def injection, do: #{inspect(injection)}
+    end
+    """
+  end
+
+  defp slug(name) do
+    name
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, "_")
+    |> String.trim("_")
+    |> String.slice(0, 40)
+  end
+end

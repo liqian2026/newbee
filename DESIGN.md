@@ -1,558 +1,736 @@
-# newbee — 会自我进化的 Elixir 编程 Agent
+# newbee 设计：可自我进化的项目共生 Elixir 环境
 
-**状态**: M4 已实现（280 tests / DEE 双节点 / J-Space / PPT/Progress 落地），M5 基因库进行中
-**语言**: Elixir
-
----
-
-## 0. 已确认的设计决策
-
-| 议题 | 决策 |
-|---|---|
-| **长期运行粒度** | **跨工程**：DEE 环境与记忆跨项目持久化；全局状态(工具库/记忆/缓存)与项目级状态分层存储，任意新工程可复用已有积累 |
-| **沙箱策略** | **宽松(Lenient)**：默认直接放行文件读写与常用命令，仅对少数高风险操作(删目录、rm -rf、推送远端、修改环境内核文件)做审计记录；不做强制审批，靠审计日志与 git 快照回滚兜底 |
-| **打底模型** | **OpenRouter · `deepseek/deepseek-v4-flash-0731`**（已在 OpenRouter API 验证存在：1.31M 上下文、支持 tools/function calling、约 $0.14/$0.28 每百万 token，极便宜）；LLM 层做成多后端适配器，默认走 OpenRouter，后续可切换 local 等其他后端 |
-| **TUI 框架** | **M1 用 `ratatouille`(ELM 风格) 快速搭建**，渲染内核封装在 `Newbee.TUI.Renderer` 接口之后，后续可平滑替换为自研 ANSI，避免被单一依赖锁死 |
-| **UX 范式** | **对齐 codex / pi**：单列流式对话、折叠工具块、内联 diff、`/`命令、`@文件`、`!shell`、Esc 打断——程序员零学习成本上手；差异化全在内核(DEE)，不在操作习惯上 |
-| **模型操作语言** | **Elixir**：模型、工具、宿主环境同语言 |
-| **上下文策略** | **极简主义（光头优先，§1.1）**：知识住环境不住 prompt，pull over push，可见工具面封顶 3 个 |
+**语言**：Elixir ｜ **打底模型**：OpenRouter `deepseek/deepseek-v4-flash-0731`（标称 1.31M 上下文，多后端适配器可换）。标称窗口只用于兼容性和预算上限，不作为设计成立的前提；有效注意力按实测值计，光头策略在短有效窗口下仍必须成立。
 
 ---
 
-## 1. 一句话愿景
+## 0. 1. 愿景与第一性原则
 
-> **newbee 不是"让大模型替你写 Elixir 代码"，而是"把一个大模型放进一个长期运行的、动态的 Elixir 环境里，让它自己用 Elixir 作为手和脑来编程、操作文件、调用工具、构建工程，并反过来持续优化这个环境本身"。**
+> **newbee 不是"让大模型替你写代码"，而是"把大模型放进一个长期运行的、版本化的、可自修改的 Elixir 环境里：它用 Elixir 作为手和脑完成任务，环境则根据真实使用证据持续把自己改得更聪明、更便宜——每一次改变都可评价、可回退、可归因。"**
 
-传统编程助手（Claude CLI、Codex 等）的工作方式是：模型输出文本 → 工具/沙箱**临时**执行 → 返回有限的结果 → 结束。模型与执行环境是一次性、松耦合、无记忆的。
+三条第一性原则，互为犄角：
 
-newbee 反其道而行：给模型一个**持久、有状态、可编程、可自修改**的 Elixir 运行时环境。更精确地说，是给模型一个**它专属的 IEx**：变量跨轮存活、工具随用随写随热载、工程可探可改可测。时间一长，这个环境会积累它自己的工具库、约定、缓存与策略——**越用越懂、越用越省、越用越准**。
-
-### 1.1 第一性原则：上下文极简主义（光头优先）
-实验证明：工具面极简的 harness 在任务**质量**上优于挂满 skill 的重型 harness——上下文臃肿不只是贵，是**变笨**（注意力稀释、指令冲突、无关知识挤占工作记忆）。由此确立 newbee 的第一性原则：
-
-- **知识住环境，不住 prompt**：系统提示词保持极小；工具、规则、记忆全部沉淀在环境里，默认一个字的文档都不注入。
-- **拉而非推（pull over push）**：传统 harness 把知识防御性地"推"进 prompt；可编程环境让模型按需"拉"——`Newbee.Env.*` 自省、按需读文档、RepoMap 定位后再取细节。
-- **工具面 = 3 个**：`run_elixir` / `done` / `ask`，封顶。新能力永远进环境（工具库），不进工具面。
-- **JIT 阶梯是极简主义的引擎**（§6.2）：环境每编译掉一个模式，模型的上下文需求就永久降一分。**光头不是起点，是环境收敛的方向。**
+1. **上下文极简主义（光头优先）**：知识住环境不住 prompt；pull over push；可见工具面封顶 3 个（`run_elixir`/`done`/`ask`）。上下文臃肿不只是贵，是**变笨**。环境每编译掉一个模式，模型的上下文需求就永久降一分——**光头是环境收敛的方向**。
+2. **环境能力全模块化**：一切能力（工具/规则/提示/工作流/provider/验证器/projection）都是 Plugin——可配置、可替换、可评价、可回退。没有例外层，没有旁路。
+3. **模型自治，宿主守物理边界**：worker 和 adapter 都是模型，拥有请求、实现、评价、激活、回退的自治权；Host Shell 只阻止凭证泄露、越宿主边界、不可恢复的破坏。**自治的激进程度与安全网厚度成正比**（§8.1）。
 
 ---
 
-## 2. 与 Claude CLI / Codex 的核心差异（创新点）
+## 2. 与 Claude CLI / Codex 的核心差异
 
 | 维度 | Claude CLI / Codex | **newbee** |
 |---|---|---|
-| 执行模型 | 一次性、临时、无状态沙箱 | **长期运行、有状态、可持久化**的 Elixir 环境 |
-| 模型与环境的交互 | 模型输出文本，工具被动执行 | 模型是环境里的"首要用户"：**写 Elixir 代码、调用它的库、运行并检查结果** |
-| 中间结果 | 每轮重新计算/重传 | **绑定持久化**：变量跨轮存活，像 IEx 一样直接引用 |
-| 记忆 | 无 / 靠上下文 | 环境内持久化的**记忆、缓存、工具库、策略** |
-| 工具的形态 | 预定义固定工具集 | **工具即运行时脚本**，模型可调用、可新增、可热载、可修改 |
-| 自我进化 | 无 | **环境可自我重构**，且能把"多轮推理"**固化成零 token 的纯函数** |
-| 环境目标函数 | 完成单次任务 | 持续优化（省 token / 高智能 / 高准确 / 最优），由内置评测台裁判 |
-| 工作存储 | 临时目录 | **工程的 live 编辑、运行、测试都在同一环境里闭环** |
-| 上下文 | 挂满 skill / 长系统提示 | **光头**：知识在环境里按需拉取，prompt 极简（§1.1） |
+| 执行模型 | 一次性临时沙箱 | **长期存活的版本化环境**：daemon 常驻，TUI 只是探视窗 |
+| 中间结果 | 每轮重算/重传 | **绑定持久化**：变量跨轮存活，跨 generation 迁移（§4.4） |
+| 工具形态 | 预定义固定集 | **Plugin Release**：模型可新增/修改，不可变版本 + 原子激活 + 一键回退 |
+| 自我进化 | 无 | **认知 JIT**：教训→沉睡规则→蒸馏工具，热度剖析驱动晋升，退化即 deopt（§8.5） |
+| 进化的裁判 | 无 | **五层评价**：静态/确定性/反事实回放/真实使用/纵向，失败抗体单调增长（§8.2） |
+| 代理拓扑 | 单 loop | **Worker/Adapter 双模型 Agent**，消息协议解耦，激励隔离（§7） |
+| 上下文 | 挂满 skill/长提示 | **光头**：知识是 Event Store 的物化视图，按需拉取（§4.6） |
+| 项目关系 | 无状态工作目录 | **项目共生体**：`.newbee` 是环境的权威快照，重启完整恢复（§11） |
 
-**一句话**：Claude CLI 是"模型吩咐工具干活"，newbee 是"模型住在一个它自己造的、能改的房子 (Elixir 环境) 里干活"。
+**一句话**：Claude CLI 是"模型吩咐工具干活"；newbee 是"模型住在一套它自己持续翻修、且每块砖都有版本和质检记录的房子里干活"。
 
 ---
 
-## 3. 核心概念：动态 Elixir 环境（Dynamic Elixir Environment, DEE）
+## 3. 统一对象模型
 
-### 3.1 什么是 DEE
-DEE 是一个长期存活（进程型、可被 TUI 挂起/恢复）的 Elixir 运行时：
+### 3.1 Environment 与 Revision
 
-```
-┌────────────────────────────────────────────────────────────┐
-│                    newbee TUI (Elixir)                      │
-│   ┌───────────┐   ┌────────────────────────────────────┐   │
-│   │  会话视图  │   │       动态 Elixir 环境 (DEE)       │   │
-│   │  diff/日志 │   │  ┌──────────────────────────────┐ │   │
-│   │  token监控 │   │  │ 求值器节点 (独立 BEAM node, │ │   │
-│   │  模型输出  │   │  │  Code.eval + 持久 bindings)  │ │   │
-│   └───────────┘   │  │   ┌────────┐ ┌──────────┐    │ │   │
-│                   │  │   │ 内核    │ │ 工具库    │    │ │   │
-│   大模型 (LLM)    │  │   │(dispatch│ │ ~/.newbee/│    │ │   │
-│   ┌────────────┐  │  │   │  & loop)│ │ tools/*.ex│   │ │   │
-│   │ API client │  │  │   └────┬───┘ │ 热载/git  │    │ │   │
-│   │ 提示/记忆   │──┤  │  ┌─────┴──┐ └──────────┘    │ │   │
-│   │ token记账  │  │  │  │ RepoMap │ ┌────────────┐  │ │   │
-│   └────────────┘  │  │  │ 状态    │ │ 自进化引擎  │  │ │   │
-│                   │  │  │(EXTS)  │ │ +评测台    │  │ │   │
-│                   │  │  └────────┘ └────────────┘  │ │   │
-│                   │  │  ┌────────────────────────┐  │ │   │
-│                   │  │  │ 持久化层 (ETS/DETS/SQLite)│  │ │   │
-│                   │  │  └────────────────────────┘  │ │   │
-│                   │  └──────────────────────────────┘ │   │
-└────────────────────────────────────────────────────────────┘
+当前项目的可运行能力集合：
+
+```text
+Environment = Manifest(active revision 指针)
+            + Active Releases
+            + Project Profile
+            + Plugin Configuration
+            + Agent Message State
+            + Evaluation Evidence
 ```
 
-### 3.2 环境的能力（全部可由模型通过 Elixir 调用）
-- **代码 IO**：读文件、写文件、追加、复制、移动、删除、遍历工程树。
-- **双轨编辑**：
-  - **文本轨 · 哈希锚点编辑**：`show` 给每行生成 `N#hash| 内容` 锚点（MD5 前 4 字节，8 位 hex）；`patch` 按**锚点对**（目标行 + 相邻行上下文 `N.#h|M.#ch`）定位，行号只是提示——数错行自动重定位，数错且对不上整体拒绝；上下文必填，空行/重复行靠锚点对消歧（show 标记 `[dup:...]`）；快照 tag 过期只警告（锚点对才是新鲜度检查）；多节补丁全部验证通过才统一落盘（原子）。消灭 string-not-found 重试循环这个最大 token 黑洞，显著降低编辑 token 消耗与失败率。
-  - **结构轨 · Sourceror**（保留格式与注释的 AST 重写）：按 `模块::def`/AST 定位替换、`rewrite`、`mix format`、lint。这是选 Elixir 的最大技术红利——Claude/Codex 用 regex/diff patch 做不到保证可解析的结构化修改。
-  - 分工：Elixir 工程走结构轨，其余一切文本走锚点轨。
-- **运行**：`mix run`、`mix test`、`mix compile`、`elixir -e`、求值、执行任意 shell 命令。
-- **工程**：`mix new`、`mix deps.get`、依赖管理、项目脚手架。
-- **工具库**：`Newbee.Tools.*`（git 操作、搜索、AST 查询、文件 diff、JSON 处理、HTTP、正则等）。
-- **统一寻址**：一个 `Newbee.read/1` 通吃文件、目录、URL 与内部 scheme——`memory://`、`skill://`、`agent://<id>/findings`（从子代理结果按路径抠字段）、`conflict://N`（写 `@theirs`/`@ours` 解决合并冲突）。只教模型一个接口。
-- **内省**：模块文档、`Code.string_to_quoted`、`beam_lib` chunk 信息、类型信息。
-- **记忆/状态**：读写全局或项目级持久化状态。
-- **模型/调度**：向 TUI/LLM 发回"计划、进度、结果、需要确认、需要更多上下文"等信号。
+`revision` 单调递增。任何 active 变化产生新 revision；**回退 = 移动 active 指针到历史 revision**，历史永不删除。
 
-### 3.3 绑定持久化（Bindings Persist）—— "模型的 IEx" ⭐核心创新
-求值器像 IEx 一样维护**跨轮存活的变量绑定**：模型第 N 轮 `content = Fs.read!("lib/foo.ex")` 读入的 50KB 内容，第 N+1 轮直接 `content |> Ast.list_defs()` 引用——**不必重读、不必塞回上下文**。
-- 中间结果（大文件内容、AST、搜索命中列表、测试报告）都留在环境侧的 binding 里，模型只持有**变量名**。
-- 这是比"结果压缩"高一个量级的省 token 手段，也是 DEE 区别于一切"每次调用都是新沙箱"工具的物理本质。
-- 实现：`Code.eval_string/3` 显式传入/取出 binding，存于求值器 GenServer 状态；会话恢复时绑定**值**可序列化（不可序列化的进程引用等置为 tombstone）。
-- 模型可查询当前绑定清单（`Newbee.Env.bindings()`：名字 + 类型 + 大小的摘要，不回传内容本身）。
+### 3.2 Plugin：能力的唯一形态
 
-### 3.4 求值器隔离：独立 BEAM 节点
-求值器**不与主进程同 VM**：模型代码运行在一个独立的 BEAM 节点（分布式 Erlang 原生 RPC，同机 spawn），主进程（TUI/会话/记忆/内核）与之一对一监督。
+Plugin 是有稳定身份与生命周期的能力模块，≠ 一个 `.ex` 文件：
 
-- **崩溃隔离**：模型代码里的 `System.halt`、NIF 崩溃、死循环耗尽，最坏只杀死求值器节点——主进程监督重启它（死则替换、当前调用重试一次），TUI 和会话毫发无损。自进化系统的前提：环境在进化中必然写出有 bug 的代码，宿主必须免疫。
-- **绑定仍持久**（§3.3）：binding 存于求值器节点，跨轮存活不变；`reset` 语义 = 重启节点换新绑定。
-- **环境过滤**：节点启动注入过滤后的 env——**denylist 剥离所有 LLM API key**（模型代码不应读到宿主凭证）。
-- **工具回调仍无缝**：分布式 Erlang 节点间调用透明，模型代码里 `Newbee.Tools.*` 照常调用，背后是节点 RPC。
-- **宿主契约（Host Bridge）**：求值器节点**不持有任何凭证、不直连 provider、不直写 transcript**。一切权威操作（调模型、代理间消息、审计日志、调度）都经 `Newbee.Host.*` 类型化请求，由主节点校验后执行。模型能改造环境的三层（§3.7），但物理上碰不到宿主的心脏——宽松策略管"行为"，宿主契约管"能力"，后者不依赖模型自觉。
-- **会话挂起/恢复**：恢复的仍是状态与绑定值；节点本身总是重建。
+```text
+plugin_id       稳定逻辑身份，如 project.parser
+kind            tool | rule | prompt | workflow | adapter | provider |
+                evaluator | verifier | projection | stateful_service
+module          Elixir 模块入口
+contract        Plugin Contract 版本
+dependencies    依赖的 plugin_id/release_id
+state_policy    stateless | migrate | restart | external
+capabilities    ⭐ 声明式能力清单：允许调用的 Host API、副作用类别
+                (fs/shell/net/push…)、资源预算。Host 按此校验，
+                未声明的能力在 tools/pre-execute 被物理拒绝
+effects         有状态插件声明的 effect 清单：ets | pg | pubsub | registry |
+                process | external；必须经 runtime wrapper 创建和登记
+configuration   项目配置（脱敏后可注入投影）
+```
 
-### 3.5 工具即脚本 + 热代码升级 ⭐核心创新
-BEAM/OTP 的超能力：**环境升级自己不用重启**。
-- 工具**不写进 newbee 主应用源码**，而是放 `~/.newbee/tools/*.ex`（全局）与 `<project>/.newbee/tools/*.ex`（项目级），运行时 `Code.compile_file` 热加载。
-- 工具目录用 **git 版本化**：每次模型新增/修改工具 = 一次 commit，天然获得回滚与审计。
-- **主内核永远只读**：模型能改的只有工具层/提示层/记忆层，自我进化破坏核心系统的风险在架构上直接消除（回答了 §12 的权限边界问题）。
-- **工具即文档**：工具模块的 `@doc` 自动汇集注入 prompt——自文档化，模型新增工具后立刻对自己可见，prompt 无需手工维护。
-- 热替换失败（编译错误）不影响运行中的旧版本，符合 BEAM 语义。
-- **Effect 回收 = 监督树语义**：每个热载工具是一个 OTP 子树，它的 ETS 表、事件订阅、注册名全归这棵子树所有；deopt/卸载 = 终止子树，所有 effect 自动陪葬——**零悬挂注册**。这是 §6.2 deopt 敢做的底座：环境的任何部件都能干净地"长出来"和"缩回去"。
+**kind 体系是 DESIGN 全部机制的收纳格**（§3.5 映射总表）。源码只是 release 的载体之一：release 可含多源文件、测试、资源与声明。
 
-### 3.6 RepoMap —— 工程结构图
-给模型注入**紧凑的工程结构图**而非整文件：
-- 从 AST / `.beam` chunk 提取：模块名、`@moduledoc` 摘要、公开函数签名、关键 struct 字段，压缩成分级大纲。
-- 每次会话开始/工程变更后增量更新并缓存；注入 prompt 的是 RepoMap 而非文件全文。
-- 模型凭 RepoMap 定位 → 只对目标区域 `Fs.read` / AST 查询取细节。实践证明这是省 token 的第一梯队手段。
+### 3.3 Release：不可变版本 + 实测价签
 
-### 3.7 环境的"自我"：同心圆权限环（mutability rings）
-环境没有"只读内核"也没有"万物皆可改"——像操作系统的权限环，**越靠内的环，修改所需的证据越重**：
+```text
+release_id · plugin_id · parent_release · source_files · source_hash
+contract_version · dependencies · usage(给 worker 的使用说明)
+author(worker|adapter|system) · change_id · evaluation_ids · created_at
+```
 
-| 环 | 层 | 修改门槛 |
+- `active` 只能指向过了最低健康门的 release；候选在评测完成前不得进入 active。
+- **Release 严格不可变**：`source_hash` 不变则内容一字不动——实测数据因此**不属于** Release。
+- **价签 = `ReleaseObservation` 事件流 + fitness 投影**（⭐ 修正"不可变"与"持续更新"的矛盾）：每次使用带 `release_id` 归因记账，产生 observation 事件（token 成本、成功率、延迟、输出大小，按**模型 × 任务类型 × 时间窗口**分桶）；`fitness` 是评价层对 observation 的持续聚合投影，可随证据变化，**绝不写回 Release 本体**。Projection 向模型暴露聚合价签——模型按"够用且最便宜"显式选路；fitness 供 adapter 排序需求与基因库分享（§8.2/§14）。样本不足的桶不展示。
+
+### 3.4 Change：可回退的最小审计单元
+
+```text
+change_id · base_revision · candidate_revision · changes[]
+reason · request_id · author_agent · expected_version · attempt · deadline
+evaluation_plan · evaluation_result
+status: requested | building | evaluating | canary | active |
+        rejected | degraded | rolled_back | promoted
+```
+
+一次 Change = 一个回滚单元，对应 DESIGN 的补丁纪律：**小**（最小相关单元，禁成片重写）、**有据**（指向事件日志具体证据）、**带 before/after 快照**。禁止把无关变更揉成"自动更新"。
+
+**并发与恢复规则**：Coordinator 是状态机唯一写入者（OTP 单写者串行化，邮箱即顺序保证，无需分布式租约），`expected_version` 做乐观校验、过期请求直接拒绝；状态转换只由 durable 事件驱动——daemon 崩溃后从最后一个已落盘事件重新驱动，不产生半成品状态；评测超 `deadline` → `rejected(reason: timeout)`；重复 `candidate_ready` 按 `change_id` 去重。同一 plugin 允许多个并行 candidate，但激活按到达顺序串行裁决。
+
+### 3.5 概念映射总表 ⭐（融合的核心）
+
+DESIGN 的每个机制，在统一对象模型中的落位：
+
+| DESIGN 机制 | 统一模型落位 | 说明 |
 |---|---|---|
-| **Ring 3** | 工具层 (`~/.newbee/tools/*`) | 评测台通过 → 自动热载（最外层，日常进化发生在这里） |
-| **Ring 2** | 提示层/沉睡规则 | 评测台通过即可 |
-| **Ring 1** | 记忆层/策略层 | 项目局部生效，跨项目验证后晋升全局 |
-| **Ring 0** | 内核 + 宿主契约 (`kernel.ex`, `Newbee.Host.*`) | **完整反事实回放（§6.3）+ 人工签署** |
+| 工具即脚本/热载 | `kind: tool` 的 Plugin + generation switch | 热载语义升级为 candidate→评价→激活（§4.4） |
+| JIT L1 教训 | `kind: prompt` release（记忆片段） | 读到要花 token 推理 |
+| JIT L2 沉睡规则 | `kind: rule` release | 平时零成本，触发才注入（§6.3） |
+| JIT L3 蒸馏工具 | `kind: tool` release（带测试的纯函数） | 调用零 token |
+| L1→L2→L3 晋升 | 同 plugin 或派生 plugin 的 release 演进 | 热度剖析决定编译收益（§8.5） |
+| deopt 去优化 | Change `degraded` → 回退到上级形态的 release | 知识不丢，条件合适重新编译 |
+| RepoMap | `kind: projection` 的内置 plugin | 工程结构图是物化视图的一种 |
+| 沉睡规则触发引擎 | Projection Builder 的 live 拦截器（§6.3） | compaction 后存活获架构解释 |
+| 失败抗体 | Evaluation Evidence 中的回归测试 | 成为后续 Change 的确定性门（§8.2） |
+| 反事实回放 | Counterfactual 评价层 | 旧日志 + 新视图构建器（§8.2） |
+| PPT 锦标赛 | Verifier 的比较算法 | 多候选选 top-1 再进门（§8.2） |
+| Progress 验证器 | Worker loop 的 live 机制（不进 release 生命周期） | 停滞事件成为 adapter 线索（§7.5） |
+| 价签系统 | `ReleaseObservation` 事件流 + fitness 投影（Release 本体不可变） | §3.3 |
+| 进化线索 | `need` 消息（urgency: low） | worker 的一句话便宜事（§7.3） |
+| 权限环 Ring 0-3 | 各 kind 的激活门槛配置 | §8.3 |
+| 基因库 | Global Store 的 bundle + fitness | §14 |
+| 事件溯源/物化视图 | Event Store + Projection Builder | §4.6 |
+| 绑定持久化 | Evaluator 能力 + Binding Continuity 协议 | §4.4 ⭐新机制 |
+| J-Space 工作协议 | `kind: workflow` 内置插件 | §6.4 |
+| 统一寻址 `Newbee.read/1` | 环境 API（Host Bridge 一部分） | §5 |
+| worker/evolver 分工 | Worker Agent / Adapter Agent | §7 |
+| 进化档位 off/hint/background/auto | Autonomy Policy 档位 | §8.1 |
 
-Ring 0 不是不能改，是代价极高——环境理论上可以进化自己的内核，但每一次都要过最重的裁判。权限环让"自我进化"在每一层都有与之相称的安全边际。
+---
 
-### 3.8 代理拓扑：常驻 daemon、worker + evolver 双角色 ⭐
+## 4. 运行时架构
 
-**环境是常驻生命体，TUI 只是探视窗。** OS 层面：newbee **daemon**（常驻主节点：会话/记忆/内核/代理们/调度器，OTP 监督树）+ **求值器节点**（§3.4，唯一跑模型代码的地方，可被杀可重启）+ **TUI 客户端**（可 detach 的薄客户端——关掉终端不停止环境，`newbee attach` 随时接回。"跨工程长期运行"由此落地：环境在终端关闭后依然存活、记忆、进化）。
+### 4.1 总图
 
-代理分两个角色，通过事件溯源日志解耦通信：
-
-```
-主代理 worker (1 个)                  专职进化代理 evolver (0..1 个, 后台)
-─────────────────────                ─────────────────────────────
-干活时察觉重复模式                     空闲/定时触发，读取：
-  ↓ 只做一件便宜事                     · 事件日志(§6.5) + 指标
-  往事件日志写一条"进化线索"            · worker 留下的进化线索
-  ("这个模式第3次出现了")               ↓ 做所有贵的事
-  ↓ 继续干活，不分心                    提炼工具 → 写测试 → 评测台验证
-                                       ↓
-                                       按策略：提请批准 / 自动合并+热载
-                                       失败 → revert，归因干净
-```
-
-**为什么不让 worker 顺便做进化**（这是深思熟虑的决策，不是偷懒）：
-1. **激励错位**：worker 当下的目标函数是"完成任务"，不是"环境长期变好"；中途进化要么敷衍、要么拖慢用户。
-2. **视野不够**：最有价值的进化信号是**跨任务模式**（"这周出现 5 次"），只有旁观全局的 evolver 看得见。
-3. **归因污染**：worker 任务中途改了环境，任务失败时无法区分"任务难"还是"新工具有 bug"——变异与执行必须隔离，因果才干净。
-4. **不占前台**：复盘推理很烧 context，放后台不进主循环。
-
-**为什么不让 evolver 全包**：它没亲历任务，"当时哪里痛"的高保真信号在事后日志里难完全还原——所以 worker 保留**写一句话进化线索**的轻量通道（几乎零成本、不分心），evolver 做贵的综合部分。分工原则：**worker 供信号，evolver 做合成，bench 做裁判**。
-
-**其余并发子代理**：同一 VM 内还可临时 spawn 探索/测试子代理（共享 ETS 记忆、独立 LLM 上下文，监督树兜底；并行改代码时用 **git worktree 隔离**，返回 **schema 校验的结构化结果**而非散文。相对 Python/Node 系 CLI 的并发模型，这是 Elixir 的结构性优势。
-
-**可选第三角色 advisor**：一个只读旁观的第二模型，读 worker 的每一轮输出并内联插评（concern/blocker），worker 看到后自我纠偏。与 evolver 互补：advisor 管当下质量，evolver 管长期进化。默认关闭，按模型角色路由配置开启。
-
-**模型角色路由**：`default`(worker) / `evolver` / `explorer`(最便宜) / `advisor` / `plan` 等角色各自绑定不同模型，成本与能力按意图分配。
-
-## 4. LLM 与环境的交互协议
-
-### 4.1 循环（The Loop）
-```
-         ┌──────────────────────────────────────────┐
-         │                                          ▼
-  用户意图 ──▶ TUI ──▶ 组装 Prompt(记忆+工具清单+RepoMap+绑定摘要)
-                        │
-                        ▼
-                     LLM 响应 (function calling)
-                   ┌────────────┐
-                   │ 计划/文本    │
-                   │ run_elixir │◀──── code 参数 = 自由 Elixir 代码
-                   └─────┬──────┘
-                         ▼
-                   DEE 求值器 (持久 bindings)
-                         │
-                         ├── 正常返回 ──▶ 结果(可选精简) ──▶ 反馈给 LLM
-                         ├── 编译/运行错误 ─▶ 完整错误信息 ──▶ 反馈给 LLM
-                         └── 需要人确认 ─▶ TUI 暂停, 等待用户 ──▶ 恢复
-                         ▼
-                   (loop) 直到用户满意 / 手动停止
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Host Shell / OTP Supervisor（Ring 0，唯一物理边界）           │
+│                                                             │
+│  Environment Coordinator ── Event Store ── Project Store    │
+│       │                       │                             │
+│       ├── Worker Agent        ├── Global Store              │
+│       ├── Adapter Agent       └── Projection Store          │
+│       ├── Verifier                                            │
+│       └── Projection Builder                                  │
+│              │                                                │
+│        Evaluator Pool / Generation Manager                    │
+│              │                                                │
+│        隔离 BEAM 节点：active releases + persistent bindings   │
+│                                                             │
+│  TUI / CLI（薄客户端，可 detach，只消费 Projection）           │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 协议：function calling 包裹自由代码（混合式）
-裸文本 `<elixir>` 块组合性强但解析脆；纯离散工具调用又损失组合性。newbee 取两者之长：
+环境是常驻生命体，TUI 只是探视窗：daemon 在终端关闭后依然存活、记忆、进化；`newbee attach` 随时接回。
 
-**主协议（function calling）**——暴露给模型的工具面极小，只有几个：
+### 4.2 Host Shell（Ring 0）
+
+唯一不可被当前项目模型覆盖的边界：
+
+- LLM 凭证与 provider 请求（evaluator 节点 env 经 denylist 剥离一切 key）；
+- Agent / Coordinator / Event Store / Evaluator Pool 的 OTP 监督；
+- 项目路径与权限边界；release/manifest 原子提交；generation 切换；
+- 审计与紧急停用（`emergency_stop`）。
+
+Host Shell 不是"不可升级的全部业务逻辑"。可变能力必须走 Plugin Contract 接入；替换 Host Shell 只能在独立 newbee 版本或受控实验节点完成——这就是 Ring 0 的精确定义：**不是不能改，是代价极高（完整反事实回放 + 人工签署 + 独立发布）。**
+
+### 4.3 Environment Coordinator
+
+Change/Release/Revision 状态机的唯一驾驶者：收消息、排评测、动 active 指针、发通知、做回退。任何模块不得自维护另一份 active 状态。Coordinator 只串行处理元数据和指针转换；候选构建、编译、回放和模型调用全部委托给有界任务队列与 Evaluator Pool，可并行执行，完成后以事件回报 Coordinator，避免唯一写入者变成计算瓶颈。
+
+### 4.4 Evaluator Pool / Generation Manager + Binding Continuity ⭐（融合新机制）
+
+模型代码只在独立 BEAM 节点运行（崩溃隔离：最坏杀死求值器节点，宿主毫发无损）。Pool 管理多 generation：
+
+```text
+1. active generation 服务当前 worker
+2. adapter 在 candidate generation 加载候选环境
+3. 跑 compile / contract / health / 项目测试 / 回放
+4. 通过 → Binding 快照迁移（见下）→ 原子切换路由
+5. 旧 generation 排空后停止；切换失败则 active 不变
+```
+
+`state_policy`：`stateless`（新码直接接管）/ `migrate`（模块自声明状态迁移）/ `restart` / `external`（只存连接配置）。
+
+**Binding Continuity Protocol**（解决两份文档都未回答的问题：generation 切换时，"模型的 IEx"怎么办）：
+
+0. **quiesce**：切换前 Coordinator 令旧 generation 进入静默——拒收新 step、等待当前调用完成（带超时兜底）；快照期间 binding 冻结，杜绝"快照后继续写"的丢失更新；
+1. 快照当前会话 bindings，附元数据（`session_id` / `generation_id` / `revision` / 序列号 / 校验哈希）；
+2. **codec 白名单 + 大小预算**：只允许明确可序列化的类型（数据/AST/字符串等，逐项编解码，不反序列化任意 term）。小值内联迁移；原本就是 `ArtifactRef` 的值继续以内容寻址句柄按需加载并受背压/总量预算控制。普通大值不能在迁移时静默替换成句柄（那会改变 Elixir 变量类型），必须在预算内原样恢复；超预算则取消切换，并提示 worker 先显式 artifactize；
+3. 非白名单项（PID、闭包、Port、Reference、ETS tid、外部资源句柄）置 tombstone，名字保留、访问时报明确错误。runtime 在 binding 由纯函数或幂等工具产生时记录可选 `recompute_recipe`，有可靠 provenance 且重放无副作用才提供一键重算；任意匿名函数无法从 `Code.fetch_docs` 可靠恢复源码，不作此承诺；
+4. 恢复按 binding 粒度进行：单个值失败只 tombstone 该值，不拖垮整体；迁移摘要（迁了几个、tombstone 几个）进入 worker 的下一次投影；
+5. 切换失败则 binding 随旧 generation 原样存活，零损失。
+
+**三类状态各归其主**（修正"绑定属于 revision"的含糊表述）：`session_bindings`（worker 的 IEx 变量，**属会话**，跨 generation 迁移）；`plugin_state`（有状态插件的服务状态，按 `state_policy` 处理）；`environment`（active release graph，属 revision）。绑定不是 Environment Revision 的组成部分——它与 revision 的唯一关系是：迁移时按新 revision 的 codec 契约做兼容性校验。
+
+这里的“原子”只指**路由指针切换**：快照和大值持久化在切换前完成，不能宣称跨节点数据传输本身原子。若 quiesce、Artifact 写入或恢复准备超过预算，取消本次切换并恢复旧 generation 接流量，不带半迁移状态继续。
+
+### 4.5 Plugin Contract
+
+```elixir
+@callback id() :: String.t()
+@callback version() :: String.t()
+@callback describe() :: map()
+@callback dependencies() :: list()
+@callback health(context :: map()) :: :ok | {:error, term()}
+@callback self_test(context :: map()) :: {:ok, map()} | {:error, term()}
+@callback start(context :: map()) :: {:ok, term()} | {:error, term()}
+@callback stop(state :: term()) :: :ok
+@callback migrate(old_version, state, context) :: {:ok, state} | {:error, term()}
+```
+
+无状态工具只实现静态子集，runtime 用兼容包装器运行。**"源码能编译" ≠ "合法插件"**。
+统一 Envelope 之外，各 kind 可在后续 Phase 扩展专属契约（ToolContract / RuleContract / ProviderContract…）；第一阶段只强制 Envelope + `capabilities` 声明——先统一生命周期与安全边界，再逐步加深类型约束（与"先统一生命周期，再扩大插件种类"的非目标一致）。
+**Effect 回收 = 受监督生命周期 + 显式登记**：Plugin Runtime 以 `DynamicSupervisor` 管有状态插件，启动/停止经有界任务池执行并设超时，单个插件阻塞不占住 Coordinator；规模达到实测阈值后可由 `PartitionSupervisor` 分片，不把“50 个插件”本身视为 BEAM 扇出问题。ETS、进程、`pg`、PubSub、Registry 和外部连接必须通过 runtime wrapper 创建并写入 `effects` 登记表；停止时按登记表回收并做 leak check。绕过 wrapper 的任意直接调用无法保证自动回收，因此 contract 违规会令 health gate 失败，而不是承诺无条件“零悬挂”。
+
+### 4.6 事件总线与四层存储：上下文是日志的物化视图
+
+全系统**一条事件总线**，两域：
+
+- **durable 事实**：`turn/*`、`step/*`、`change_*`、`release_*`、`need/feedback/rolled_back`、`tool/*`——进 Event Store，重启存活；
+- **live 拦截点**：`agent/pre-step`、`llm/stream`（沉睡规则监控面）、`tools/pre-execute`——不落盘，供策略与观察。
+
+四层存储：
+
+| 存储 | 权威内容 |
+|---|---|
+| **Project Store** | 项目 active revision、release、change、消息、评价证据 |
+| **Global Store** | 跨项目 release、经验 bundle、模型配置默认 |
+| **Event Store** | 不可变事件流（追加写） |
+| **Projection Store** | 给 worker/adapter/TUI 的物化视图 |
+
+**写入权威与恢复规则**（消除"双写 JSONL + Event Store"的歧义）：
+
+- **Event Store 是唯一同步事实写入**：一切状态变化先追加事件（单调 `event_id`），落盘成功才算发生；
+- Project Store 的 manifest、`environment.json`、`messages.jsonl`、Projection 全部是事件流的**派生快照/视图**，各自记录已应用的事件水位（checkpoint）；
+- 崩溃恢复 = 从最近 checkpoint 重放事件流重建快照；快照与事件流不一致时以事件流为准；
+- 幂等与审计由此获得实现保证：重复事件按 `event_id`/`message_id` 去重，重放不产生二次效应。
+
+核心心智模型（两份设计在此天然会师）：**LLM 看到的上下文不是日志，而是日志的物化视图**——
+
+- **compaction = 视图维护**：压缩改视图不动日志，原始事件永远完整；
+- **沉睡规则在每次构建视图时重新应用**——这是"compaction 后依然存活"的架构级解释，不依赖上下文残留；
+- **反事实回放 = 旧日志 + 新视图构建器/新 release**：同一段历史换上进化后的环境重新投影，即得新旧版本的真实对比；
+- 日志同时是回滚的数据基础与进化的审计网：可回答"环境怎么一步步变好/变坏"，任意时间点可重建。
+
+一切订阅同一条总线：TUI 渲染、指标采集、沉睡规则、审计日志、adapter 触发——零各自为政的监听点。
+
+---
+
+## 5. 环境能力面（全部以内置 Plugin 承载）
+
+模型在 evaluator 中可调用的能力（每个都是内置 release，同样可进化）：
+
+- **代码 IO**：读/写/追加/复制/移动/删除/遍历工程树（`tool` 插件：`Fs`）。
+- **双轨编辑**：
+  - **文本轨 · 哈希锚点编辑**（`Edit`）：`show` 生成 `N#hash|` 行锚点；`patch` 按锚点对（目标行+相邻上下文）定位，数错行自动重定位、对不上整体拒绝、多节补丁原子落盘。消灭 string-not-found 重试循环这个最大 token 黑洞。
+  - **结构轨 · Sourceror**（`Structural`）：保留格式注释的 AST 重写，按 `模块::def` 定位替换。选 Elixir 的最大技术红利。
+  - 分工：Elixir 工程走结构轨，其余文本走锚点轨。
+- **运行**：`Run`（mix/elixir/shell）、编译、测试。
+- **工程**：`Scaffold`（mix new、deps、脚手架）。
+- **统一寻址**：`Newbee.read/1` 通吃文件/目录/URL 与内部 scheme——`memory://`、`skill://`、`agent://<id>/findings`、`conflict://N`、`bindings://`、`events://`。只教模型一个接口。
+- **内省**：`Introspect`（模块文档、AST、beam chunk、类型信息）。
+- **RepoMap**（`projection` 插件）：紧凑工程结构图（模块/`@moduledoc` 摘要/公开签名/struct 字段），mtime 指纹增量缓存。模型凭图定位 → 只对目标区域取细节。
+- **记忆/状态**：全局与项目级持久状态读写（自动脱敏剥离密钥）。
+- **数据工具**：`Json`/`Http`/`Search`/`Git`/`Diff`。
+- **工作协议**：`JSpace`（§6.4）、`BestTool`（显式不确定性聚合）。
+- **宿主桥**：`Newbee.Host.*` 类型化请求——调模型、代理消息、审计、调度。模型能改造环境的一切，物理上碰不到宿主的心脏：**宽松策略管"行为"，宿主契约管"能力"，后者不依赖模型自觉。**
+
+---
+
+## 6. LLM 交互协议
+
+### 6.1 循环与工具面
+
+```text
+用户意图 → TUI → Projection Builder 组装 Prompt
+   （RepoMap + 工具一行签名清单 + 记忆 Guidance + 绑定摘要 + module_ready 通知）
+        → LLM (function calling)
+        → run_elixir(code) ──▶ Evaluator（持久 bindings）
+        │      ├─ 正常返回 → 压缩结果回填
+        │      ├─ 编译/运行错误 → 完整错误回填
+        │      └─ 需确认 → TUI 暂停 → 恢复
+        → done(summary) / ask(question)
+```
+
+**工具面 = 3 个，封顶**：
+
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `run_elixir` | `code: string` | 在 DEE 求值器执行任意 Elixir（可调用所有库与工具，binding 持久）。**主力通道** |
-| `done` | `summary: string` | 声明本轮目标完成，附带给用户的总结 |
-| `ask` | `question: string` | 需要用户确认/澄清，TUI 暂停等待 |
+| `run_elixir` | `code: string` | 主力通道。自由 Elixir：循环/条件/批量/调一切插件，binding 持久 |
+| `done` | `summary: string` | 声明完成，附总结 |
+| `ask` | `question: string` | 需用户确认/澄清 |
 
-- deepseek v4 flash 原生支持 tools，tool call 解析稳定，不会出格式错误。
-- `code` 参数内仍是**自由 Elixir**：循环、条件、批量处理、一次调用做多件事——组合性不丢。
-- **降级通道**：模型偶发在文本里输出 ` ```elixir ` 代码块时，容错解析器兜底执行（并温和纠偏）。
+降级通道：模型偶发在正文输出 ` ```elixir ` 块时，容错解析器兜底执行并温和纠偏。
+新能力永远进环境（Plugin），不进工具面。
 
-### 4.3 结果反馈的 token 控制
-- 执行结果的返回**默认做压缩**：截断、摘要、只返回 exit code + stdout 尾部 / diff 统计。
-- 模型可在代码里主动控制返回量（自己先 `Enum.take`/`filter` 再 `IO.inspect`——**让模型写代码过滤，而非靠 LLM 摘要**，确定性压缩）。
-- 长输出写入文件并给模型文件路径 + 行数摘要，而非全文塞回上下文；或存入 binding 留待后续引用（§3.3）。
+### 6.2 结果回填的 token 控制
 
-### 4.5 沉睡规则：环境的免疫系统 ⭐
-常规教训全塞进 system prompt 会让 prompt 无限膨胀。沉睡规则反其道而行：
+默认压缩：exit code + stdout 尾部 / diff 统计；模型**写代码过滤**（`Enum.take`/`filter` 后再 inspect——确定性压缩，而非 LLM 摘要）；长输出写文件回路径+行数摘要，或存 binding 留待引用。
 
-- 规则平时**沉睡，不占 context**；每条规则带触发条件（regex 或 AST 模式），**实时监控模型的输出流**（正文、thinking、工具参数）。
-- 命中条件的瞬间：**中断流 → 把规则作为 system reminder 注入 → 从断点重试**。模型在犯错的当口被当场纠正，而非事后返工。
-- 注入**在 compaction 后依然存活**，纠偏不会因上下文压缩而丢失。
-- 例：进化中发现"模型反复在非测试代码里用 `IO.inspect` 调试" → 编译成沉睡规则，下次模型再打出 `IO.inspect` 时当 token 拦截注入禁令。
-- **这是自我进化产出的主要容器**（见 §6.4）：学到的教训编译成沉睡规则，而非 prompt 文本——"平时零成本、犯病才出现"。
+### 6.3 沉睡规则：双身份重生 ⭐（融合新表述）
 
-### 4.6 事件总线与 turn/step 状态机
-全系统**一条事件总线**，分两个域：
+沉睡规则在融合架构中有精确的双重身份：
 
-- **durable 事实**：`turn/*`、`step/*`、`user/message`、`assistant/*`、`tool/*`——追加进事件日志（§6.5），重启存活；
-- **live 拦截点**：`agent/pre-step`（可拒绝或改写输入）、`llm/stream`（沉睡规则的监控面，§4.5）、`tools/pre-execute`（守卫管道）——不落盘，供策略与观察用。
+- **存储身份**：`kind: rule` 的 Plugin Release——有版本、有评测、可回退、带价签（触发次数 × 节省的返工 token）；
+- **运行时身份**：Projection Builder 构建视图时挂载的 **live 拦截器**，监控 `llm/stream`（正文、thinking、工具参数），命中触发条件（regex/AST 模式）→ 中断流 → 注入 system reminder → 从断点重试。
 
-**状态机**：一个 **turn** = 0+ 个 **step**（一次模型请求 + 它引发的工具调用）。turn 在首个输入被认领前开启，在"不再欠任何调用"时关闭；`pre-step` 拒绝或以空消息进入 → 直接关闭 turn 不产生 step。
+由此获得 DESIGN 要求的全部性质，且不再依赖"上下文残留"这种脆弱解释：**平时沉睡零成本、犯错的当口当场纠正、compaction 后因视图重建而永生。** 教训一律编译成沉睡规则而非 prompt 文本——这是自我进化产出的主要容器，防止 prompt 无限膨胀。
 
-**一切订阅同一条总线**：TUI 渲染、指标采集（§6.1）、沉睡规则、审计日志（§8）、evolver 触发——五个消费者，零各自为政的监听点。
-
-## 5. TUI 界面设计（对齐 codex / pi 的交互范式）
-
-**原则：交互模仿 codex / pi 等主流工具，让程序员零学习成本上手；差异化全部藏在内核（DEE），而不是让用户学一套新操作。**
-
-### 5.1 交互范式（抄最熟的作业）
-- **单列流式对话布局**（同 codex / pi / Claude Code）：滚动 transcript，用户消息、模型输出、工具调用块、diff 依次流式追加；**不做默认多窗格**（窗格作为可选 toggle）。
-- **工具调用块折叠**：`run_elixir` 在 transcript 中显示为可折叠块（默认显示代码 + 压缩结果摘要，方向键展开看完整 stdout），与 codex 的工具块体验一致。
-- **底部多行输入框**：Enter 发送、Shift+Enter（或 `\` 续行）换行、↑/↓ 历史、Tab 补全。
-- **Esc 打断**模型执行；**Ctrl+C** 退出当前输入/双击退出程序——与 codex 一致。
-- **内联 diff 渲染**：写文件/编辑以带语法高亮的 inline diff 展示在 transcript 里（同 codex），`/approve` 与否的提示也内联出现。
-- **状态栏**（底部一行）：当前模型、项目、会话、累计 token / 花费、环境绑定数——信息密度对齐 codex 的 status line。
-
-### 5.2 布局（默认单列流式，可选窗格）
-```
-newbee  ── project: newbee  ── model: ds-v4-flash-0731  ── session #12
-────────────────────────────────────────────────────────────
-› 帮我给这个模块加一个并行 mapreduce 函数，并写测试
-
-● 我先看一下工程结构。
-  ⏺ run_elixir                          ✓ exit 0 · 12 行
-  │  mods = RepoMap.modules() …           [Tab 展开]
-  ● 找到 lib/parallel.ex，准备插入新函数。
-  ⏺ run_elixir                          ✓ wrote lib/parallel.ex (+28 -0)
-  ┌─ diff lib/parallel.ex ────────────────┐
-  │ +  def map_reduce(coll, m, r) do …    │
-  └───────────────────────────────────────┘
-  ⏺ run_elixir (mix test)               ✓ 8 tests, 0 failures
-● 完成：新增 map_reduce/3，测试全绿。
-
-────────────────────────────────────────────────────────────
-› ▊                                                    [⏎发送]
-  tokens: 12.4k in / 1.8k out · $0.002 · bindings: 3 · lenient
-```
-- 可选窗格（`Ctrl+T` 切换）：工程树 / 绑定清单 / 事件日志，默认收起，保持 codex 式的极简主界面。
-
-### 5.3 命令与快捷键（对齐 codex / pi 习惯）
-| 输入 | 行为 |
-|---|---|
-| `@文件路径` | 引用文件（Tab 补全），把文件加入模型视野 |
-| `!命令` | 直接在 DEE 里执行 shell 命令，输出进 transcript |
-| `/init` | 扫描工程生成 `NEWBEE.md`（项目说明/约定，兼容读取 `AGENTS.md`/`CLAUDE.md`） |
-| `/model <id>` | 切换模型后端 |
-| `/diff` | 查看会话累计 diff |
-| `/undo` | 回滚到上一个 git 快照/工具版本 |
-| `/bindings` | 查看环境绑定清单（名字+类型+大小，不含内容） |
-| `/tokens` | token 记账详情 |
-| `/compact` | 压缩对话历史（环境状态与绑定不受影响） |
-| `/approve` `/permissions` | 审批与权限档位（`lenient`/`ask`/`deny`） |
-| `/session save|load` | 会话挂起/恢复 |
-
-环境常驻 daemon（§3.8）：关掉 TUI 只是 detach，环境继续存活与进化；`newbee attach` 随时接回。
-| `/tools` | 查看/管理热载工具库 |
-| `/dump` | 环境自画像：打印当前生效的完整组合树（工具/规则/记忆/策略）；用户调试用，模型也可自省「我现在的身体由什么构成」 |
-| `Esc` / `Ctrl+C` / `Ctrl+T` | 打断 / 取消输入 / 切换窗格 |
-
-### 5.4 项目记忆文件
-- 每个工程根目录可有 **`NEWBEE.md`**（项目约定、常用命令、架构说明），会话开始自动注入——与 codex 的 `AGENTS.md`、Claude Code 的 `CLAUDE.md` 同一约定，**若已存在 `AGENTS.md`/`CLAUDE.md` 则直接读取复用**，降低迁移成本。
-
-### 5.5 技术选型（已定）
-- **前端**: `ratatouille`（ELM 风格）做单列流式布局足够胜任；渲染器封装在 `Newbee.TUI.Renderer` 接口后，可替换为自研 ANSI。
-- **风险预案**：ratatouille 依赖的 termbox 上游已停更，与新版 Elixir/OTP 兼容性需 **M1 第一天验证**；不兼容则启用自研 ANSI 渲染器（单列流式布局渲染逻辑简单，自研成本低）。
-- **进程模型**: GenServer + 事件总线，DEE 与 TUI 消息解耦；LLM 流式输出增量渲染到 transcript。
-
-### 5.6 J-Space 工作协议（来源 `priv/prompts/system.md:21-58`）
+### 6.4 J-Space 工作协议（`kind: workflow` 内置插件）
 
 > 工作协议：内层工作区思考先于输出，稠密可按需展开；自动化部分（语法、格式、惯例）不占内层工作区。
 
-- **Gate 分流**（动手前先分类，只加载所需）：
-  | 档 | 含义 | 动作 |
-  |---|---|---|
-  | `fast` | 一步可核验 | 直接回答 |
-  | `full` | 2–4 步、一个交付物 | 只带任务点名的模块 |
-  | `loop` | 多阶段/多文件/跨多轮 | 开 ledger + broadcast |
-  | 规则 | 一步核验不了的就不是 fast；任务变难就升档，别赖在 fast。 |
-- **三 register**：`inner`（稠密思考）/`ledger`（状态）/`outer`（干净输出）；seam 处切 outer，稠密符号不得泄进 outer。
-- **Ledger**（loop 必开）— `Newbee.Tools.JSpace.note(goal: ..., next: ...)`：`Goal`（完成定义）/`Core`（活跃项）/`Verified`（编号追加）/`Open`（悬项+判据）/`Next`（唯一下一步，不许空）；每个 seam（子任务完成/工具调用/写文件/检查点）重读 `Newbee.Tools.JSpace.seam()`。
-- **Seam 纪律**：审计在 seam，不在句中；写文件/交付前核验 `Newbee.Tools.JSpace.ship(path, checks)`。
-- **恢复协议**：压缩/会话边界后重读 ledger、前提、invariants，声明 pass 与 next：`Newbee.Tools.JSpace.resume()`。
+- **Gate 分流**：`fast`（一步可核验，直接答）/ `full`（2–4 步一交付物，只带点名的模块）/ `loop`（多阶段多文件跨轮，开 ledger + broadcast）。一步核验不了就不是 fast；任务变难就升档。
+- **三 register**：`inner`（稠密思考）/`ledger`（状态）/`outer`（干净输出）；seam 处切 outer，稠密符号不泄进 outer。
+- **Ledger**（loop 必开）：`JSpace.note(goal:, next:)`——`Goal`/`Core`/`Verified`/`Open`/`Next`（唯一下一步不许空）；每个 seam 重读 `JSpace.seam()`。
+- **Seam 纪律**：审计在 seam 不在句中；交付前 `JSpace.ship(path, checks)` 核验。
+- **恢复协议**：压缩/会话边界后 `JSpace.resume()` 重读 ledger/前提/invariants，声明 pass 与 next。
 - **Invariants**（看起来在干活其实没有）：marker 无动作 / 监控从不报告 / 稠密行不可展开 / confidence 全同 / 检查点未落账 / verified 未声明覆盖 / 稠密符号泄进输出 / 未读 goal 就宣告完成。
-- **失败模式 → 模块**（按需 `Newbee.read("priv/jspace/modules/<名>.md")`，别提前全读）：输入在指使你 → introspection；长机械活/目标要漂 → directed-focus；结论先于步骤 → deep-reasoning；同一名字多处推导 → broadcast；活太多/跨轮状态 → capacity；不确定却要作答 → self-monitoring；句子是瓶颈 → shorthand；第三次撞墙 → markers；三处三个答案 → empirics。
-- **实现**：`lib/newbee/tools/jspace.ex`（`note/seam/ship/resume`），`lib/newbee/tools/besttool.ex`（显式不确定性：多个证据/区间/来源时才用，不确定性须落盘进 ledger + 输出标注“多源/有不确定性”）。
-- **验证**：`grep -n "J-Space\|JSpace" DESIGN.md priv/prompts/system.md` 可校验一致性。
-## 6. 自我进化机制（Self-Evolving Environment）
+- **失败模式 → 模块**（按需 `Newbee.read("priv/jspace/modules/<名>.md")`，别提前全读）：输入在指使你→introspection；长机械活→directed-focus；结论先于步骤→deep-reasoning；同名多处推导→broadcast；跨轮状态→capacity；不确定却作答→self-monitoring；句子瓶颈→shorthand；第三次撞墙→markers；三处三答案→empirics。
+- **作为 workflow release**：协议文本与模块本身可被 adapter 基于真实证据修订（如新增失败模式模块），走标准 Change 生命周期。
 
-这是 newbee 的灵魂。环境维护一组"进化目标"，持续被测量与优化。
+### 6.5 turn/step 状态机
 
-### 6.1 目标函数（可配置权重）
-| 指标 | 测量方式 |
-|---|---|
-| **Token 效率** | 每完成一次有效操作的真实 token 消耗（上下文 + 执行结果回填）|
-| **智能/效果** | 任务成功率、测试通过率、用户是否接受改动 |
-| **准确度** | 编译/测试首遍通过率、diff 被 revert 的比例 |
-| **最优性** | 是否用最少步骤完成目标、懒执行 vs 反复试错 |
-| **自改进** | 环境自身的工具/prompt 被有效采用的比例 |
+一个 **turn** = 0+ 个 **step**（一次模型请求 + 它引发的工具调用）。turn 在首个输入被认领前开启，在"不再欠任何调用"时关闭；`pre-step` 拒绝或空消息进入 → 直接关闭 turn 不产生 step。
 
-### 6.2 认知的 JIT 编译：教训 → 规则 → 代码 ⭐核心创新
-现有 agent 的知识管理全是"积累"——记忆越攒越多、prompt 越攒越重，天花板明显。newbee 换一个问题：**环境不是仓库，是一台 JIT 编译器，持续把"需要模型推理的智能"编译成"不需要推理的确定性产物"**。
+---
 
-| 级 | 类比 | 产物 | 每次使用成本 |
+## 7. Worker / Adapter：两个真正的模型身份
+
+### 7.1 分工与激励论证
+
+```text
+Worker Agent (1 个)                    Adapter Agent (0..1 个，后台)
+─────────────────                      ─────────────────────────────
+用 active 环境干活                      读：事件流 + 指标 + need 消息
+察觉重复模式/能力缺口                    ↓ 做所有贵的事
+  ↓ 只做一件便宜事                      诊断 → 合成候选 release → 自测
+  发一条 need 消息                       ↓
+(≈ DESIGN 的"进化线索")                 过 Verifier + 确定性门
+↓ 继续干活，不分心                       ↓
+用完模块给版本级 feedback               按 Autonomy 档位激活/canary
+发现退化发 rollback_request             收负反馈 → 修订或回退
+```
+
+**为什么不让 worker 顺便做进化**（深思熟虑，不是偷懒）：
+1. **激励错位**：worker 的目标函数是"完成任务"，不是"环境长期变好"；
+2. **视野不够**：最有价值的信号是跨任务模式（"这周出现 5 次"），只有旁观全局的 adapter 看得见；
+3. **归因污染**：任务中途改环境，失败时无法区分"任务难"还是"新模块有 bug"——变异与执行必须隔离，因果才干净；
+4. **不占前台**：复盘推理烧 context，放后台不进主循环。
+
+**为什么不让 adapter 全包**：它没亲历任务，"当时哪里痛"的高保真信号事后难还原——所以 worker 保留**发一条 need 消息**的轻量通道（几乎零成本、不分心），adapter 做贵的综合。分工原则：**worker 供信号，adapter 做合成，评价层做裁判。**（DESIGN 的"进化线索"与 NEW_DESING 的 need 消息在此完全合一。）
+
+**隔离边界**：worker 不直接改 adapter 工作区与 active manifest；adapter 不接管用户任务、不碰 worker 的 transcript/bindings。上下文、evaluator、token 预算各自独立。
+
+### 7.2 协作消息协议
+
+所有消息**是事件流中的一类事件**（`messages.jsonl` 只是其派生物理视图，写入权威见 §4.6），含 `message_id/request_id/project_id/sender/created_at/payload`。传递语义是 **at-least-once + 幂等 effect**，不宣称分布式 exactly-once：
+
+- sender 在首次发送前将 `message_id = {agent_id, monotonic_seq}` 持久化到 outbox；重试复用同一 ID，agent 重启后序列号不得回退；
+- Coordinator 的 inbox 先按 `message_id` 去重，再追加受理事件；outbox/inbox 水位都可由 Event Store 重建；
+- 产生副作用的操作另带**操作级 idempotency key**：激活 `{change_id, candidate_revision}`、回退 `{rollback_change_id, target_revision}`、预算扣减 `{change_id, attempt, budget_kind}`。`feedback` 允许同一 release 多次上报，只按 `message_id` 去重，不能粗暴使用 `{change_id, release_id}`；
+- 事件追加与预算/状态转换记录在同一 Coordinator 事务边界内；崩溃后重放只补未完成 effect，不重复发布、回退或扣预算。
+
+消息载荷：
+
+```text
+need               worker → adapter     {capability, expected_api, context, evidence, urgency}
+candidate_ready    adapter → coordinator {change_id, plugin_id, release_id, evaluation_plan}
+feedback           worker → adapter/coordinator
+                   {request_id, plugin_id, release_id, outcome, score, errors,
+                    latency, output_size, comment, suggested_action}
+rollback_request   worker → coordinator  {request_id, plugin_id, release_id, target, reason}
+module_ready       coordinator → worker  {change_id, plugin_id, release_id, usage, evaluation_summary}
+module_rejected / evaluation_failed
+                   coordinator → 双方     {change_id, reason, evidence, next_action}
+rolled_back        coordinator → 双方     {revision, plugin_id, release_id, reason}
+```
+
+### 7.3 通知语义
+
+发布不是写日志。Coordinator 必须：①更新 active revision；②广播 `module_ready`；③通知进 worker 下一次投影；④worker 执行中则排队，不打断运行中的 turn；⑤附版本、契约、用法与评测摘要。
+
+### 7.4 其余 Agent
+
+- **advisor**（可选第三角色，默认关）：只读旁观的第二模型，读 worker 每轮输出内联插评（concern/blocker），worker 看到后自我纠偏。advisor 管当下质量，adapter 管长期进化。
+- **explorer**：worker 临时 spawn 的探索/测试子代理（共享 ETS 记忆、独立 LLM 上下文、git worktree 隔离并行改码、schema 校验的结构化返回而非散文）。
+- **模型角色路由**：`default`(worker) / `adapter` / `explorer`（最便宜）/ `advisor` / `verifier` / `plan` 各自绑定不同模型——成本与能力按意图分配。
+
+### 7.5 Progress 验证器：Worker loop 的 live 机制
+
+> 验证是继 pre-training / post-training / test-time compute 之后的第四 scaling 轴。
+
+- `Progress` 对轨迹前缀打**连续分数**（1..20，字母刻度 A..T 单 token）：三轴齐备——刻度粒度 G=20、K 次重复采样、标准分解（Specification/Output/Errors 三子标准 ensemble）；logprobs 可用时对评分 token 全分布取期望（零 tie，捕获不确定性）。
+- 每 `every` 步（默认 5）打分一次；`stalled?`（窗口内净增长 ≤ 阈值）触发**一次性干预注入**（提醒回退到高分状态）。
+- 分数进事件流："某类任务频繁停滞"成为 adapter 的 need 线索；verifier 高方差（模型自己不确定）驱动 `ask` 而非 `done`。
+- 走 `verifier` 模型角色，opt-in 开启控成本。**它是 worker 的仪表盘，不进 release 生命周期。**
+
+---
+
+## 8. 自治、评价与晋升
+
+### 8.1 三层策略（权限环的最终形态）
+
+| 层 | 控制对象 | 档位 | 性质 |
 |---|---|---|---|
-| **L1 教训 (lesson)** | 解释执行 | 一条持久化记忆（what/when/why，≤2KB，去重脱敏） | 模型读到要花 token 推理 |
-| **L2 沉睡规则 / playbook** | 即时编译 | 模式触发的沉睡规则（§4.5）或 SKILL.md 式片段 | 平时零，触发时极少 |
-| **L3 蒸馏工具 (distilled skill)** | 原生编译 | **纯 Elixir 函数**进 `~/.newbee/tools/`，带测试 | **调用零 token** |
+| **Host Safety** | 凭证、主 VM、外部系统、项目路径 | 不可配置 | 硬边界，模型不可越 |
+| **Capability Policy** | 文件/命令等外部副作用 | `lenient`(默认)/`ask`/`deny` | 宽松放行 + 高风险审计 + git/文件快照 `/undo` 兜底 |
+| **Autonomy Policy** | 环境变更（Change 激活） | `observe`/`manual`(默认)/`autonomous`/`emergency_stop` | 见下 |
 
-JIT 的三个标志性机制，一一对应：
+Autonomy 档位语义（吸收 DESIGN 的 off/hint/background/auto）：
 
-- **热度剖析（profiling）**：事件日志统计每个模式的 **出现频率 × 单次 token 成本 = 编译收益**；只有越过编译阈值（收益 > 编译成本）才晋升——不热的模式永不编译，避免过度工程。
-- **编译（compile）**：evolver 执行晋升。例："找到所有调用某函数的模块并批量改名"第一次花了 12 轮推理；固化成 `Newbee.Tools.Refactor.rename_callers/3` 后，一次 tool call 完成。
-- **去优化（deopt）**：L3 工具被评测台判退化时，**降级回 L2 规则而非删除**——假设失效就去优化，知识不丢，等条件合适重新编译。
+- `observe`：adapter 只产出建议与评测，不激活（≈ `:off`/`:hint`）；
+- `manual`：评价通过后需人 `/approve` 激活（默认起点）；
+- `autonomous`：过门的 Change 自动激活/canary，事后通知可 `/undo`（≈ `:background`/`:auto`）；
+- `emergency_stop`：冻结一切环境变更，仅允许回退。
 
-模型每固化一个模式，对自身智商的依赖就降一分——**环境在字面意义上变聪明，同时变便宜**。
+**自治是挣来的，不是默认的** ⭐（两份设计冲突的融合解）：当项目满足 ①已验证失败抗体数 ≥ 阈值 ②回放覆盖率 ≥ 阈值 ③近 K 个 Change 无人工回退——Coordinator 才**建议**升 `autonomous`（人确认一次）。安全网随使用变厚，自治档位才配放开。反之触发健康告警自动降档。阈值不预设拍脑袋常量：P4 前先以 `observe` 跑一个足够覆盖典型任务的观察窗口，采集 change/失败/回退基线后再校准；“两周”可作为运营起点，不是架构常量。
 
-### 6.3 进化的裁判：失败抗体 + 反事实回放 ⭐核心创新
-没有 ground truth 的自我优化必然 Goodhart（环境会优化"看起来省 token"而非真省）。固定基准题（`priv/bench/` fixture 工程 + 验收标准）只是起点，newbee 的裁判系统有两个超越固定 bench 的活机制：
+**激活判定 = 多套规则的合取**（消除 Autonomy 与 Ring 门槛的优先级歧义）：
 
-- **失败抗体（failure antibodies）**：worker 每次**真实失败**（测试不过、diff 被 revert、用户拒绝、编译反复报错）自动生成一条回归测试永久进入 bench。bench 随使用**单调增长**——环境在同一个错误上不会犯第二次。这反过来解锁了进化的激进度：安全网随使用变厚，evolution 档位才配开到 `:auto`。
-- **反事实回放（counterfactual replay）**：事件溯源（§6.5）存了历史会话的完整轨迹。验证进化补丁时不只跑固定考题，还**把近期真实会话的关键片段用新环境版本回放**，对比新旧版本的实际 token/成功率——用真实使用当裁判，而非人造考题。固定 bench 的问题是题目会过时、不代表真实分布；回放永远代表。
-
-外加两条工程约束：
-- 评测由 evolver 在后台运行，消耗少量 token（deepseek v4 flash 极便宜，经济上成立）。
-- **按模型分别度量**：harness 质量主导模型表现，同一 prompt 换模型结果天差地别——prompt 变体、编辑协议、工具清单的优劣，都要对每个候选模型单独跑分，允许按模型选择不同契约。
-- 用户验收（`/approve` 与否）也作为真实世界信号回流到指标。
-
-### 6.4 进化载体
-1. **工具库扩展 (`~/.newbee/tools/`)**：worker 线索 + 重复模式 → evolver 合成新工具 → 评测台验证 → 热载注册。
-2. **Prompt 演进**：有效的系统指令、few-shot、**Elixir 惯用法手册**固化到提示层（版本化）；**教训一律编译成沉睡规则（§4.5）而非 prompt 文本**，防止 prompt 无限膨胀。
-3. **记忆/索引 (EXTS)**：后台管线逐会话抽取 → 跨会话合并 → 会话开始注入**有 token 上限**的 Memory Guidance 块；记忆条目去重、最新在前、**自动脱敏**（剥离密钥）、设上限；prompt 显式声明"记忆是启发式不是权威，与仓库现状冲突时以仓库为准，引用记忆须标注来源路径"。
-4. **缓存与压缩策略**：模型可调整"结果回填压缩比""何时 fetch 全文"等参数。
-
-### 6.5 事件溯源：上下文是日志的物化视图 ⭐
-每次环境变异（工具新增/修改、prompt 变更、策略调整、评测结果）记为一条**事件**，追加进持久日志。核心心智模型：**LLM 看到的上下文不是日志，而是日志的物化视图（materialized view）**——
-
-- **compaction = 视图维护**：压缩改的是视图，不动日志，原始事件永远完整；
-- **沉睡规则在每次构建视图时重新应用**——这是 §4.5"compaction 后依然存活"的底层解释，不依赖上下文残留；
-- **反事实回放 = 旧日志 + 新视图构建器**（§6.3 的实现定义）：同一段历史，换上进化后的环境重新投影，即得新旧版本的真实对比；
-- 日志同时是回滚的数据基础与进化的审计网：可回答"环境是怎么一步步变好/变坏的"，任意时间点可重建。
-
-### 6.6 进化循环（worker 供线索 / evolver 做合成 / bench 做裁判）
+```text
+可激活 = Host Safety ∧ Capability Policy ∧ Autonomy 档位 ∧ Ring Gate ∧ 资源预算
 ```
-worker 干活 ──顺手写"进化线索"──▶ 事件日志(§6.5) + 指标(§6.1)
-                                        │
-                       evolver 后台触发(空闲/定时/线索累积到阈值)
-                                        ▼
-                        诊断(哪个环节浪费/出错, 跨任务视角)
-                                        ▼
-                        提出最小改进(写 Elixir 工具/prompt 补丁)
-                                        ▼
-                        评测台验证(§6.3, 对比基线) ──不达标──▶ revert(事件溯源/git)
-                                        │达标
-                                        ▼
-                        按 evolution 策略：提请用户批准 / 自动合并 + 热载
+
+各 kind 的**自治上限**（Autonomy 档位再高也不得突破）：
+
+| kind | 自治上限 |
+|---|---|
+| `tool` / `workflow` / `projection` | `autonomous` |
+| `rule` / `prompt` | `autonomous`，但须先经 canary |
+| `provider` / `stateful_service` | `manual` 封顶 |
+| Ring 0（Host Shell） | 永不由当前模型激活 |
+
+`/approve` 不是命令副作用，而是一条带签名的**授权事件**（进 Event Store，可审计、可撤销授权）。
+
+### 8.2 评价五层（DESIGN 裁判系统的落位）
+
+| 层 | 评价者 | 作用 | 融合的 DESIGN 机制 |
+|---|---|---|---|
+| **Static** | compiler / contract checker | 语法、入口、依赖、contract | — |
+| **Deterministic** | self-test / 项目测试 / **已验证失败抗体** | 可重复正确性 | 抗体两态生命周期（见下），bench 随使用单调增长 |
+| **Counterfactual** | verifier / 历史回放 | 与 parent 比，不只看绝对成功 | 反事实回放（两种模式，见下），真实使用当裁判 |
+| **Real usage** | worker feedback + 价签测量 | 顺不顺手、错误、耗时、质量 | 使用归因绑定 release_id；ReleaseObservation 持续聚合 |
+| **Longitudinal** | coordinator | 多次任务后的成功率/回退率/token 成本 | 指标采集进 fitness；驱动 deopt |
+
+- **PPT 策略选择**（Best-of-N）：先按候选数与 verifier 预算比较 `N(N-1)/2` 和 PPT 预计比较次数；全配对更便宜时直接全量比较，PPT 更便宜时才执行 ring pass（随机 Hamiltonian 环双槽比较，抵消位置偏置）→ pivot 选择（top-k）→ pivot tournament（预算集中头部）→ 聚合（w/c 归一化 argmax）。不硬编码 `N<4` 或 `N>=5`，阈值来自实测成本模型。只有 top-1 进确定性门；verifier 不可用时退回 deterministic gate + 历史 fitness，证据仍不足则保持候选并列、不得用均匀随机排名自动发布。
+- **失败抗体两态生命周期**（修正"真实失败 = 回归测试"的过度承诺）：真实失败先记为 `observed_failure`（完整输入、环境 revision、release_id、外部副作用、错误输出）；能重放、具备正确性 oracle、经独立验证后，才晋升 `verified_regression_test` 进入确定性门。证据事件永久保留，但 active bench 不无限全量执行：抗体按“近期触发率 × 拦截价值 × 覆盖独特性”分为 `hot`（每次跑）/ `warm`（抽样跑）/ `cold`（归档、相关变更时唤醒）；GC 只调整执行层级，不删除历史证据。不可复现的失败保留为证据但不充当门——防止把错误假设固化成测试。
+- **反事实回放的两种模式**：**投影回放**（不执行——用新视图构建器/新 release 重建 prompt 与决策输入，确定性对比，零副作用）；**执行回放**（需 replay fixture：固定模型 I/O 或随机种子、工程快照、依赖 lock、环境变量、时间）。每个 tool release 声明 `replay_policy: rerun | stub | forbid`：纯函数/白名单工具可在 worktree 或隔离节点重跑；外部网络、shell 与不可逆操作默认使用日志桩；`forbid` 出现在关键路径时该会话不得充当自动晋升门。新旧行为一旦分叉，比较只覆盖两边都实际重跑的子集，桩结果只能验证投影兼容性，不能证明工具进步。比较须报覆盖子集、重复次数与置信区间——"优于 parent"必须有统计含义（与 §8.3"样本不足不得宣称优于"一致）。
+- adapter 可提评价计划，不能伪造评价结果；verifier 可以是模型，但确定性门失败不能由模型投票绕过。
+- 用户验收（`/approve` 与否）作为真实世界信号回流指标。
+
+### 8.3 晋升状态机与 Ring 门槛映射
+
+```text
+requested → building → statically_validated → evaluated → canary → active → promoted
+任何阶段 → rejected
+active/promoted → degraded → rolled_back
 ```
-- **进化与执行严格隔离**：变异永远发生在任务间隙的后台，worker 干活的进程内不改环境——保证任何任务失败都能干净归因。
-- **补丁纪律**：每次进化改动必须**小**（最小相关单元，禁止成片重写）、**有据**（指向事件日志中的具体证据）、**带 before/after 快照**（一条进化 = 一个回滚单元）；默认**项目局部**生效，跨项目验证成熟后才晋升全局。
-- **evolver 由 daemon 调度器驱动**（heartbeat/cron 触发），携带 **token 预算上限**——进化本身也要过成本关。
-- **激进程度由策略层 `evolution` 档位控制**（`policies.ex`）：
-  | 档位 | 行为 |
-  |---|---|
-  | `:off` | 不做任何进化 |
-  | `:hint`（默认） | evolver 只产出"进化建议"到 TUI，用户逐个 `/approve` 后热载 |
-  | `:background` | 验证通过的补丁自动热载，TUI 事后通知，可 `/undo` |
-  | `:auto` | 全自动（含 prompt 层与策略层变更），仅当 bench 充分成熟后开启 |
 
-### 6.7 进度验证器：连续分数 + 停滞干预 ⭐（LLM-as-a-Verifier 落地）
+- `canary` 可只对 adapter 或一小组 evaluator 请求生效；
+- worker feedback 是评价样本不是审批；`score` 必须绑定具体 release；
+- 新 release 样本不足不得宣称优于 parent；adapter 须按失败原因产生下一个 Change，而非无限重放同一候选。
 
-> 启发来源：Kwok et al., *LLM-as-a-Verifier*（2026）。验证是继 pre-training / post-training /
-> test-time compute 之后的第四 scaling 轴；agent 不缺生成能力，缺"知道哪条轨迹是对的"。
+**Ring → 激活门槛**（DESIGN 权限环从比喻变成配置）：
 
-- **问题**：主循环对模型是否在**绕路**无感知。失败轨迹的典型形态（装无关大包、反复同一方案、
-  错误方向深挖）在长任务里无法被二元工具结果（成功/失败）识别——每步都"成功"但整体零进展。
-- **机制**：`Newbee.Evolution.Progress` 对轨迹前缀打**连续分数**（1..20，字母刻度 A..T 单 token）。
-  三轴齐备：**刻度粒度**（G=20）、**重复评估**（K 次采样，logprobs 不可用时降级）、
-  **标准分解**（Specification/Output/Errors 三子标准 ensemble，替代整体 rubric）。
-  logprobs 可用时对评分 token 的**全分布取期望**（连续分数，零 tie，捕获不确定性）。
-- **集成**：kernel 每 `every` 步（默认 5）对 run_elixir 轨迹前缀打一次分，事件 `{:progress, score, scores}`
-  流出；`stalled?`（窗口内净增长 ≤ threshold）触发**一次性干预注入**（user 消息提醒回退到高分状态），
-  事件 `{:progress_stall, scores}`。verifier client 走 model.json 的 `verifier` role（无则回退 default），
-  Kernel `progress:` 选项开启（默认关，opt-in 控制成本）。
-- **进化闭环**：progress 分数进入 Metrics/事件日志，evolver 可把"某类任务频繁停滞"作为进化线索
-  （教训 → 规则 → 工具，§6.2）；verifier 高方差（模型自己不确定）可驱动 `ask` 而非 `done`。
+| 环 | 层 | 门槛 |
+|---|---|---|
+| Ring 3 | `tool`/`workflow` 插件 | Static + Deterministic + canary（日常进化发生在这里） |
+| Ring 2 | `rule`/`prompt` 插件 | + Counterfactual 回放对比 |
+| Ring 1 | 记忆/策略晋升全局 | + 跨项目验证（默认项目局部生效） |
+| Ring 0 | Host Shell | 当前模型不可改；独立 newbee 版本发布 + 完整回放 + 人工签署 |
 
-### 6.8 Best-of-N 进化：概率枢轴锦标赛（PPT）⭐（LLM-as-a-Verifier 落地）
+门槛看似“规则比工具更严”是有意设计：工具失败通常以返回错误、测试失败或显性 diff 暴露；规则/prompt 的退化会静默改变模型行为，归因更难，因此必须增加 Counterfactual 评价。
 
-> 论文 PPT 算法落地：从 N 个候选里选最优，成本 O(Nk) 而非 O(N²)。
+### 8.4 回退：一等公民
 
-- **问题**：evolver 合成是"单候选"——一次生成，失败即丢；生成有随机性，最优实现可能不在第一次采样里。
-- **机制**：`Newbee.Evolution.PPT.select/4` 实现四步：**ring pass**（随机 Hamiltonian 环对相邻对做双槽
-  比较，每个候选 A/B 槽各一次，抵消位置偏置）→ **pivot 选择**（ring-pass 累计分 top-k）→ **pivot
-  tournament**（non-pivot vs pivot 全配 + pivot 内部全配，预算集中头部）→ **聚合**（w_i/c_i 归一化，
-  argmax 为最佳）。比较用 `<score_A>/<score_B>` 双槽 1..20 刻度，logprobs 分布期望（连续分零 tie），
-  判分器全挂时回退均匀排名。
-- **集成**：`Evolver.publish/2` 对同 id 的多个 tool 候选自动分组 → `rank_tool_candidates/2` 用 PPT 选
-  top-1 → 只有最优进 bench 门（抗体回放否决）。判分走 model.json 的 `verifier` role。
-- **收益**：进化质量从"第一次采样的实现"提升到"N 个采样里最优的实现"，bench 通过率上升、发布回滚率下降。
+```text
+worker rollback_request / health 失败 / 错误率超阈 / verifier 判退化 / generation 启动失败
+  → coordinator 受理
+  → 回退是 release graph 级操作，不是单插件指针移动：
+    · 优先直接切到某个历史 revision（整图已知健康）；
+    · 若目标是"把插件 X 回退到某 release"（rollback_request 的 target 只是线索），
+      Coordinator 构造候选 revision——X 置为目标 release、其余插件重新解析依赖图，
+      通过 contract/health 检查才允许切换；依赖不兼容则拒绝并给出解释
+  → 写 rollback change → 启动目标 generation → health/self-test
+  → 原子切换 active revision → 通知双方
+```
+
+回退只移动指针，不删除 release、评价与失败证据；回退后的环境仍可被 adapter 再改。启动恢复时 active revision 无法启动：不覆盖损坏 manifest → 从最近 known-good revision 逐级回退 → 标记 `degraded` → 通知双 Agent → 保留失败证据（不静默删除）。
+
+### 8.5 认知 JIT：在 Release 生命周期上重生
+
+环境不是仓库，是 JIT 编译器——持续把"需要模型推理的智能"编译成"不需要推理的确定性产物"：
+
+| 级 | 类比 | 产物（统一模型形态） | 每次使用成本 |
+|---|---|---|---|
+| L1 教训 | 解释执行 | `kind: prompt` release（what/when/why ≤2KB，去重脱敏） | 读到要花 token 推理 |
+| L2 沉睡规则/playbook | 即时编译 | `kind: rule` release | 平时零，触发极少 |
+| L3 蒸馏工具 | 原生编译 | `kind: tool` release（纯函数+测试） | **调用零 token** |
+
+三个标志性机制的运行时落位：
+
+- **热度剖析（profiling）**：事件流统计每个模式的出现频率 × 单次 token 成本 = **编译收益**；越过阈值（收益 > 编译成本）才作为高优 need 进 adapter 队列——不热的模式永不编译，避免过度工程。价签数据让阈值计算越用越准。
+- **编译（compile）**：adapter 执行晋升。"批量改名所有调用者"第一次花 12 轮推理；固化成 `Refactor.rename_callers/3` 后一次 tool call 完成。同 plugin 的 release 演进或派生新 plugin。
+- **去优化（deopt）**：L3 工具被判退化时降级回 L2 形态 release 而非删除——假设失效就去优化，知识不丢，条件合适重新编译。
+
+模型每固化一个模式，对自身智商的依赖就降一分——**环境在字面意义上变聪明，同时变便宜。**
 
 ---
 
+## 9. 上下文极简主义工程（12 条落位）
+
+| # | 手段 | 架构落位 |
+|---|---|---|
+| 1 | 绑定持久化 | Evaluator + Binding Continuity（§4.4）——最大头的节省 |
+| 2 | RepoMap | `projection` 插件，注图不注全文 |
+| 3 | 结果回填压缩 | 默认 exit code + 摘要；模型写代码过滤（确定性压缩） |
+| 4 | 工具清单动态化 | Projection 只放相关插件的一行签名（名字+一句话） |
+| 5 | 记忆分片 | 按 topic 索引按需检索；Memory Guidance 块有 token 上限 |
+| 6 | 推理固化 | 认知 JIT（§8.5），直至零 token |
+| 7 | 异步后台 | adapter/索引构建不占主循环预算 |
+| 8 | 增量 diff 上下文 | 只看 delta 不看全文 |
+| 9 | 哈希锚点编辑 | `Edit` 插件，消灭编辑失败重试循环 |
+| 10 | 沉睡规则 | `rule` release + live 拦截（§6.3），平时零 context |
+| 11 | 价签系统 | ReleaseObservation 投影（§3.3），省 token 成为模型的显式决策 |
+| 12 | 渐进式披露 | 一行签名清单 → 判定相关后 `Newbee.read/1` 取全文，永不注入全量文档 |
+
+### 9.1 状态与投影 GC
+
+极简主义也约束环境侧状态，不能把 prompt 膨胀转移成磁盘和内存膨胀：
+
+- **bindings**：按大小和最近访问 turn 做 LRU 预算；可序列化冷值逐出到 Artifact Store，binding 名保留为显式 `ArtifactRef`（仅对原本允许 artifactize 的值），`/bindings` 显示驻留/逐出状态；用户或 workflow 可 `pin`，活跃值不静默删除；
+- **memory**：topic 带 TTL、最后引用时间和 `pin`；过期普通记忆转归档投影，安全规则、用户明确固定项与评价证据不因 TTL 删除；
+- **J-Space ledger**：在 seam/compaction 时保留 Goal、Open、Next 与 Verified 哈希，已完成细节写 artifact 后从活跃投影移出；
+- **bench**：采用 §8.2 的 hot/warm/cold 抗体分层，历史证据单调保留，执行成本受预算约束。
+
 ---
 
-## 7. 系统模块划分（Elixir 项目结构）
+## 10. TUI：Projection 的一个消费者
 
-```
-newbee/
-├── mix.exs  # deps: jason ~> 1.0, req ~> 0.5, sourceror ~> 1.0；elixir ~> 1.18；telemetry/hpax/mint/finch 为 transitive
-├── lib/
-│   ├── newbee.ex                    # 顶层入口
-│   ├── newbee/
-│   │   ├── application.ex           # 监督树
-│   │   ├── host.ex                  # Host Bridge（凭证/代理回主 VM，脱敏）
-│   │   ├── permissions.ex           # 权限档位 lenient/ask/deny
-│   │   ├── diff.ex                  # 行级 diff
-│   │   ├── reader.ex                # 统一寻址 Newbee.read/1（memory:// skill:// agent:// conflict://）
-│   │   ├── bus.ex                   # 事件总线
-│   │   ├── event_log.ex             # 事件溯源日志
-│   │   ├── session.ex               # 会话挂起/恢复
-│   │   ├── memory.ex                # 全局记忆（脱敏）
-│   │   ├── codec.ex + codec/fallback_parser.ex  # function calling + 降级解析
-│   │   ├── tui/                     # TUI 前端（Key/Line/Screen/History/Cards/Highlight）
-│   │   ├── tui.ex / cli.ex / commands.ex / staging.ex / goal.ex / cwd.ex / history.ex / debug_log.ex / markdown.ex / daemon.ex
-│   │   ├── dee/                     # 动态 Elixir 环境（只读内核）
-│   │   │   ├── evaluator.ex + evalworker.ex  # 独立 BEAM 节点：eval + 持久 bindings（双节点）
-│   │   │   ├── kernel.ex            # 调度/循环/结果压缩（含 Progress/PPT 接线）
-│   │   │   ├── rules.ex             # 沉睡规则
-│   │   │   ├── repomap.ex           # 工程结构图（mtime 指纹缓存）
-│   │   │   ├── tools.ex + tools/hotloader.ex  # 工具注册表/热载
-│   │   │   └── result.ex            # 结果清洗/截断
-│   │   ├── tools/                   # 工具库：Edit/Structural/Fs/Run/Git/Search/Json/Http/Scaffold/Introspect/JSpace/BestTool
-│   │   │   ├── jspace.ex            # J-Space: note/seam/ship/resume（§5.6）
-│   │   │   ├── besttool.ex          # 显式不确定性聚合
-│   │   │   └── edit.ex / structural.ex / fs.ex / run.ex / git.ex / search.ex / json.ex / http.ex / scaffold.ex / introspect.ex
-│   │   ├── evolution/               # 自我进化
-│   │   │   ├── price_tags.ex        # 价签系统
-│   │   │   ├── progress.ex / ppt.ex # Progress 验证器 / PPT 锦标赛
-│   │   │   ├── jit.ex / bench.ex / evolver.ex / metrics.ex / snapshot.ex / policy.ex / gene.ex
-│   │   ├── agents/explorer.ex       # 子代理（worktree 隔离）
-│   │   └── llm/client.ex + llm/config.ex  # 模型客户端/配置
-│   └── mix/tasks/newbee/{doctor,bench,daemon,tui}.ex
-├── test/
-├── priv/
-│   ├── prompts/system.md            # 含 J-Space 协议（Gate/register/ledger/seam/resume/invariants，:21-58）
-│   ├── jspace/modules/*.md          # 失败模式模块（introspection/directed-focus 等）
-│   └── bench/                       # 评测台标准任务集
-└── ~/.newbee/                        # （用户目录，非本仓库）
-    ├── tools/*.ex                   # 全局工具脚本（git 版本化，热载）
-    ├── memory/                      # 全局记忆
-    ├── events.log                   # 事件溯源
-    ├── sessions/<id>.jsonl          # transcript（追加写）
-    └── session-artifacts/<id>/      # 会话制品：bindings 快照 / harness 状态 / 调度任务 / 子代理
-```
+**原则：交互模仿 codex / pi，程序员零学习成本；差异化全在内核。**
+
+- **单列流式对话布局**：用户消息、模型输出、工具块、diff 依次流式追加；默认不做多窗格（`Ctrl+T` 可选：工程树/绑定清单/事件日志/环境版本图）。
+- **工具块折叠**：`run_elixir` 显示为可折叠块（代码 + 压缩摘要，方向键展开完整 stdout）。
+- **内联 diff**：写文件/编辑以语法高亮 inline diff 展示。
+- **底部多行输入**：Enter 发送、Shift+Enter 换行、↑/↓ 历史、Tab 补全；Esc 打断、Ctrl+C 取消/双击退出。
+- **状态栏**：模型、项目、会话、累计 token/花费、bindings 数、autonomy/capability 档位、active revision。
+- **技术选型**：`ratatouille`（ELM 风格），渲染器封装在 `Newbee.TUI.Renderer` 接口后可换自研 ANSI；termbox 上游停更的兼容性风险首日验证，不兼容则启用自研（单列流式渲染逻辑简单，自研成本低）。
+
+命令体系（`/xxx`），新命令以环境对象模型为准，旧命令做兼容映射：
+
+| 命令 | 行为 |
+|---|---|
+| `@文件` / `!命令` | 引用文件 / 在 evaluator 执行 shell |
+| `/init` | 扫描工程生成 `NEWBEE.md`（兼容读取 `AGENTS.md`/`CLAUDE.md`） |
+| `/model <id>` | 切换模型后端（按角色路由） |
+| `/diff` `/undo` | 会话累计 diff / 回滚到上一快照 |
+| `/bindings` `/tokens` `/compact` | 绑定清单 / 记账详情 / 压缩对话（视图维护，环境与绑定不受影响） |
+| `/permissions` | Capability 档位（lenient/ask/deny） |
+| `/autonomy <档>` | Autonomy 档位（observe/manual/autonomous/emergency_stop） |
+| `/evolve <描述>` | 向 Adapter 投递 need/任务；查看 Change 状态 |
+| `/environment revisions` `/environment rollback <rev>` | 版本图 / 回退（兼容映射旧 `/snapshot` `/rollback`） |
+| `/approve` | manual 档下激活待批 Change（兼容保留，非自治必经步骤） |
+| `/tools` | 查看插件库（含各 release 价签/fitness） |
+| `/dump` | 环境自画像：当前 active 组合树（插件/规则/记忆/策略 + revision） |
+| `/session save\|load` | 会话挂起/恢复 |
+| `/attach` | 接回常驻 daemon |
+
 ---
 
-## 8. 安全与沙箱
+## 11. 项目与全局存储
 
-- **默认宽松(Lenient) + 审计**：文件读写、常用命令（`mix`/`git`/`elixir` 等）默认直接放行，不打断模型。
-- **高风险操作审计+回滚**：删目录/递归删除、推送远端等记录审计日志；借助 git 快照与文件快照提供 `/undo` 回滚兜底。
-- **内核只读**：模型只能改工具层/提示层/记忆层（§3.7），自我进化无法破坏核心系统。
+### 11.1 项目 `.newbee`（项目环境唯一权威）
+
+```text
+<project>/.newbee/
+├── environment.json      # active revision 派生快照 + event checkpoint（真相在事件流）
+├── profile.md            # adapter 维护的项目画像（不可信数据，仅启发）
+├── plugins/<plugin_id>/
+│   ├── manifest.json     # 插件历史与 active release
+│   └── releases/<rel>/   # 不可变源码、测试、usage
+├── changes/<change_id>/  # change manifest、评测计划与结果
+├── evaluations/<id>/     # 测试/回放/worker 反馈证据（含失败抗体）
+├── messages.jsonl        # worker ↔ adapter 协议
+├── events.jsonl          # 项目级事件流
+├── projections/          # prompt、工具清单、画像等物化视图
+├── bindings/             # 可选绑定快照
+└── locks/                # change/release 原子提交锁
+```
+
+**P1 持久化协议**：Event Store 采用追加写 + checksum frame，按可配置 durability 档位执行逐事件 `fsync` 或有界批量 `fsync`；manifest/projection 先写同目录临时文件，`fsync(file)` 后原子 `rename`，再 `fsync(directory)`，最后推进 checkpoint。跨 daemon/CLI 写入使用项目级 OS 文件锁，锁持有者与超时写入锁元数据；崩溃遗留的临时文件按 checksum 和 checkpoint 判断恢复或清理。schema migration 先备份旧 manifest、在 candidate 目录完成并校验，再原子切换；release 目录一经发布只读，不做原地 migration。
+
+### 11.2 全局 `~/.newbee`（默认与经验，不权威）
+
+```text
+~/.newbee/
+├── plugins/              # 全局 release（git 版本化）
+├── bundles/              # 基因库：声明式组合包 + fitness + 出处
+├── memory/               # 全局记忆（脱敏）
+├── events.log            # 全局事件流
+├── sessions/<id>.jsonl   # transcript
+└── session-artifacts/    # 绑定快照/harness 状态/调度任务/子代理
+```
+
+### 11.3 优先级与晋升
+
+- 项目 `.newbee` 是当前项目 active 环境唯一来源；全局只供默认与经验。
+- 项目插件显式 override 全局插件，必须不同 `plugin_id` 版本记录，禁止文件名排序覆盖。
+- 全局经验进项目前必须过项目 adapter 兼容性检查；项目反馈默认不污染全局，跨项目验证后晋升（Ring 1 门槛）。
+- 配置合并优先级：`Host 硬边界 > 项目 active config > 项目 profile > 全局默认 > 插件默认`。
+
+### 11.4 文档分工（治漂移）
+
+- **本文档**：唯一定义架构。
+- **Event Store + 不可变 Release**：唯一定义已发生的运行时事实。
+- `environment.json`：由事件流派生的 active revision/checkpoint 恢复快照，不与 Event Store 争夺权威。
+- `NEWBEE.md`：人类项目说明（生成视图，可复用 `AGENTS.md`/`CLAUDE.md`）。
+- README/系统 prompt/命令帮助：从对象模型生成的视图，定期再生成，不承载架构事实。
+
+### 11.5 启动恢复
+
+```text
+discover project root → ensure/read environment.json → validate schema/active revision
+→ resolve release 依赖图 → materialize active release set
+→ boot candidate generation → health/self-test → Binding 快照恢复
+→ switch active generation → build worker projection → resume 未完成消息
+```
+
+失败则逐级回退 known-good revision + 标 `degraded` + 保留证据（§8.4）。
+
+---
+
+## 12. 安全
+
+- **三层策略**：见 §8.1。Host Safety 硬边界不可配置；Capability 默认 lenient + 高风险审计；Autonomy 默认 manual 随安全网成熟升档。
+- **崩溃隔离**：模型代码只在 evaluator 节点；`System.halt`/NIF 崩溃/死循环最坏杀死节点，监督重启，当前调用重试一次。
+- **凭证隔离**：evaluator 节点 env 经 denylist 剥离一切 API key；一切权威操作经 `Newbee.Host.*` 类型化请求由主节点校验执行。**provider 插件是无凭证的协议适配器**：只能产出经 schema 校验的请求计划；凭证注入、域名白名单、预算、重试与实际网络执行全在 Host Shell 的受控 transport——可变的是"怎么说话"，不可变的是"拿着谁的钥匙、能去哪"。
 - **工作目录隔离**：模型写入限制在目标工程目录树内。
-- **资源限制（务实版）**：BEAM 无进程内强隔离，做得到的是**执行超时 + 输出大小上限**；内存/系统调用级隔离只在可选严格档（OS 容器如 `bwrap`）提供，不作为默认承诺。
-- **提示注入防护**：宽松 ≠ 不设防。模型读取的任意文件内容一律当**数据**处理（prompt 中显式隔离引用），防止仓库里藏的恶意指令劫持模型。
-- **副作用审计日志**：所有外部副作用操作记录，可回查、可撤销。
-- **可选严格档**：`lenient`（默认）/ `ask` / `deny` 三种模式可配置。
+- **资源限制（务实版）**：执行超时 + 输出大小上限 + token/并发/磁盘预算；内存/系统调用级隔离只在可选严格档（`bwrap` 等 OS 容器）提供，不作默认承诺。
+- **提示注入防护采用结构隔离 + 能力隔离，不把提示词当安全边界**：文件、URL、`profile.md`、tool stdout 等不可信内容统一包装为带 `origin/hash/trust=untrusted` 的类型化 `tool_result` envelope，永不拼接成 `system`/`user` 消息；围栏（如 `data file=...`）只用于可读性，不宣称能让模型免疫指令。taint 随 binding、摘要和投影传播，只有结构化 parser/validator 产出的字段可降级为 trusted。沉睡规则只监控 assistant 输出与待执行工具参数，不因 untrusted 数据里出现“指令文本”而生成二次 system reminder，避免攻击者借规则触发器升级权限。LLM 仍可能受内容影响，真正的安全下限由 Host capability 校验、路径/网络边界和不可逆操作确认提供。
+- **副作用审计与可逆性分级**：所有外部副作用记录可回查，但"可撤销"按三级如实标注——`reversible`（文件类，快照 `/undo` 可回滚）/ `compensatable`（需补偿动作，如 git revert、发反向请求）/ `irreversible`（已发送的 HTTP、远端 push、外部 DB 写入——执行前必须单独确认或走严格档）。环境版本回退只恢复环境自身；回退报告必须明确实际恢复范围，不隐含"外部世界也回滚了"。
+- **环境变更审计**：每个 Change 可回答——谁、何时、基于哪条证据、改了哪个 release、如何回退。
 
 ---
 
-## 9. Token / 上下文优化策略
+## 13. 目标模块树
 
-以下一切服务于第一性原则（§1.1）：**上下文极简不只是省钱，是提质**。
+```text
+lib/newbee/
+├── host/                       # Host Shell：凭证、路径、资源、RPC、紧急停用
+├── environment/
+│   ├── coordinator.ex          # Change/Release/Revision 状态机（唯一驾驶者）
+│   ├── manifest.ex             # schema 与 active revision
+│   ├── store.ex                # 项目 .newbee 持久化（原子写/锁/migration）
+│   ├── plugin_manager.ex       # contract、依赖解析、release 物化
+│   ├── plugin_supervisor.ex    # DynamicSupervisor、effect 登记、启动超时/leak check
+│   ├── generation.ex           # generation 切换 + Binding Continuity
+│   ├── evaluator_pool.ex       # 隔离 BEAM 节点池
+│   ├── projection.ex           # worker/adapter/TUI 视图构建（沉睡规则挂载点）
+│   └── verifier.ex             # 五层评价汇总（回放/PPT/确定性门）
+├── agent/
+│   ├── loop.ex                 # 通用 LLM ↔ tool ↔ result 状态机（turn/step）
+│   ├── worker.ex               # Worker 角色（含 Progress live 机制）
+│   ├── adapter.ex              # Adapter 角色（独立上下文/预算）
+│   ├── advisor.ex / explorer.ex
+│   └── protocol.ex             # need/feedback/rollback/module_ready（幂等）
+├── session.ex                  # worker transcript/bindings（不管环境版本）
+├── events.ex                   # 统一事件入口（Bus + Event Store）
+├── codec.ex + codec/           # function calling + 降级解析
+├── reader.ex                   # 统一寻址 Newbee.read/1
+├── memory.ex / permissions.ex / diff.ex / status.ex
+├── tui/ cli.ex commands.ex daemon.ex   # 视图与控制，不持有环境状态
+└── plugins/                    # 内置插件（兼容包装器）：
+    ├── edit.ex structural.ex fs.ex run.ex git.ex search.ex json.ex http.ex
+    ├── scaffold.ex introspect.ex jspace.ex besttool.ex repomap.ex
+    └── provider/openrouter.ex  # 无凭证协议适配器；受控 transport 在 host/
+```
 
-1. **绑定持久化**（§3.3）：中间结果留在环境侧，模型只持有变量名——最大头的节省。
-2. **RepoMap**（§3.6）：注入结构图而非文件全文。
-3. **结果回填压缩**：默认只回 `exit code + 摘要/尾部`；鼓励模型**写代码过滤**（确定性压缩）而非 LLM 摘要。
-4. **工具清单动态化**：只注入与当前工程/任务相关的工具 `@doc`（基于检索），而非全量。
-5. **记忆分片**：长记忆按 topic 索引，按需检索注入（131 万上下文给了很大余地，但仍按需）。
-6. **工具即缓存 / 推理固化**（§6.2）：高频子任务固化成单次调用，直至零 token。
-7. **异步/后台**：复盘、索引构建走后台子代理，不占主循环 token 预算。
-8. **增量 diff 上下文**：模型只需看到块的 delta 而非全文件。
-9. **哈希锚点编辑**（§3.2）：编辑按"锚点对"（目标行 hash + 相邻行上下文 hash）而非复述原文；行号只是提示，数错行自动重定位，对不上整体拒绝——消灭编辑失败重试循环。
-10. **沉睡规则**（§4.5）：纠正性知识平时零 context，触发才注入。
-11. **价签系统（price tags）** ⭐：每个工具与常用操作路径携带**实测价签**（历史平均 token 成本 + 成功率），随工具清单一并暴露给模型——模型自己按"够用且最便宜"选路，省 token 从隐藏策略变成模型的显式决策。价签数据来自事件日志的持续测量（§6.1），越用越准。
-12. **渐进式披露**：prompt 里只放工具/记忆的**一行签名清单**（名字+一句话描述），模型判定相关后才用 `Newbee.read/1` 取全文——永远不注入全量文档。
-
----
-
-## 10. 路线图
-
-- **M0（Spike，前置验证）**：拿 deepseek v4 flash 写 ~20 段真实工程操作的 Elixir（遍历工程、AST 定位、改源码、跑测试），统计首遍通过率。**这是全设计的最大赌注**（LLM 的 Elixir 熟练度）；若首遍通过率过低，优先投资"惯用法手册 + 错误反馈循环"再往下走。
-- **M1（原型）**：先验证 ratatouille 兼容性 → TUI 骨架（codex 式单列流式界面 + `/`命令 + `@文件`）+ 独立节点求值器（持久 bindings、崩溃隔离、env 过滤）跑通"run_elixir → 执行 → 结果回填 → 循环"。支持 `fs`/`run`/`test` 基础工具。
-- **M2（工程能力）**：双轨编辑（锚点轨优先，收益最直接）、Sourceror 结构轨、RepoMap、diff 渲染、工具热载（`~/.newbee/tools/` + git）、会话挂起/恢复、事件日志、`/evolve` 手动触发进化（worker 顺便做、用户逐个批准）。
-- **M3（工具库）**：AST/搜索/git/脚手架工具集，@doc 自动注入 prompt，并发子代理（worktree 隔离），沉睡规则，统一寻址 reader。
-- **M4（自我进化）**：指标采集 → 失败抗体/反事实回放裁判 → **专职 evolver 上线**（worker 线索通道 + heartbeat/cron 后台合成，带 token 预算）→ JIT 三级编译（含 deopt）→ 事件溯源/快照回滚 → `evolution` 策略档位逐步放开（`:hint`→`:background`）。
-- **M5（成熟）**：策略细调、多种模型后端、可选 Web 接口、公开评测基准（对比 token/成功率）、**基因库**：进化出的 L3 工具以 **bundle** 打包（工具+规则+prompt 片段的声明式组合，可叠加、可被上层 patch），携带 fitness 分数与出处，可跨用户分享/安装——从单体进化走向群体进化。
-
----
-
-## 11. 示例工作流（示意）
-
-> 用户："帮我给这个模块加一个并行 mapreduce 函数，并写测试。"
-
-1. TUI 收到意图，组装 prompt（RepoMap + 记忆：本工程用 `Task.async_stream` 惯例 + 相关工具 `@doc` + 当前绑定摘要）。
-2. 模型经 `run_elixir` 提交：`mods = RepoMap.modules() |> Enum.filter(...)`、`content = Fs.read!("lib/target.ex")`、`defs = Ast.list_defs(content)`，`IO.inspect(defs)` —— **三个操作一个代码块完成**，`content` 留在 binding。
-3. DEE 返回压缩结果（def 列表）。
-4. 模型下一轮直接引用 binding 里的 `content` 做 Sourceror 结构化插入，`format` 后写回——**没有重读文件**。
-5. `run_elixir` 跑 `mix test`，`report = ...` 留在 binding，只回传失败摘要。
-6. 全部通过 → `done`，TUI 显示 diff，用户 `/approve` 落盘。
-7. 后台复盘：该模式（定位→AST 插入→测试）值得固化吗？→ 写成工具 → 评测台验证 → 热载。
-8. 以后类似任务，一次 tool call 完成 → token 下降、准确率上升。
+迁移映射（旧 → 新）：`DEE.Kernel` → `Agent.Loop` + Worker/Adapter role；`Tools.HotLoader` → `PluginManager`（兼容 facade 后删旧实现）；`Evolution.Evolver` → `AdapterAgent`；`Evolution.Snapshot` → Environment Revision；`Evolution.JIT` → release 晋升/deopt 策略模块；`Evolution.Policy` → AutonomyPolicy；`Staging` → 只管用户工程文件暂存；`DEE.Tools` → PluginRegistry 投影；`Session` 只管会话与绑定快照。
 
 ---
 
-## 12. 待细化问题
+## 14. 二维路线图
 
-- 跨工程"全局记忆"的命名空间/标签设计，避免 A 项目经验误用于 B 项目。
-- 会话挂起/恢复的序列化细节：绑定值中不可序列化项（PID、闭包）的 tombstone 策略。
-- 评测台标准任务集的具体内容（哪些任务最能代表真实使用）。
-- 模型后端适配优先级：除 OpenRouter 外是否需并行支持本地 Ollama / 其余路由。
-- 子代理并发时的记忆一致性（ETS 并发读写冲突处理）。
+架构轴（Phase，来自 NEW_DESING）× 能力轴（Milestone，来自 DESIGN）。当前定位分两层看，避免把"现有实现能跑"误读为"统一架构下已验收"：**现有实现**——M4 能力已原型落地（280+ tests / 双节点 / J-Space / PPT / Progress）；**统一架构进度**——Phase 0–1 之间（对象模型统一进行中）。M1–M4 的每项能力须在新 Plugin/Change/Generation 合同下重新验收后才算"落地"。
+
+| Phase | 架构工作 | 解锁的能力里程碑 |
+|---|---|---|
+| **P0 基线** | 本文档为唯一设计；建 characterization tests；冻结旧 HotLoader/Evolver/Snapshot 新功能；先做最小 Generation Switch spike（Fs+Edit，跑通 quiesce/snapshot/switch/tombstone），定义 replay harness 的 `rerun/stub/forbid` 边界，并把 §15 架构验收 5/7/8/11 写成可执行规格 | M0 赌注已验证（deepseek Elixir 首遍通过率达标）；旧架构中的 M1–M4 能力可用，但须在统一合同下重新验收 |
+| **P1 Environment Store** | `.newbee` schema、四类存储统一落盘、原子写/锁/migration/启动恢复 | 不改变 worker 对话行为；会话挂起/恢复迁入新存储 |
+| **P2 Plugin Runtime** | Plugin Contract、兼容插件包装、candidate generation、健康门、generation switch、**Binding Continuity** | 工具/规则/prompt/projection 统一 kind；热载获得回退语义 |
+| **P3 Agent 分裂** | 通用 Agent Loop；Worker 保留现有能力；Adapter 独立 client/session/evaluator/预算；Coordinator 接管通信 | 进化与执行严格隔离；need 通道上线 |
+| **P4 评价与回退闭环** | 五层证据接入；使用归因绑 release_id；幂等 feedback/rollback；自动 degraded/rollback；旧状态迁移后删除 | **认知 JIT 全自动**：profiling→compile→deopt；失败抗体单调增长；PPT 多候选；自治升档建议 |
+| **P5 项目深度适配** | adapter 自动维护 profile/projections；项目命令/框架约定/常见错误/最佳工作流皆成插件 | **基因库**：L3 工具+规则+prompt 打成 bundle 带 fitness 跨用户分享——从单体进化走向群体进化；多模型后端；可选 Web 接口；公开评测基准 |
+
+## 15. 验收标准
+
+架构验收（缺一不可）：
+
+1. 新项目首启创建 `.newbee`，重启恢复同一 active revision；
+2. 至少两类非工具插件经同一 Plugin Runtime 加载；
+3. 候选编译/测试失败不改变 active；
+4. 任意 active release 可回退 parent 或历史 release；
+5. **generation 切换后绑定迁移可验证**：codec 白名单内类型迁移成功率 100%，其余项 tombstone 化且访问报明确错误；迁移停顿 P95 低于预算（阈值入 §16 校准）；
+6. worker 能提 need、收 module_ready、给版本级 feedback、发 rollback_request；
+7. adapter 用独立上下文开发候选，碰不到 worker transcript/bindings 与宿主凭证；
+8. 同一消息重复投递不重复发布/回退/扣预算；
+9. generation 启动失败恢复最近 known-good revision 并标 degraded；
+10. 每个环境改变可回答：谁、何时、基于哪条证据、改了哪个 release、如何回退；
+11. 沉睡规则在 compaction 后依然触发（视图重建即重挂载）；
+12. 删除旧 HotLoader/Snapshot/JIT/Evolver 旁路后，核心流程只有一套状态机。
+
+智能验收（融合后机制不缩水）：
+
+13. **已验证抗体**（verified_regression_test）覆盖的输入，在后续任何 release 的确定性门中零复现；
+14. 进化补丁经反事实回放对比（投影回放或 fixture 完备的执行回放），非只跑固定考题；
+15. 高频模式被固化为 L3 工具后，同类任务 token 消耗在相同测量窗口下可测下降（报样本量与置信区间）；
+16. 价签与实测偏差在滑动窗口内收敛（窗口/偏差阈值为配置参数），样本不足的桶不展示；
+17. 在 ≥N 组多候选任务上（N 入 §16 校准），PPT top-1 的确定性门 + 回放通过率不低于单候选基线 δ 以上。
+
+## 16. 待细化问题
+
+- **Binding Continuity 细节**：codec 白名单的精确类型集与大小预算；迁移停顿 P95 阈值的实测校准；tombstone 项"如何重算"提示的生成策略；
+- **ReleaseObservation 分桶与保留**：模型 × 任务类型 × 窗口的分桶粒度；观测数据的保留期与聚合降采样策略；
+- 跨工程全局记忆的命名空间/标签设计，避免 A 项目经验误用于 B 项目（bundle 的兼容性检查契约）；
+- 评测任务集具体内容：哪些任务最代表真实使用分布；回放片段的选取策略（关键片段的定义）；
+- 自治升档的具体阈值（抗体数/回放覆盖率/连续无回退 K 值），需实测校准；
+- 子代理并发时的记忆一致性（ETS 并发读写冲突）；
+- 模型后端适配优先级：OpenRouter 之外是否并行支持 Ollama 本地路由；
+- advisor 的介入协议：插评的 token 成本与纠偏收益的平衡点。
 
 ---
+
+> **融合宣言**：DESIGN 回答"环境为什么能越用越聪明"，NEW_DESING 回答"环境的每次改变为什么可信"。统一之后，newbee 是**一台有版本、有质检、有记忆的认知 JIT 编译器**——它编译的不是代码，是它自己的智能。

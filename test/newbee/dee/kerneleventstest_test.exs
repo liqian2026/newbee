@@ -1,7 +1,8 @@
-defmodule Newbee.DEE.KernelEventsTest do
+defmodule Newbee.Agent.LoopEventsTest do
   use ExUnit.Case, async: false
   import Newbee.TestScripted
-  alias Newbee.DEE.{Kernel, Evaluator}
+  alias Newbee.Agent.Loop
+  alias Newbee.DEE.Evaluator
 
   test "turn_end / usage / tool_error 事件流经总线" do
     Newbee.Bus.subscribe()
@@ -9,7 +10,7 @@ defmodule Newbee.DEE.KernelEventsTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -20,7 +21,7 @@ defmodule Newbee.DEE.KernelEventsTest do
           ])
       )
 
-    assert {:done, "done"} = Kernel.submit(kernel, "go")
+    assert {:done, "done"} = Loop.submit(kernel, "go")
 
     assert_received {:newbee_event, :usage, {:usage, %{"prompt_tokens" => 3}}}
     assert_received {:newbee_event, :tool_error, {:tool_error, rendered}}
@@ -38,7 +39,7 @@ defmodule Newbee.DEE.KernelEventsTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -49,8 +50,8 @@ defmodule Newbee.DEE.KernelEventsTest do
           ])
       )
 
-    assert {:done, "d"} = Kernel.submit(kernel, "go")
-    assert_received {:newbee_event, :audit, {:audit, :dangerous_code, hits}}
+    assert {:done, "d"} = Loop.submit(kernel, "go")
+    assert_received {:newbee_event, :audit, {:audit, :dangerous_code, hits, _reversibility}}
     assert "System.halt" in hits
 
     GenServer.stop(kernel)

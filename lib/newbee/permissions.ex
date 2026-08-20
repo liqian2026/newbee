@@ -1,77 +1,39 @@
 defmodule Newbee.Permissions do
-  @moduledoc """
-  权限档位 (DESIGN §8)：`lenient`（默认，放行+审计）/ `ask`（危险操作询问用户）/
-  `deny`（危险操作直接拒绝）。持久化 `~/.newbee/config.json` 的 "permissions" 键。
-
-  危险操作 = 写文件/删除/shell 命令/端口/外部进程（regex 静态检测——宽松档位的
-  务实实现：约束推荐 API 与明显危险调用，run_elixir 任意代码无法静态穷尽，
-  硬隔离仍靠审计 + 快照回滚兜底）。
-  """
-
+  @moduledoc "Capability Policy (DESIGN 8.1): lenient(default)/ask/deny. Host Safety is hard boundary, not configurable."
   @levels [:lenient, :ask, :deny]
   @default :lenient
   @config Path.join(System.user_home!(), ".newbee/config.json")
-
   @risky_patterns [
     ~r/File\.(write|write!|rm|rm_rf|mkdir|cp|mv|rename|touch)/,
     ~r/Newbee\.Tools\.(Fs\.(write|write!|append!|rm|rm_rf)|Edit\.patch|Structural\.(insert|replace|format))/,
     ~r/System\.cmd|Port\.open|:os\.cmd/,
     ~r/Newbee\.Tools\.Run\.sh/,
-    ~r/HotLoader\.publish/,
+    ~r/PluginManager\.(materialize|load_release)|Coordinator\.(activate|rollback)/,
     ~r/mix (test|compile|deps|format)|git (push|reset|rebase|clean|checkout|commit)/
   ]
-
-  @doc "合法档位列表。"
   def levels, do: @levels
-
-  @doc "当前档位（默认 :lenient）。"
   def get do
     case File.read(@config) do
-      {:ok, body} ->
-        case Jason.decode(body) do
-          {:ok, %{"permissions" => p}} when p in ~w(lenient ask deny) -> String.to_atom(p)
-          {:ok, %{"permissions" => p}} when p in @levels -> p
-          _ -> @default
-        end
-
-      _ ->
-        @default
+      {:ok, body} -> case Jason.decode(body) do {:ok, %{"permissions" => p}} when is_binary(p) -> String.to_atom(p); _ -> @default end
+      _ -> @default
     end
+  rescue _ -> @default
   end
-
-  @doc "设置并持久化档位。返回 :ok。"
   def set(level) when level in @levels do
+    cfg = try do case File.read(@config) do {:ok, b} -> Jason.decode!(b); _ -> %{} end rescue _ -> %{} end
     File.mkdir_p!(Path.dirname(@config))
-
-    config =
-      case File.read(@config) do
-        {:ok, body} ->
-          case Jason.decode(body) do
-            {:ok, m} when is_map(m) -> m
-            _ -> %{}
-          end
-
-        _ ->
-          %{}
-      end
-
-    File.write!(@config, Jason.encode_to_iodata!(Map.put(config, "permissions", level)))
+    File.write!(@config, Jason.encode!(Map.put(cfg, "permissions", to_string(level)), pretty: true))
     :ok
   end
+  def risky?(code) when is_binary(code), do: Enum.any?(@risky_patterns, &Regex.match?(&1, code))
 
-  def set(other), do: {:error, {:invalid_level, other}}
-
-  @doc "代码是否含危险操作。"
-  def risky?(code) when is_binary(code) do
-    Enum.any?(@risky_patterns, &Regex.match?(&1, code))
-  end
-
-  @doc "执行检查：:allow | :ask | :deny。"
-  def check(code) when is_binary(code) do
-    case get() do
-      :lenient -> :allow
-      :ask -> if risky?(code), do: :ask, else: :allow
-      :deny -> if risky?(code), do: :deny, else: :allow
+  @doc "Capability 检查：:ok 放行 | :ask 需用户确认 | {:deny, reason} 拒绝（§8.1）。"
+  def check(code) do
+    cond do
+      not risky?(code) -> :ok
+      get() == :deny -> {:deny, :capability_denied}
+      get() == :ask -> :ask
+      true -> :ok
     end
   end
 end

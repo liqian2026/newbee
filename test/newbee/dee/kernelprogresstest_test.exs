@@ -1,7 +1,8 @@
-defmodule Newbee.DEE.KernelProgressTest do
+defmodule Newbee.Agent.LoopProgressTest do
   use ExUnit.Case, async: false
   import Newbee.TestScripted
-  alias Newbee.DEE.{Kernel, Evaluator}
+  alias Newbee.Agent.Loop
+  alias Newbee.DEE.Evaluator
 
   # fake verifier：按脚本返回分数
   defp verifier(script) do
@@ -33,7 +34,7 @@ defmodule Newbee.DEE.KernelProgressTest do
     ]
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -46,7 +47,7 @@ defmodule Newbee.DEE.KernelProgressTest do
         }
       )
 
-    assert {:done, "ok"} = Kernel.submit(kernel, "task")
+    assert {:done, "ok"} = Loop.submit(kernel, "task")
 
     assert_received {:newbee_event, :progress, {:progress, s1, _scores1}}
     assert s1 > 0
@@ -69,7 +70,7 @@ defmodule Newbee.DEE.KernelProgressTest do
         [fn _m, _o -> {:ok, done_msg("ok"), %{}} end]
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -83,7 +84,7 @@ defmodule Newbee.DEE.KernelProgressTest do
         }
       )
 
-    assert {:done, "ok"} = Kernel.submit(kernel, "task")
+    assert {:done, "ok"} = Loop.submit(kernel, "task")
 
     assert_received {:newbee_event, :progress, {:progress, _, _}}
     assert_received {:newbee_event, :progress, {:progress, _, _}}

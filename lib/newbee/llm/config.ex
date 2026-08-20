@@ -12,7 +12,7 @@ defmodule Newbee.LLM.Config do
   - 解析顺序：$NEWBEE_MODEL_JSON → ./model.json → ./model.local.json → ~/.newbee/model.json。
   """
 
-  @roles ["default", "worker", "evolver", "explorer", "plan", "advisor", "verifier"]
+  @roles ["default", "worker", "adapter", "explorer", "plan", "advisor", "verifier"]
 
   def roles, do: @roles
 

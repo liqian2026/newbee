@@ -17,42 +17,43 @@ defmodule Newbee.Tools.Search do
       if length(acc) >= max do
         {:halt, acc}
       else
-        hits =
-          try do
-            case File.stat(f) do
-              {:ok, %File.Stat{size: s}} when s > 5_000_000 -> []
-              _ ->
-                f
-                |> File.stream!([:read], :line)
-                |> Stream.with_index(1)
-                |> Enum.reduce_while([], fn {line, n}, inner ->
-                  if length(acc) + length(inner) >= max do
-                    {:halt, inner}
-                  else
-                    if String.contains?(line, <<0>>) do
-                      {:halt, :binary}
-                    else
-                      if Regex.match?(re, line),
-                        do: {:cont, [{f, n, String.slice(line, 0, 200)} | inner]},
-                        else: {:cont, inner}
-                    end
-                  end
-                end)
-                |> case do
-                  :binary -> []
-                  list -> Enum.reverse(list)
-                end
-            end
-          rescue
-            _ -> []
-          catch
-            _, _ -> []
-          end
-
+        hits = grep_file(f, re, max - length(acc))
         {:cont, acc ++ hits}
       end
     end)
     |> Enum.take(max)
+  end
+
+  # 一次 File.read 替代 File.stat + File.stream（慢速双调用）——
+  # 大文件/二进制文件直接跳过；返回 [{path, line_no, line}]
+  defp grep_file(f, re, max) do
+    case File.read(f) do
+      {:ok, body} when byte_size(body) <= 5_000_000 and is_binary(body) ->
+        if String.contains?(body, <<0>>) do
+          []
+        else
+          body
+          |> String.split("\n")
+          |> Enum.with_index(1)
+          |> Enum.reduce_while([], fn {line, n}, acc ->
+            if length(acc) >= max do
+              {:halt, acc}
+            else
+              if Regex.match?(re, line),
+                do: {:cont, [{f, n, String.slice(line, 0, 200)} | acc]},
+                else: {:cont, acc}
+            end
+          end)
+          |> Enum.reverse()
+        end
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
   end
 
   @doc "按文件名片段查找。返回路径列表。"

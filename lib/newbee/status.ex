@@ -32,33 +32,36 @@ defmodule Newbee.Status do
 
   defp evidence_text do
     info = safe(fn -> Newbee.DEE.Evaluator.info() end, nil)
-    builtin = safe(fn -> Newbee.DEE.Tools.builtin() end, [])
-    hot = safe(fn -> Newbee.DEE.Tools.HotLoader.tool_files() end, [])
+    plugins = safe(fn -> Newbee.Plugins.list() end, [])
+    env = safe(fn -> Newbee.Environment.Coordinator.current() end, nil)
     bindings = safe(fn -> Newbee.DEE.Evaluator.bindings_summary() end, [])
-    jit = safe(fn -> Newbee.Evolution.JIT.list() end, [])
     rules = safe(fn -> Newbee.DEE.Rules.list() end, [])
-    tags = safe(fn -> Newbee.Evolution.PriceTags.summary() end, %{})
-    usage = safe(fn -> Newbee.DEE.Kernel.usage(Process.whereis(Newbee.DEE.Kernel)) end, %{})
-    antibodies = safe(fn -> Newbee.Evolution.Bench.antibodies() end, [])
-    snapshots = safe(fn -> Newbee.Evolution.Snapshot.list() end, [])
-    sessions = safe(fn -> Newbee.Session.list_with_meta(5) end, [])
+    tags = safe(fn -> Newbee.Environment.Fitness.price_tags() end, %{})
+    usage = safe(fn -> Newbee.Agent.Loop.usage(Process.whereis(Newbee.Agent.Loop)) end, %{})
+    antibodies = safe(fn -> Newbee.Environment.Antibodies.all() end, [])
+    verified = Enum.count(antibodies, &(&1["state"] == "verified_regression_test"))
+    sessions = safe(fn -> Newbee.Session.count() end, 0)
     events = safe(fn -> Newbee.EventLog.read(100_000) end, [])
     event_bytes = safe(fn -> Newbee.EventLog.size() end, 0)
-    jit_levels = Enum.frequencies(Enum.map(jit, & &1.level))
+
+    env_line =
+      if env do
+        "功能：Environment 数据：revision=#{env.revision} active插件=#{map_size(env.active)} autonomy=#{env.autonomy}"
+      else
+        "功能：Environment 数据：未启动"
+      end
 
     [
-      "功能：DEE 隔离求值 数据：模式=#{if(info, do: info.mode, else: "不可用")} 节点=#{if(info, do: inspect(info.node), else: "不可用")} 重启=#{if(info, do: info.restarts, else: "不可用")}次",
-      "功能：内置工具 数据：#{length(builtin)}个",
-      "功能：热载工具 数据：#{length(hot)}个",
+      "功能：Evaluator 隔离求值 数据：模式=#{if(info, do: info.mode, else: "不可用")} 节点=#{if(info, do: inspect(info.node), else: "不可用")} 重启=#{if(info, do: info.restarts, else: "不可用")}次",
+      env_line,
+      "功能：内置插件 数据：#{length(plugins)}个",
       "功能：持久绑定 数据：#{length(bindings)}个",
-      "功能：JIT 教训阶梯 数据：总计=#{length(jit)}条 L1=#{Map.get(jit_levels, :l1, 0)} L2=#{Map.get(jit_levels, :l2, 0)} L3=#{Map.get(jit_levels, :l3, 0)}",
       "功能：沉睡规则 数据：#{length(rules)}条",
-      "功能：工具价签 数据：#{map_size(tags)}个",
+      "功能：价签（fitness 投影） 数据：#{map_size(tags)}个",
       "功能：Token 统计 数据：#{inspect(usage)}",
-      "功能：失败抗体 数据：#{length(antibodies)}条",
+      "功能：失败抗体 数据：#{length(antibodies)}条（已验证 #{verified}）",
       "功能：事件溯源 数据：#{length(events)}条 #{human_bytes(event_bytes)}",
-      "功能：环境快照 数据：#{length(snapshots)}个",
-      "功能：会话记录 数据：至少#{length(sessions)}条"
+      "功能：会话记录 数据：至少#{sessions}条"
     ]
     |> Enum.join("\n")
   end

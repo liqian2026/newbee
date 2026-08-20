@@ -1,7 +1,8 @@
-defmodule Newbee.DEE.KernelGoalTest do
+defmodule Newbee.Agent.LoopGoalTest do
   use ExUnit.Case, async: false
   import Newbee.TestScripted
-  alias Newbee.DEE.{Kernel, Evaluator}
+  alias Newbee.Agent.Loop
+  alias Newbee.DEE.Evaluator
 
   defp text_msg(content) do
     %{"role" => "assistant", "content" => content, "tool_calls" => []}
@@ -27,7 +28,7 @@ defmodule Newbee.DEE.KernelGoalTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -46,13 +47,13 @@ defmodule Newbee.DEE.KernelGoalTest do
           ])
       )
 
-    assert :ok = Kernel.set_goal(kernel, "修复所有失败测试")
+    assert :ok = Loop.set_goal(kernel, "修复所有失败测试")
     assert_receive {:newbee_event, :goal_start, {:goal_start, "修复所有失败测试"}}
     assert_receive {:newbee_event, :goal_round, {:goal_round, 1}}
     assert_receive {:newbee_event, :goal_round, {:goal_round, 2}}
     assert_receive {:newbee_event, :goal_done, {:goal_done, "达成"}}
 
-    assert Kernel.goal(kernel) == nil
+    assert Loop.goal(kernel) == nil
 
     msgs = :sys.get_state(kernel).messages
     assert Enum.any?(msgs, fn m -> m["role"] == "system" and m["content"] =~ "[自主目标模式]" end)
@@ -68,7 +69,7 @@ defmodule Newbee.DEE.KernelGoalTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -79,12 +80,12 @@ defmodule Newbee.DEE.KernelGoalTest do
           ])
       )
 
-    assert :ok = Kernel.set_goal(kernel, "目标", max_rounds: 2)
+    assert :ok = Loop.set_goal(kernel, "目标", max_rounds: 2)
     assert_receive {:newbee_event, :goal_start, {:goal_start, "目标"}}
     assert_receive {:newbee_event, :goal_round, {:goal_round, 1}}
     assert_receive {:newbee_event, :goal_limit, {:goal_limit, 2}}
 
-    assert Kernel.goal(kernel) == nil
+    assert Loop.goal(kernel) == nil
     refute_received {:newbee_event, :goal_round, {:goal_round, 3}}
 
     GenServer.stop(kernel)
@@ -97,7 +98,7 @@ defmodule Newbee.DEE.KernelGoalTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -109,17 +110,17 @@ defmodule Newbee.DEE.KernelGoalTest do
           ])
       )
 
-    assert :ok = Kernel.set_goal(kernel, "目标")
+    assert :ok = Loop.set_goal(kernel, "目标")
     assert_receive {:newbee_event, :goal_ask, {:goal_ask, "要重构吗？"}}
 
     # ask 后目标保留（rounds 未推进）
-    g = Kernel.goal(kernel)
+    g = Loop.goal(kernel)
     assert g != nil and g.text == "目标" and g.rounds == 0
 
     # 用户回答：单轮 submit 结束后自动续跑（脚本 3 的 done 由 goal_next 驱动）
-    assert {:text, "继续干活"} = Kernel.submit(kernel, "可以")
+    assert {:text, "继续干活"} = Loop.submit(kernel, "可以")
     assert_receive {:newbee_event, :goal_done, {:goal_done, "完"}}
-    assert Kernel.goal(kernel) == nil
+    assert Loop.goal(kernel) == nil
 
     GenServer.stop(kernel)
     GenServer.stop(ev)
@@ -131,7 +132,7 @@ defmodule Newbee.DEE.KernelGoalTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -142,12 +143,12 @@ defmodule Newbee.DEE.KernelGoalTest do
           ])
       )
 
-    assert :ok = Kernel.set_goal(kernel, "目标")
+    assert :ok = Loop.set_goal(kernel, "目标")
     assert_receive {:newbee_event, :goal_round, {:goal_round, 1}}
 
-    assert :ok = Kernel.clear_goal(kernel)
+    assert :ok = Loop.clear_goal(kernel)
     assert_receive {:newbee_event, :goal_cancelled, {:goal_cancelled, :user}}
-    assert Kernel.goal(kernel) == nil
+    assert Loop.goal(kernel) == nil
 
     # 残留的 goal_next 不再触发回合
     refute_received {:newbee_event, :goal_round, {:goal_round, 3}}
@@ -162,7 +163,7 @@ defmodule Newbee.DEE.KernelGoalTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -176,9 +177,9 @@ defmodule Newbee.DEE.KernelGoalTest do
           ])
       )
 
-    assert :ok = Kernel.set_goal(kernel, "目标")
+    assert :ok = Loop.set_goal(kernel, "目标")
     assert_receive {:newbee_event, :goal_cancelled, {:goal_cancelled, :interrupted}}
-    assert Kernel.goal(kernel) == nil
+    assert Loop.goal(kernel) == nil
 
     GenServer.stop(kernel)
     GenServer.stop(ev)
@@ -190,7 +191,7 @@ defmodule Newbee.DEE.KernelGoalTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -203,7 +204,7 @@ defmodule Newbee.DEE.KernelGoalTest do
           ])
       )
 
-    assert :ok = Kernel.set_goal(kernel, "目标", max_rounds: 10)
+    assert :ok = Loop.set_goal(kernel, "目标", max_rounds: 10)
     assert_receive {:newbee_event, :goal_done, {:goal_done, "完"}}
 
     msgs = :sys.get_state(kernel).messages
@@ -218,7 +219,7 @@ defmodule Newbee.DEE.KernelGoalTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         session: false,
@@ -229,10 +230,10 @@ defmodule Newbee.DEE.KernelGoalTest do
           ])
       )
 
-    assert :ok = Kernel.set_goal(kernel, "目标", retry_delay: 0)
+    assert :ok = Loop.set_goal(kernel, "目标", retry_delay: 0)
     assert_receive {:newbee_event, :goal_retry, {:goal_retry, 1}}
     assert_receive {:newbee_event, :goal_done, {:goal_done, "重试后完成"}}
-    assert Kernel.goal(kernel) == nil
+    assert Loop.goal(kernel) == nil
 
     GenServer.stop(kernel)
     GenServer.stop(ev)
@@ -243,7 +244,7 @@ defmodule Newbee.DEE.KernelGoalTest do
     {:ok, ev} = Evaluator.start(mode: :local)
 
     {:ok, kernel} =
-      Kernel.start_link(
+      Loop.start_link(
         client: %{},
         evaluator: ev,
         client_fun:
@@ -254,11 +255,11 @@ defmodule Newbee.DEE.KernelGoalTest do
           ])
       )
 
-    assert :ok = Kernel.set_goal(kernel, "目标", max_error_retries: 2, retry_delay: 0)
+    assert :ok = Loop.set_goal(kernel, "目标", max_error_retries: 2, retry_delay: 0)
     assert_receive {:newbee_event, :goal_retry, {:goal_retry, 1}}
     assert_receive {:newbee_event, :goal_retry, {:goal_retry, 2}}
     assert_receive {:newbee_event, :goal_cancelled, {:goal_cancelled, :error}}
-    assert Kernel.goal(kernel) == nil
+    assert Loop.goal(kernel) == nil
 
     GenServer.stop(kernel)
     GenServer.stop(ev)

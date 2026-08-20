@@ -22,7 +22,7 @@ defmodule Newbee.DEE.Rules do
 
   @path Path.join(System.user_home!(), ".newbee/rules.json")
 
-  defstruct rules: []
+  defstruct rules: [], hits: %{}
 
   # ── 内建 J-Space invariants（§?）：可文本检测的 outer 纪律 ──
 
@@ -91,6 +91,20 @@ defmodule Newbee.DEE.Rules do
     GenServer.call(__MODULE__, :list)
   end
 
+  @doc "记录一次命中（JIT profiling 输入，§8.5：触发次数 × 节省的返工 token = 价签）。"
+  def hit(id) do
+    if Process.whereis(__MODULE__) do
+      GenServer.cast(__MODULE__, {:hit, to_string(id)})
+    end
+
+    :ok
+  end
+
+  @doc "命中计数（价签：触发次数）。"
+  def hits do
+    GenServer.call(__MODULE__, :hits)
+  end
+
   @doc "删除规则。"
   def remove(id) do
     GenServer.call(__MODULE__, {:remove, to_string(id)})
@@ -128,11 +142,18 @@ defmodule Newbee.DEE.Rules do
 
   def handle_call(:list, _from, state), do: {:reply, state.rules, state}
 
+  def handle_call(:hits, _from, state), do: {:reply, state.hits, state}
+
   def handle_call({:remove, id}, _from, state) do
     rules = Enum.reject(state.rules, &(&1.id == id))
     state = %{state | rules: rules}
     persist(state.rules)
     {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_cast({:hit, id}, state) do
+    {:noreply, %{state | hits: Map.update(state.hits, id, 1, &(&1 + 1))}}
   end
 
   # 内建 J-Space 规则播种：缺则补（用户删过的不会复活），有改动才落盘
