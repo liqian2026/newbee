@@ -63,7 +63,7 @@ defmodule Newbee.DEE.Rules do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @doc "注册一条规则（同 id 覆盖）。opts: source（:evolver | :user | :auto | :jspace）、scope（:all | :content | :code）。"
+  @doc "注册一条规则（同 id 覆盖）。opts: source（:adapter | :user | :auto | :jspace）、scope（:all | :content | :code）。"
   def add(id, pattern, injection, opts \\ []) do
     GenServer.call(
       __MODULE__,

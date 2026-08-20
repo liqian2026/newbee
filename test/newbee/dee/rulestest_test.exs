@@ -18,7 +18,7 @@ defmodule Newbee.DEE.RulesTest do
   end
 
   test "注册规则并命中检查" do
-    :ok = Rules.add("no-io-inspect", "IO\\.inspect", "生产代码路径不要用 IO.inspect 调试", source: :evolver)
+    :ok = Rules.add("no-io-inspect", "IO\\.inspect", "生产代码路径不要用 IO.inspect 调试", source: :adapter)
 
     assert [%{id: "no-io-inspect"}] = Rules.check("IO.inspect(x)")
     assert [] = Rules.check("IO.puts(x)")

@@ -124,7 +124,7 @@ DESIGN 的每个机制，在统一对象模型中的落位：
 | 绑定持久化 | Evaluator 能力 + Binding Continuity 协议 | §4.4 ⭐新机制 |
 | J-Space 工作协议 | `kind: workflow` 内置插件 | §6.4 |
 | 统一寻址 `Newbee.read/1` | 环境 API（Host Bridge 一部分） | §5 |
-| worker/evolver 分工 | Worker Agent / Adapter Agent | §7 |
+| worker/adapter 分工 | Worker Agent / Adapter Agent | §7 |
 | 进化档位 off/hint/background/auto | Autonomy Policy 档位 | §8.1 |
 
 ---

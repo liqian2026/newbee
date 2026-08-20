@@ -8,7 +8,7 @@ defmodule Newbee.LLM.Config do
       }
 
   - apiKey 支持 `"${ENV_VAR}"` 环境变量展开、`"${prime:NAME}"` 从 ~/.prime/agent/auth.json 取 key，密钥不必落盘。
-  - roles 对应 DESIGN §3.8 的模型角色路由（default/worker/evolver/explorer...）。
+  - roles 对应 DESIGN §3.8 的模型角色路由（default/worker/adapter/explorer...）。
   - 解析顺序：$NEWBEE_MODEL_JSON → ./model.json → ./model.local.json → ~/.newbee/model.json。
   """
 

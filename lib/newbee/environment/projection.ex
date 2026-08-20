@@ -100,7 +100,7 @@ defmodule Newbee.Environment.Projection do
     _ -> ""
   end
 
-  # 进化产出的 prompt 片段（基因 bundle / evolver 合成；每片≤500字符，最多5片）
+  # 进化产出的 prompt 片段（基因 bundle / adapter 合成；每片≤500字符，最多5片）
   defp prompt_fragments do
     dir = Path.join(System.user_home!(), ".newbee/prompts")
 

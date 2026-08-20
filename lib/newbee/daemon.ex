@@ -18,7 +18,7 @@ defmodule Newbee.Daemon do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @doc "立即触发一轮 evolver（/evolve 也走这里）。"
+  @doc "立即触发一轮 adapter 进化（/evolve 也走这里）。"
   def evolve_now do
     if Process.whereis(__MODULE__) do
       GenServer.cast(__MODULE__, :evolve_now)

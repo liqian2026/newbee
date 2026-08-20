@@ -2,7 +2,7 @@ defmodule Newbee.EventLog do
   @moduledoc """
   事件溯源日志 (DESIGN §6.5) ⭐：订阅总线，把 durable 事件追加到
   `~/.newbee/events.jsonl`。日志是进化的审计网与反事实回放的数据源：
-  任意时间点的环境状态可重建，evolver 的"证据"来自这里。
+  任意时间点的环境状态可重建，adapter 的"证据"来自这里。
 
   订阅过滤：只落盘 durable 事实（turn/*、tool/*、user/*、assistant/*、
   audit、rule_hit、progress、goal_*），不落盘高频 live 流（:text/:reasoning
@@ -47,7 +47,7 @@ defmodule Newbee.EventLog do
     end
   end
 
-  @doc "按谓词过滤事件（evolver 分析用）。"
+  @doc "按谓词过滤事件（adapter 分析用）。"
   def query(pred) when is_function(pred, 1) do
     read(100_000) |> Enum.reverse() |> Enum.filter(pred)
   end
