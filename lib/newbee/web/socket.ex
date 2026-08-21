@@ -30,6 +30,8 @@ defmodule Newbee.Web.Socket do
 
       {:ok, %{"type" => "prompt", "text" => t}} ->
         cast_session(st.sid, &WSession.prompt(&1, t))
+      {:ok, %{"type" => "promptImage", "images" => images, "text" => t}} ->
+        cast_session(st.sid, &WSession.prompt_images(&1, images || [], t || ""))
 
       _ ->
         :ok

@@ -46,12 +46,17 @@
 
     <footer id="composer">
       <div class="composer-card">
-        <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+        <div class="composer-attach">
+          <button id="attach-btn" class="icon-btn" title="上传图片（也可直接粘贴）">📎</button>
+          <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
+        </div>
+        <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行（可粘贴/上传图片）"></textarea>
         <div class="composer-actions">
           <button id="interrupt" class="btn-ghost hidden" title="中断当前 turn">■ 中断</button>
           <button id="send" class="btn-primary">发送</button>
         </div>
       </div>
+      <div id="attach-preview" class="attach-preview hidden"></div>
       <div id="statsbar" class="statsbar">
         <span id="stats-left" class="stats-left"></span>
         <span id="stats-right" class="stats-right"></span>

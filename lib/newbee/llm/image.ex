@@ -58,6 +58,85 @@ defmodule Newbee.LLM.Image do
   @doc false
   def max_bytes, do: @max_bytes
 
+  @doc """
+  由浏览器上传/粘贴获得的 data URL 直接构造多模态 user message。
+
+  校验：必须是 `data:image/<type>;base64,` 形式的 data URL，解码后不超过
+  @max_bytes（8 MiB）。返回 `{:ok, %{"role" => "user", "content" => [...]}}`，
+  content 为 [text, image_url, ...] 的 OpenAI-compatible 数组。
+  仅支持 PNG / JPEG / GIF / WebP。
+  """
+  def message_with_images([], _text), do: {:error, :invalid_images}
+
+  def message_with_images(data_urls, text) when is_list(data_urls) do
+    with {:ok, prompt} <- normalize_prompt(text),
+         {:ok, urls} <- validate_data_urls(data_urls) do
+      {:ok,
+       %{
+         "role" => "user",
+         "content" => [%{"type" => "text", "text" => prompt}] ++
+                        Enum.map(urls, fn url ->
+                          %{"type" => "image_url", "image_url" => %{"url" => url}}
+                        end)
+       }}
+    end
+  end
+
+  def message_with_images(_data_urls, _text), do: {:error, :invalid_images}
+
+  @doc "校验 data URL 列表：mime 白名单 + 解码后大小限制。返回 {:ok, [url]} | {:error, reason}。"
+  def validate_data_urls(urls) when is_list(urls) do
+    urls
+    |> Enum.reduce_while({:ok, []}, fn url, {:ok, acc} ->
+      case validate_data_url(url) do
+        {:ok, _} -> {:cont, {:ok, [url | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      other -> other
+    end
+  end
+
+  def validate_data_urls(_), do: {:error, :invalid_images}
+
+  @doc false
+  def validate_data_url(url) when is_binary(url) do
+    with {:ok, mime, b64} <- parse_data_url(url),
+         {:ok, binary} <- decode_b64(b64) do
+      if byte_size(binary) <= @max_bytes do
+        {:ok, {mime, binary}}
+      else
+        {:error, {:image_too_large, @max_bytes}}
+      end
+    else
+      :error -> {:error, {:invalid_data_url, url |> String.slice(0, 60)}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def validate_data_url(_), do: {:error, :invalid_data_url}
+
+  defp parse_data_url(url) do
+    case Regex.run(~r/^data:image\/(png|jpeg|jpg|gif|webp);base64,(.+)$/s, url) do
+      [_, "jpg" | rest] when rest != [] -> {:ok, "image/jpeg", List.last(rest)}
+      [_, type, b64] -> {:ok, "image/" <> normalize_mime_type(type), b64}
+      _ -> :error
+    end
+  end
+
+  defp normalize_mime_type("jpg"), do: "jpeg"
+  defp normalize_mime_type(t), do: t
+
+  defp decode_b64(b64) do
+    try do
+      {:ok, Base.decode64!(b64)}
+    rescue
+      _ -> {:error, :bad_base64}
+    end
+  end
+
   defp normalize_prompt(nil), do: {:ok, @default_prompt}
 
   defp normalize_prompt(prompt) when is_binary(prompt) do
