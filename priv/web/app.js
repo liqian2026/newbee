@@ -136,6 +136,7 @@ const flow = $("flow");
     currentTool: null,        // 进行中的 tool 卡片
     timing: { llmMs: 0, toolMs: 0, llmStart: null, toolStart: null,
               ftSum: 0, ftCount: 0, ftRecorded: false, outTok: 0 },
+    attachments: [],   // [{name, type, dataUrl, size}]
   };
 
   // ── 会话统计持久化（按 sessionId 存 localStorage，刷新/重连后保留）──
@@ -784,7 +785,10 @@ case "goal_round": break;
   function renderHistory(msgs) {
     msgs.forEach((m) => {
       if (!m) return;
-      if (m.role === "user") line("user", m.content);
+      if (m.role === "user") {
+        if (m.images && m.images.length) renderUserLine(m.content, m.images);
+        else line("user", m.content);
+      }
       else if (m.role === "assistant") {
         if (m.reasoning) {
           const d = el("msg-reasoning", "");
@@ -803,16 +807,89 @@ case "goal_round": break;
     scrollBottom();
   }
 
+  // ── 图片附件（上传 / 粘贴 / 预览）──
+  const MAX_ATTACH = 4;
+  const MAX_FILE = 8 * 1024 * 1024; // 8 MiB，与服务端 @max_bytes 一致
+
+  function addAttachment(file) {
+    if (state.busy) { line("notice", "忙碌中，稍后再添加图片"); return; }
+    if (!file) return;
+    if (!file.type || !file.type.startsWith("image/")) { line("notice", "仅支持图片文件"); return; }
+    if (file.size > MAX_FILE) { line("notice", "图片过大（>8MiB）：" + file.name); return; }
+    if (state.attachments.length >= MAX_ATTACH) { line("notice", "最多同时 " + MAX_ATTACH + " 张图片"); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (state.attachments.length >= MAX_ATTACH) { line("notice", "最多同时 " + MAX_ATTACH + " 张图片"); return; }
+      state.attachments.push({ name: file.name || "image.png", type: file.type, dataUrl: reader.result, size: file.size });
+      renderAttachPreview();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function renderAttachPreview() {
+    const box = $("attach-preview");
+    if (!box) return;
+    if (state.attachments.length === 0) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+    box.classList.remove("hidden");
+    box.innerHTML = "";
+    state.attachments.forEach((a, i) => {
+      const item = document.createElement("div");
+      item.className = "attach-item";
+      const img = document.createElement("img");
+      img.src = a.dataUrl; img.alt = a.name;
+      const cap = document.createElement("span");
+      cap.className = "attach-name"; cap.textContent = a.name;
+      const rm = document.createElement("button");
+      rm.className = "attach-remove"; rm.textContent = "×"; rm.title = "移除";
+      rm.onclick = () => { state.attachments.splice(i, 1); renderAttachPreview(); };
+      item.appendChild(img); item.appendChild(cap); item.appendChild(rm);
+      box.appendChild(item);
+    });
+  }
+
+  function clearAttachments() {
+    state.attachments = [];
+    renderAttachPreview();
+  }
+
+  // 用户行回显：文本 + 图片缩略图
+  function renderUserLine(text, images) {
+    const d = el("msg-user", "");
+    if (text) {
+      const span = document.createElement("div");
+      span.textContent = text;
+      d.appendChild(span);
+    }
+    if (images && images.length) {
+      const wrap = document.createElement("div");
+      wrap.className = "msg-user-images";
+      images.forEach(url => {
+        const img = document.createElement("img");
+        img.src = url;
+        wrap.appendChild(img);
+      });
+      d.appendChild(wrap);
+    }
+    scrollBottom();
+  }
+
+
   // ── 发送 ──
   async function send() {
     const text = input.value.trim();
-    if (!text || !state.sid) return;
+    const images = state.attachments.map(x => x.dataUrl);
+    if ((!text && images.length === 0) || !state.sid) return;
     input.value = "";
     autoGrow();
-    line("user", text);
+    // 回显：文本 + 图片
+    renderUserLine(text, images);
     state.busy = true; setBusy(true);
+    clearAttachments();
     try {
-      if (state.ws && state.ws.readyState === 1) {
+      if (images.length > 0) {
+        // 多模态：必须走 HTTP（data URL 大，走 ws 帧没问题但保持单一路径）
+        await rpc("session.promptImage", { sessionId: state.sid, images, text });
+      } else if (state.ws && state.ws.readyState === 1) {
         state.ws.send(JSON.stringify({ type: "prompt", text }));
       } else {
         await rpc("session.prompt", { sessionId: state.sid, text });
@@ -981,6 +1058,22 @@ case "goal_round": break;
   };
 
   $("send").onclick = send;
+  $("attach-btn").onclick = () => $("file-input").click();
+  $("file-input").addEventListener("change", (e) => {
+    [...(e.target.files || [])].forEach(addAttachment);
+    e.target.value = "";
+  });
+  input.addEventListener("paste", (e) => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    let hasImage = false;
+    for (const it of items) {
+      if (it.kind === "file" && it.type.startsWith("image/")) {
+        const f = it.getAsFile();
+        if (f) { addAttachment(f); hasImage = true; }
+      }
+    }
+    if (hasImage) e.preventDefault();
+  });
   $("interrupt").onclick = interrupt;
   $("new-session").onclick = newSession;
   $("perm-yes").onclick = () => permission(true);

@@ -85,6 +85,9 @@ defmodule Newbee.Web.Session do
 
   @doc "异步提交用户输入；事件经 Bus 下行，终态也以事件通知（不阻塞调用者）。"
   def prompt(pid, text), do: GenServer.cast(pid, {:prompt, text})
+  @doc "异步提交多模态输入（多张 data URL 图片 + 文本）。"
+  def prompt_images(pid, data_urls, text),
+    do: GenServer.cast(pid, {:prompt_images, data_urls, text})
 
   @doc "非阻塞中断当前 turn。"
   def interrupt(pid), do: GenServer.cast(pid, :interrupt)
@@ -245,7 +248,15 @@ defmodule Newbee.Web.Session do
 
   @impl true
   def handle_cast({:prompt, text}, %{busy: true} = st) do
-    {:noreply, %{st | queue: :queue.in(text, st.queue)}}
+    {:noreply, %{st | queue: :queue.in({:text, text}, st.queue)}}
+  end
+
+  def handle_cast({:prompt_images, data_urls, text}, %{busy: true} = st) do
+    {:noreply, %{st | queue: :queue.in({:images, data_urls, text}, st.queue)}}
+  end
+
+  def handle_cast({:prompt_images, data_urls, text}, st) do
+    {:noreply, dispatch_images(st, data_urls, text)}
   end
 
   def handle_cast({:prompt, text}, st) do
@@ -324,7 +335,9 @@ defmodule Newbee.Web.Session do
     broadcast_turn_end(st.sid, result)
 
     case :queue.out(st.queue) do
-      {{:value, next}, q} -> {:noreply, do_submit(%{st | queue: q}, next)}
+      {{:value, {:text, t}}, q} -> {:noreply, do_submit(%{st | queue: q}, t)}
+      {{:value, {:images, urls, t}}, q} -> {:noreply, do_submit_images(%{st | queue: q}, urls, t)}
+      {{:value, other}, q} -> {:noreply, do_submit(%{st | queue: q}, other)}
       {:empty, _} -> {:noreply, %{st | busy: false}}
     end
   end
@@ -385,7 +398,31 @@ defmodule Newbee.Web.Session do
     %{st | busy: true}
   end
 
-  # DEE 绑定数：查本会话 kernel 注册的独立 evaluator（会话级隔离）
+  defp dispatch_images(st, data_urls, text) do
+    do_submit_images(st, data_urls, text)
+  end
+
+  defp do_submit_images(st, data_urls, text) do
+    parent = self()
+    kernel = st.kernel
+
+    Task.start(fn ->
+      result =
+        try do
+          Newbee.Agent.Loop.submit_images(kernel, data_urls, text)
+        rescue
+          e -> {:error, Exception.message(e)}
+        catch
+          :exit, r -> {:error, "exit: " <> inspect(r)}
+        end
+
+      send(parent, {:turn_finished, result})
+    end)
+
+    %{st | busy: true}
+  end
+
+  # DEE 绑定数：优先 EvaluatorPool（generation 路由），否则具名 Evaluator
   defp bindings_count(st) do
     task =
       Task.async(fn ->

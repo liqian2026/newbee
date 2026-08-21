@@ -16,7 +16,8 @@ defmodule Newbee.Web.Api do
   plug(Plug.Parsers,
     parsers: [:json],
     pass: ["application/json"],
-    json_decoder: Jason
+    json_decoder: Jason,
+    length: 20_000_000
   )
 
   plug(:dispatch)
@@ -105,6 +106,18 @@ get "/health" do
   defp dispatch_rpc("session.prompt", %{"sessionId" => sid, "text" => text}) do
     with {:ok, pid} <- find_session(sid) do
       Newbee.Web.Session.prompt(pid, text)
+      {:ok, %{accepted: true}}
+    end
+  end
+
+  defp dispatch_rpc("session.promptImage", %{"sessionId" => sid, "images" => images, "text" => text}) do
+    with {:ok, pid} <- find_session(sid) do
+      if images == nil or images == [] do
+        Newbee.Web.Session.prompt(pid, text || "")
+      else
+        Newbee.Web.Session.prompt_images(pid, images, text || "")
+      end
+
       {:ok, %{accepted: true}}
     end
   end
@@ -346,6 +359,21 @@ get "/health" do
   # transcript 消息 → 前端可渲染结构
   defp history_msg(%{"role" => "user", "content" => c}) when is_binary(c),
     do: %{role: "user", content: c}
+
+  defp history_msg(%{"role" => "user", "content" => content}) when is_list(content) do
+    text =
+      content
+      |> Enum.filter(&is_map/1)
+      |> Enum.find_value(fn part -> if part["type"] == "text", do: part["text"] || "" end) || ""
+
+    images =
+      content
+      |> Enum.filter(&is_map/1)
+      |> Enum.map(fn part -> if part["type"] == "image_url", do: get_in(part, ["image_url", "url"]) end)
+      |> Enum.reject(&is_nil/1)
+
+    %{role: "user", content: text, images: images}
+  end
 
   defp history_msg(%{"role" => "assistant"} = m) do
     calls =

@@ -39,6 +39,10 @@ defmodule Newbee.Agent.Loop do
 
   @doc "提交一段用户输入，同步执行整个 turn，返回 {:done, summary} | {:ask, q} | {:text, body} | {:error, e}"
   def submit(kernel, text), do: GenServer.call(kernel, {:submit, text}, :infinity)
+  @doc "提交多张 data URL 图片 + 文本给视觉模型分析（WebUI 多模态入口）。"
+  def submit_images(kernel, data_urls, text \\ ""),
+    do: GenServer.call(kernel, {:submit_images, data_urls, text}, :infinity)
+
   @doc "提交本地图片给视觉模型分析。"
   def submit_image(kernel, path, prompt \\ nil), do: GenServer.call(kernel, {:submit_image, path, prompt}, :infinity)
   @doc "设定自主目标（/goal）：注入目标并异步启动自主循环，直到达成/取消/达上限。"
@@ -213,6 +217,20 @@ defmodule Newbee.Agent.Loop do
 
   def handle_call({:submit_image, path, prompt}, _from, state) do
     case Newbee.LLM.Image.message(path, prompt) do
+      {:ok, message} ->
+        submit_message(state, message)
+
+      {:error, reason} ->
+        {:reply, {:error, {:image, reason}}, state}
+    end
+  end
+
+  def handle_call({:submit_images, data_urls, _text}, _from, %{client: %{vision: false}} = state) do
+    {:reply, {:error, {:image, :vision_not_supported}}, state}
+  end
+
+  def handle_call({:submit_images, data_urls, text}, _from, state) do
+    case Newbee.LLM.Image.message_with_images(data_urls, text) do
       {:ok, message} ->
         submit_message(state, message)
 
