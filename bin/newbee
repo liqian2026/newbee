@@ -3,6 +3,7 @@
 # 用法：./bin/newbee [子命令] [参数]
 #   ./bin/newbee            → mix newbee（CLI）
 #   ./bin/newbee tui        → mix newbee.tui（全屏 TUI；自动 raw 模式 + 尺寸探测）
+#   ./bin/newbee web [port] → mix newbee.web（浏览器 WebUI，默认 4173）
 #   ./bin/newbee daemon     → mix newbee.daemon
 #   ./bin/newbee bench      → mix newbee.bench
 #   ./bin/newbee <args>     → mix newbee <args>（透传，如 ./bin/newbee -r <id>）
@@ -61,6 +62,12 @@ case "${1:-}" in
     fi
     ID=$(basename "$LATEST" .jsonl)
     exec mix newbee -r "$ID"
+    ;;
+
+  web)
+    # ── 浏览器 WebUI ──
+    shift
+    exec mix newbee.web "$@"
     ;;
 
   bench)

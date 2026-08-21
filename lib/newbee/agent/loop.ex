@@ -494,6 +494,7 @@ defmodule Newbee.Agent.Loop do
           {:halt, {:halt, {:interrupted, nil}, st}}
         else
           emit(st, {:tool_start, "run_elixir(fallback)", "", code})
+          tool_started_at = System.monotonic_time(:millisecond)
           eval_result = Newbee.DEE.Evaluator.eval(st.evaluator, code)
 
           if Newbee.LLM.Client.interrupted?() or eval_interrupted?(eval_result) do
@@ -501,7 +502,8 @@ defmodule Newbee.Agent.Loop do
             {:halt, {:halt, {:interrupted, nil}, st}}
           else
             rendered = Newbee.DEE.Result.render(eval_result)
-            emit(st, {:tool_result, "run_elixir", rendered})
+            duration_ms = System.monotonic_time(:millisecond) - tool_started_at
+            emit(st, {:tool_result, "run_elixir", rendered, duration_ms})
             tool_msg = %{"role" => "tool", "tool_call_id" => "fallback-#{step}", "content" => rendered}
             {:cont, push_msg(st, tool_msg), acc ++ [eval_result]}
           end
@@ -817,6 +819,7 @@ defmodule Newbee.Agent.Loop do
   defp execute_run_elixir(state, call, code, title) do
     audit_dangerous(code)
     emit(state, {:tool_start, "run_elixir", title, code})
+    tool_started_at = System.monotonic_time(:millisecond)
     Newbee.DebugLog.log(:tool, "eval start #{title}")
 
     eval_result =
@@ -846,7 +849,8 @@ defmodule Newbee.Agent.Loop do
         Enum.each(hints, &emit(state, {:worker_hint, &1}))
       end
 
-      emit(state, {:tool_result, "run_elixir", rendered})
+      duration_ms = System.monotonic_time(:millisecond) - tool_started_at
+      emit(state, {:tool_result, "run_elixir", rendered, duration_ms})
 
       # §12 结构隔离：工具输出是不可信内容，包 envelope（origin/hash/trust）
       # 后再进 tool 消息——永不拼接成 system/user 角色

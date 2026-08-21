@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>newbee</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand"><span class="logo">🐝</span><span class="name">newbee</span></div>
+    <button id="new-session" class="btn-primary" style="border-radius:12px">+ 新会话</button>
+    <div id="session-list" class="session-list"></div>
+    <div class="sidebar-foot"><div id="model-label" class="model-label" title="点击切换模型"></div></div>
+  </aside>
+
+  <main id="main">
+    <header id="topbar">
+      <span id="session-title" class="session-title">newbee</span>
+      <span id="status-dot" class="dot" title="状态"></span>
+      <span id="usage-label" class="usage"></span>
+      <button id="theme-toggle" title="切换明暗主题">☀</button>
+    </header>
+
+    <div id="transcript" class="transcript">
+      <div id="flow" class="flow"></div>
+      <button id="to-bottom" class="to-bottom" title="回到底部">↓</button>
+    </div>
+
+    <div id="permission-bar" class="permission-bar hidden">
+      <span class="perm-text">⚠ 允许执行？</span>
+      <pre id="perm-preview" class="perm-preview"></pre>
+      <button id="perm-yes" class="btn-allow">允许</button>
+      <button id="perm-no" class="btn-deny">拒绝</button>
+    </div>
+
+    <footer id="composer">
+      <div class="composer-card">
+        <textarea id="input" rows="1" placeholder="输入消息，Enter 发送"></textarea>
+        <div class="composer-actions">
+          <button id="interrupt" class="btn-ghost hidden" title="中断当前 turn">■ 中断</button>
+          <button id="send" class="btn-primary">发送</button>
+        </div>
+      </div>
+      <div id="statsbar" class="statsbar">
+        <span id="stats-left" class="stats-left"></span>
+        <span id="stats-right" class="stats-right"></span>
+      </div>
+    </footer>
+  </main>
+</div>
+
+<div id="model-modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-title">选择模型</div>
+    <div id="model-options" class="model-options"></div>
+    <button class="btn-ghost" id="model-close">关闭</button>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

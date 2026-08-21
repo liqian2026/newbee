@@ -51,10 +51,13 @@ defmodule Newbee.History do
   defp reasoning_lines(nil), do: []
   defp reasoning_lines(""), do: []
 
+  # 历史回放的 reasoning 收敛为单行 Think 摘要（对齐实时渲染的折叠态）：
+  # ▸ Think (N 行): 首行…  —— 回放不做可展开交互，避免刷屏。
   defp reasoning_lines(text) do
-    text
-    |> String.split("\n")
-    |> Enum.map(fn l -> "\e[2m" <> l <> "\e[0m" end)
+    ls = String.split(text, "\n", trim: true)
+    n = length(ls)
+    first = ls |> List.first() |> Kernel.||("") |> String.trim() |> String.slice(0, 60)
+    ["\e[36m▸\e[0m \e[1mThink\e[0m \e[2m(#{n} 行): " <> first <> "\e[0m"]
   end
 
   defp content_lines(nil), do: []

@@ -39,6 +39,8 @@ defmodule Newbee.TUI do
             render_pending: false,
             tool_blocks: %{},
             last_block_id: nil,
+            think_block_id: nil,
+            think_lines: %{},
             show_reasoning: true,
             expanded: %{},
             usage: %{},
@@ -846,6 +848,7 @@ defmodule Newbee.TUI do
     - 其余 topic 渲染成一行后 push_line
   """
   def render_event(%__MODULE__{} = state, :text, {:text, delta}) do
+    state = finalize_think_block(state)
     {ft_sum_ms, ft_count, awaiting} =
       if state.awaiting_first_token and state.llm_step_start do
         now = System.monotonic_time(:millisecond)
@@ -858,21 +861,21 @@ defmodule Newbee.TUI do
     render_text_delta(state, delta)
   end
 
+  # 思考流（对齐 dsh ReasoningRow）：默认折叠为单行摘要，Ctrl-O 展开全文。
+  # 流式时单行原地更新「思考中…最新一行」；文本/工具/终态到来时收敛为
+  # 「▸ Think (N 行): 首行」。/reasoning off 时完全不显示（但仍累积进块）。
   def render_event(%__MODULE__{} = state, :reasoning, {:reasoning, delta}) do
     state = flush_text_buffer(state)
+    state = ensure_think_block(state)
+    id = state.think_block_id
+    block = state.tool_blocks[id]
+    acc = (block.result || "") <> delta
+    state = struct!(state, tool_blocks: Map.put(state.tool_blocks, id, %{block | result: acc}))
 
-    if not state.show_reasoning do
-      state
+    if state.show_reasoning do
+      replace_think_line(state, think_running_line(acc))
     else
-      if state.streaming and state.stream_kind == :reasoning do
-        append_text(state, delta)
-      else
-        state
-        |> push_line("")
-        |> Map.put(:streaming, true)
-        |> Map.put(:stream_kind, :reasoning)
-        |> append_text(delta, "\e[2m")
-      end
+      state
     end
   end
 
@@ -908,6 +911,7 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :tool_start, {:tool_start, name, title, code}) do
+    state = finalize_think_block(state)
     now = System.monotonic_time(:millisecond)
 
     {llm_ms, llm_step_start} =
@@ -1055,7 +1059,7 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :turn_end, _) do
-    state = flush_text_buffer(state)
+    state = state |> flush_text_buffer() |> finalize_think_block()
     state = refresh_bindings(state)
 
     dur_str =
@@ -1169,6 +1173,63 @@ defmodule Newbee.TUI do
   defp to_num(n) when is_number(n), do: n
   defp to_num(_), do: nil
 
+  # ── 思考块（Think disclosure，对齐 dsh ReasoningRow）──
+
+  # 确保有一个进行中的思考块：复用 tool_blocks 存储，kind: :think，
+  # result 累积思考全文。transcript 只留一行摘要（占位行）。
+  defp ensure_think_block(%__MODULE__{think_block_id: id} = state) when is_integer(id), do: state
+
+  defp ensure_think_block(%__MODULE__{} = state) do
+    id = :erlang.unique_integer([:positive])
+    block = %{id: id, kind: :think, name: "think", title: "", code: "", result: "", warnings: nil, started_at: System.monotonic_time(:millisecond)}
+
+    state = %{state | tool_blocks: Map.put(state.tool_blocks, id, block), last_block_id: id, think_block_id: id}
+
+    if state.show_reasoning do
+      state = push_line(state, think_running_line(""))
+      %{state | think_lines: Map.put(state.think_lines, id, length(state.lines) - 1)}
+    else
+      state
+    end
+  end
+
+  # 原地更新思考摘要行
+  defp replace_think_line(%__MODULE__{think_block_id: id} = state, line) do
+    case Map.get(state.think_lines, id) do
+      nil -> state
+      idx -> if idx < length(state.lines), do: %{state | lines: List.replace_at(state.lines, idx, line)}, else: state
+    end
+  end
+
+  defp think_running_line(acc) do
+    latest = acc |> String.trim_trailing() |> String.split("\n") |> List.last() |> String.trim()
+    latest = if latest == "", do: "…", else: String.slice(latest, 0, 60)
+    "\e[36m▸\e[0m \e[1mThink\e[0m \e[2m思考中…" <> latest <> "\e[0m"
+  end
+
+  defp think_final_line(acc) do
+    ls = String.split(acc, "\n", trim: true)
+    n = length(ls)
+    first = ls |> List.first() |> Kernel.||("") |> String.trim() |> String.slice(0, 60)
+    "\e[36m▸\e[0m \e[1mThink\e[0m \e[2m(#{n} 行): " <> first <> "\e[0m \e[2m[Ctrl-O 展开]\e[0m"
+  end
+
+  # 收敛：思考块结束（文本/工具/终态到来），摘要行从「思考中」切到首行摘要。
+  defp finalize_think_block(%__MODULE__{think_block_id: nil} = state), do: state
+
+  defp finalize_think_block(%__MODULE__{think_block_id: id} = state) do
+    acc = get_in(state.tool_blocks, [id, Access.key(:result)]) || ""
+
+    state =
+      if state.show_reasoning and String.trim(acc) != "" do
+        replace_think_line(state, think_final_line(acc))
+      else
+        state
+      end
+
+    %{state | think_block_id: nil}
+  end
+
   # ── 工具块 ──
 
   # Ctrl-O 展开/折叠工具块：完整代码 + 完整结果追加进 transcript，再按收回（§5.1 折叠块）。
@@ -1278,7 +1339,13 @@ defmodule Newbee.TUI do
             if s > start, do: Map.put(acc, id, {s - count, c}), else: Map.put(acc, id, {s, c})
           end)
 
-        %{state | lines: lines, expanded: expanded}
+        # 删除区间之后若有思考块占位行，其索引同步前移 count
+        think_lines =
+          Enum.reduce(state.think_lines, %{}, fn {id, tidx}, acc ->
+            if tidx > start, do: Map.put(acc, id, tidx - count), else: Map.put(acc, id, tidx)
+          end)
+
+        %{state | lines: lines, expanded: expanded, think_lines: think_lines}
     end
   end
 
@@ -1536,7 +1603,7 @@ defmodule Newbee.TUI do
     q = length(state.pending_inputs)
     qpart = if q > 0, do: " q:#{q}", else: ""
 
-    left = "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())}\e[0m"
+    left = "[2m#{dots}#{state.client.model} · newbee[0m"
     right_core = "bind:#{bindings}#{qpart} #{Newbee.Environment.Autonomy.get()}"
     right = "\e[2m#{page_hint}\e[0m#{status_badge}\e[2m #{right_core}\e[0m"
 

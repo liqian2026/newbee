@@ -1,0 +1,686 @@
+/* newbee WebUI 前端（移植 dsh client/web 会话 shell 语义，无构建依赖原生 JS）。
+ * 信道：REST RPC（POST /api/<method>）+ WebSocket 事件下行（/ws?session=）。 */
+(() => {
+  // ── Markdown 渲染器（零依赖，覆盖 newbee.Markdown 同语法集，输出安全 HTML）──
+  // 语法：ATX 标题、围栏代码块、引用、无序/有序/任务列表、水平线、表格、
+  // 行内 **bold** *italic* `code` [text](url) ~~del~~。全部经 escapeHtml 防注入。
+  function renderMarkdown(text) {
+    const lines = String(text || "").split(/\r?\n/);
+    const out = [];
+    let i = 0;
+    let listStack = null; // {type:'ul'|'ol', html:[]}
+
+    const closeList = () => {
+      if (listStack) { out.push(`<${listStack.type}>${listStack.html.join("")}</${listStack.type}>`); listStack = null; }
+    };
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // 围栏代码块
+      const fence = line.match(/^\s*(`{3})([^\s`]*)\s*$/);
+      if (fence) {
+        closeList();
+        const lang = fence[2] || "";
+        const body = [];
+        i++;
+        while (i < lines.length && !/^\s*`{3}\s*$/.test(lines[i])) { body.push(lines[i]); i++; }
+        i++; // 跳过闭合 ```
+        out.push(
+          `<pre class="md-code"><div class="md-code-head"><span>${escapeHtml(lang || "code")}</span>` +
+          `<button class="md-copy" data-code="${escapeHtml(body.join("\n")).replace(/"/g, "&quot;")}">复制</button></div>` +
+          `<code>${escapeHtml(body.join("\n"))}</code></pre>`
+        );
+        continue;
+      }
+
+      // 表格：当前行含 | 且下一行是分隔行
+      if (line.includes("|") && i + 1 < lines.length && /^\s*\|?[\s:\-|]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes("-")) {
+        closeList();
+        const header = splitRow(line);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") { rows.push(splitRow(lines[i])); i++; }
+        const th = header.map(c => `<th>${inline(c)}</th>`).join("");
+        const trs = rows.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join("")}</tr>`).join("");
+        out.push(`<table class="md-table"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`);
+        continue;
+      }
+
+      // 标题
+      const h = line.match(/^(\#{1,6})\s+(.*)$/);
+      if (h) { closeList(); const lv = h[1].length; out.push(`<h${lv} class="md-h">${inline(h[2])}</h${lv}>`); i++; continue; }
+
+      // 水平线
+      if (/^\s*-{3,}\s*$/.test(line)) { closeList(); out.push('<hr class="md-hr" />'); i++; continue; }
+
+      // 引用
+      const q = line.match(/^>\s?(.*)$/);
+      if (q) { closeList(); out.push(`<blockquote class="md-quote">${inline(q[1])}</blockquote>`); i++; continue; }
+
+      // 任务列表
+      const task = line.match(/^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$/);
+      if (task) {
+        if (!listStack || listStack.type !== "ul") { closeList(); listStack = { type: "ul", html: [] }; }
+        const checked = task[2].toLowerCase() === "x" ? "checked" : "";
+        listStack.html.push(`<li class="md-task"><input type="checkbox" disabled ${checked} /> ${inline(task[3])}</li>`);
+        i++; continue;
+      }
+
+      // 无序列表
+      const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+      if (ul) {
+        if (!listStack || listStack.type !== "ul") { closeList(); listStack = { type: "ul", html: [] }; }
+        listStack.html.push(`<li>${inline(ul[1])}</li>`);
+        i++; continue;
+      }
+
+      // 有序列表
+      const ol = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
+      if (ol) {
+        if (!listStack || listStack.type !== "ol") { closeList(); listStack = { type: "ol", html: [] }; }
+        listStack.html.push(`<li>${inline(ol[2])}</li>`);
+        i++; continue;
+      }
+
+      // 空行
+      if (line.trim() === "") { closeList(); i++; continue; }
+
+      // 普通段落
+      closeList();
+      out.push(`<p class="md-p">${inline(line)}</p>`);
+      i++;
+    }
+    closeList();
+    return out.join("\n");
+  }
+
+  function splitRow(line) {
+    return line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(c => c.trim());
+  }
+
+  // 行内渲染：**bold** *italic* `code` [text](url) ~~del~~，先转义再标记
+  function inline(text) {
+    let t = escapeHtml(text);
+    t = t.replace(/`([^`\n]+)`/g, '<code class="md-inline">$1</code>');
+    t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    t = t.replace(/\*([^*\s][^*]*)\*/g, "<em>$1</em>");
+    t = t.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+    t = t.replace(/\[([^\]\n]*)\]\(([^)\n]*)\)/g, '<a class="md-link" href="$2" target="_blank" rel="noopener">$1</a>');
+    return t;
+  }
+
+  const $ = (id) => document.getElementById(id);
+const transcript = $("transcript");
+const flow = $("flow");
+  const input = $("input");
+  // ── 主题（黑/白切换，持久 localStorage，默认跟随系统）──
+  function applyTheme(t, persist) {
+    document.documentElement.setAttribute("data-theme", t);
+    const btn = $("theme-toggle");
+    if (btn) { btn.textContent = t === "light" ? "☾" : "☀"; btn.title = t === "light" ? "切换到暗色" : "切换到亮色"; }
+    if (persist) localStorage.setItem("newbee.theme", t);
+  }
+  function initTheme() {
+    const saved = localStorage.getItem("newbee.theme");
+    const sys = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    applyTheme(saved || sys, false);
+  }
+
+  const state = {
+    sid: localStorage.getItem("newbee.sid") || null,
+    ws: null,
+    busy: false,
+    currentAssistant: null,   // 流式 assistant 行
+    currentReasoning: null,   // 流式 reasoning disclosure 元素
+    reasoningAcc: "",          // 当前 reasoning 块累计文本（摘要/展开用）
+    reasoningOpen: false,      // 当前 reasoning 块是否手动展开
+    currentTool: null,        // 进行中的 tool 卡片
+    timing: { llmMs: 0, toolMs: 0, llmStart: null, toolStart: null,
+              ftSum: 0, ftCount: 0, ftRecorded: false, outTok: 0 },
+  };
+
+  // ── RPC ──
+  let rpcSeq = 0;
+  async function rpc(method, payload) {
+    const rpcId = `web-${Date.now()}-${rpcSeq++}`;
+    const res = await fetch(`/api/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rpcId, method, payload }),
+    });
+    const body = await res.json();
+    if (body.result && "ok" in body.result) return body.result.ok;
+    const err = body.result && body.result.error;
+    throw new Error(err ? err.message : `rpc ${method} failed`);
+  }
+
+  // ── WebSocket ──
+  // 防重复连接：同一时间只保留一条活跃连接。重连定时器可取消，
+  // 且 onclose 只在“这条 ws 仍是当前连接”时才排重连——避免 resume()
+  // 主动 close 旧连接后，旧 onclose 又排一个 connect() 造成多连接并存、
+  // 同一事件被多条连接各推一份而在前端重复渲染。
+  let reconnectTimer = 0;
+  function connect() {
+    if (!state.sid) return;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = 0; }
+    if (state.ws) {
+      // 让旧连接的 onclose 失效，避免它再排重连
+      state.ws.onclose = null;
+      try { state.ws.close(); } catch (e) {}
+      state.ws = null;
+    }
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws?session=${encodeURIComponent(state.sid)}`);
+    state.ws = ws;
+    ws.onmessage = (e) => {
+      if (ws !== state.ws) return; // 过期连接的事件直接丢
+      const frame = JSON.parse(e.data);
+      if (frame.type === "event") onEvent(frame.kind, frame.payload || {});
+    };
+    ws.onclose = () => {
+      if (ws !== state.ws) return; // 过期连接不重连
+      if (state.ws === ws) state.ws = null;
+      reconnectTimer = setTimeout(connect, 1500);
+    };
+  }
+
+  // 耗时统计（对齐 TUI）：LLM 段 / 工具段 / 首 token / 速率
+  function trackTiming(kind, p) {
+    const t = state.timing, now = Date.now();
+    switch (kind) {
+      case "text":
+      case "reasoning":
+        if (t.llmStart === null) t.llmStart = now;
+        if (t.llmStart !== null && !t.ftRecorded) { t.ftSum += now - t.llmStart; t.ftCount++; t.ftRecorded = true; }
+        break;
+      case "tool_start":
+        if (t.llmStart !== null) { t.llmMs += now - t.llmStart; t.llmStart = null; }
+        t.toolStart = now; t.ftRecorded = false;
+        break;
+      case "tool_result":
+      case "tool_error":
+        if (t.toolStart !== null) { t.toolMs += now - t.toolStart; t.toolStart = null; }
+        t.llmStart = now;
+        break;
+      case "usage":
+        const u = p.usage || {};
+        t.outTok += u.completion_tokens || 0;
+        break;
+      case "turn_end":
+      case "done": case "ask": case "error": case "interrupted":
+        if (t.llmStart !== null) { t.llmMs += now - t.llmStart; t.llmStart = null; }
+        if (t.toolStart !== null) { t.toolMs += now - t.toolStart; t.toolStart = null; }
+        break;
+    }
+  }
+  function fmtDur(ms) {
+    const s = ms / 1000;
+    if (s < 60) return (Math.round(s * 10) / 10) + "s";
+    const w = Math.round(s);
+    return Math.floor(w / 60) + "m" + (w % 60) + "s";
+  }
+
+  // ── 事件 → 渲染 ──
+  function onEvent(kind, p) {
+    trackTiming(kind, p);
+    switch (kind) {
+      case "text": appendStream(p.delta); break;
+      case "reasoning": appendReasoning(p.delta); break;
+      case "tool_start": toolStart(p); break;
+      case "tool_result": toolResult(p.text, true, p.duration_ms); break;
+      case "tool_error": toolResult(p.text, false); break;
+case "done": finishTurn(); line("done", p.summary, true); break;
+      case "ask": finishTurn(); line("ask", p.question); break;
+      case "text_end": finishTurn(); break;
+      case "error": finishTurn(); line("error", p.message); break;
+      case "interrupted": finishTurn(); line("notice", "已中断"); break;
+      case "permission_ask": showPermission(p.preview); break;
+      case "usage": setUsage(p.usage); break;
+      case "compacted": line("notice", `历史已压缩 ${p.count} 条`); break;
+      case "model_switched": $("model-label").textContent = p.model; break;
+      case "goal_start": line("notice", `目标开始: ${p.text}`); break;
+      case "goal_done": line("notice", `目标达成: ${p.summary || ""}`); break;
+      case "goal_cancelled": line("notice", `目标取消 (${p.reason || ""})`); break;
+      case "rule_hit":
+        (p.hits || []).forEach(h => line("notice", `⚑ 沉睡规则命中 [${h.id}] ${h.injection}`));
+        break;
+case "advisor_note": line("notice", `◉ advisor: ${p.text}`); break;
+case "notice": line("notice", p.text); break;
+case "shell_result": shellResult(p); break;
+case "file_diff": fileDiff(p); break;
+case "turn_long": line("notice", `本轮较长：${p.step || ""} 步`); break;
+case "tool_warnings": line("notice", `工具警告: ${(p.warnings || []).join("; ")}`); break;
+case "final_check": line("notice", `最终检查: ${p.score ?? ""}`); break;
+case "final_check_low": line("notice", `质量分偏低: ${p.score ?? ""}`); break;
+case "progress": break;
+case "progress_stall": line("notice", "进度停滞，模型在重试"); break;
+case "goal_retry": line("notice", `目标重试 (${p.retries || 0})`); break;
+case "goal_limit": line("notice", `目标达轮数上限 (${p.max || ""})`); break;
+case "goal_round": break;
+      case "turn_end": finishTurn(); break;
+      default: break;
+    }
+    scrollBottom();
+  }
+
+  function finishTurn() {
+    state.busy = false;
+    if (state.currentAssistant) {
+      state.currentAssistant.innerHTML = renderMarkdown(streamAcc);
+      bindCopyButtons(state.currentAssistant);
+    }
+    state.currentAssistant = null;
+    state.currentReasoning = null;
+    state.currentTool = null;
+    setBusy(false);
+    hidePermission();
+    clearTurnStatus();
+    document.querySelectorAll(".msg-reasoning.running").forEach(x => x.classList.remove("running"));
+    streamAcc = "";
+  }
+
+  function el(cls, text, md) {
+    const d = document.createElement("div");
+    d.className = `msg ${cls}`;
+    if (text) { if (md) d.innerHTML = renderMarkdown(text); else d.textContent = text; }
+    flow.appendChild(d);
+    return d;
+  }
+
+  function line(kind, text, md) {
+    el(`msg-${kind}`, text || "", md);
+    scrollBottom();
+  }
+
+  let streamAcc = "";
+  let streamRaf = 0;
+  function appendStream(delta) {
+    state.currentReasoning = null;
+    if (!state.currentAssistant) {
+      state.busy = true; setBusy(true);
+      clearTurnStatus();
+      state.currentAssistant = el("msg-assistant", "");
+    }
+    streamAcc += delta || "";
+    state.currentAssistant.dataset.raw = streamAcc;
+    if (!streamRaf) {
+      streamRaf = requestAnimationFrame(() => {
+        streamRaf = 0;
+        if (state.currentAssistant) {
+          state.currentAssistant.innerHTML = renderMarkdown(streamAcc);
+          bindCopyButtons(state.currentAssistant);
+          scrollBottom();
+        }
+      });
+    }
+  }
+
+  // reasoning 渲染对齐 dsh ReasoningRow：默认折叠的 disclosure。
+  // 标题行 ▸/▾ Think + 摘要；流式时摘要跟随最新一行，完成后收敛到首行；点击展开全文。
+  function firstLine(t) { const i = t.indexOf("\n"); return i === -1 ? t : t.slice(0, i); }
+  function latestLine(t) { const v = t.replace(/\s+$/, ""); const i = v.lastIndexOf("\n"); return i === -1 ? v : v.slice(i + 1); }
+  function renderReasoningBody(el, full) {
+    el.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "think-head";
+    const running = el.classList.contains("running");
+    const summary = state.reasoningAcc.trim() === "" ? "" : (running ? latestLine(state.reasoningAcc) : firstLine(state.reasoningAcc));
+    head.innerHTML = `<span class="think-chev">${state.reasoningOpen ? "▾" : "▸"}</span><span class="think-title">Think</span><span class="think-sep"></span><span class="think-summary">${escapeHtml(summary)}</span>`;
+    el.appendChild(head);
+    if (full) {
+      const body = document.createElement("div");
+      body.className = "think-body";
+      body.textContent = state.reasoningAcc;
+      el.appendChild(body);
+    }
+    head.addEventListener("click", () => { state.reasoningOpen = !state.reasoningOpen; renderReasoningBody(el, state.reasoningOpen); scrollBottom(); });
+  }
+  function appendReasoning(delta) {
+    if (!state.currentReasoning) {
+      state.reasoningAcc = ""; state.reasoningOpen = false;
+      state.currentReasoning = el("msg-reasoning running", "");
+      state.currentAssistant = null;
+    }
+    state.reasoningAcc += delta || "";
+    renderReasoningBody(state.currentReasoning, state.reasoningOpen);
+    scrollBottom();
+  }
+
+  function toolStart(p) {
+    const card = document.createElement("div");
+    card.className = "msg msg-tool";
+    const head = document.createElement("div");
+    head.className = "tool-head";
+    head.innerHTML = `<b>${escapeHtml(p.name || "tool")}</b> <span class="diffstat">${escapeHtml(p.title || "")}</span><span class="tool-dur"></span>`;
+    const code = document.createElement("div");
+    code.className = "tool-code";
+    code.textContent = (p.code || "").split("\n").slice(0, 12).join("\n");
+    const result = document.createElement("div");
+    result.className = "tool-result";
+    card.append(head, code, result);
+    flow.appendChild(card);
+    card.dataset.startedAt = Date.now();
+    state.currentTool = result;
+    state.currentToolCard = card;
+    state.currentAssistant = null;
+  }
+
+  function toolResult(text, ok, durationMs) {
+    if (!state.currentTool) return;
+    state.currentTool.classList.add(ok ? "ok" : "err");
+    state.currentTool.textContent = (text || "").split("\n").slice(0, 30).join("\n");
+    stampDuration(state.currentToolCard, durationMs);
+    state.currentTool = null;
+    state.currentToolCard = null;
+  }
+  // 工具用时（对齐 TUI ⏱ format_duration）：<60s → X.Xs，否则 Xm Y.Ys
+  function formatDur(ms) {
+    const secs = ms / 1000;
+    if (secs < 60) return (Math.round(secs * 10) / 10) + "s";
+    const m = Math.floor(secs / 60);
+    const s = Math.round((secs - m * 60) * 10) / 10;
+    return m + "m " + s + "s";
+  }
+  function stampDuration(card, durationMs) {
+    const slot = card && card.querySelector(".tool-dur");
+    if (!slot) return;
+    let ms = durationMs;
+    if (ms == null && card.dataset.startedAt) ms = Date.now() - Number(card.dataset.startedAt);
+    if (ms == null) return;
+    slot.textContent = " ⏱ " + formatDur(ms);
+  }
+
+  function shellResult(p) {
+    const card = document.createElement("div");
+    card.className = "msg msg-tool";
+    const head = document.createElement("div");
+    head.className = "tool-head";
+    head.innerHTML = `<b>$</b> ${escapeHtml(p.cmd || "")}`;
+    const out = document.createElement("div");
+    out.className = "tool-result " + (p.exit === 0 ? "ok" : "err");
+    out.textContent = (p.output || "").split("\n").slice(0, 40).join("\n");
+    card.append(head, out);
+    flow.appendChild(card);
+    state.currentAssistant = null;
+  }
+  // dsh 文件 diff 卡片：+/- 行内联着色
+  function fileDiff(p) {
+    const card = document.createElement("div");
+    card.className = "msg msg-tool";
+    const head = document.createElement("div");
+    head.className = "tool-head";
+    const st = p.stats || {};
+    head.innerHTML = `<b>✎</b> ${escapeHtml(p.path || "")} <span class="diffstat">+${st.added ?? 0} −${st.removed ?? 0}</span>`;
+    const body = document.createElement("div");
+    body.className = "tool-code";
+    (p.diff || []).slice(0, 60).forEach((ln) => {
+      const row = document.createElement("div");
+      const t = typeof ln === "string" ? ln : (ln.text || "");
+      if (t.startsWith("+")) row.style.color = "var(--nb-green)";
+      else if (t.startsWith("-")) row.style.color = "var(--nb-red)";
+      row.textContent = t;
+      body.appendChild(row);
+    });
+    card.append(head, body);
+    flow.appendChild(card);
+    state.currentAssistant = null;
+  }
+
+
+
+  function showPermission(preview) {
+    $("perm-preview").textContent = preview || "";
+    $("permission-bar").classList.remove("hidden");
+  }
+  function hidePermission() { $("permission-bar").classList.add("hidden"); }
+
+  function permission(ok) {
+    if (state.ws && state.ws.readyState === 1) {
+      state.ws.send(JSON.stringify({ type: "permission", ok }));
+    } else {
+      rpc("respond", { sessionId: state.sid, permission: ok }).catch(() => {});
+    }
+    hidePermission();
+  }
+
+  // ── 会话管理 ──
+  async function loadSessions() {
+    const list = await rpc("session.list", {});
+    const box = $("session-list");
+    box.innerHTML = "";
+    (list.sessions || []).forEach((s) => {
+      const item = document.createElement("div");
+      item.className = "session-item" + (s.id === state.sid ? " active" : "");
+      const title = String(s.title || s.id).replace(/\s+/g, " ").trim().slice(0, 40);
+      item.innerHTML = `<span class="t">${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条</span>`;
+      item.onclick = () => resume(s.id);
+      box.appendChild(item);
+    });
+  }
+
+  async function resume(sid) {
+    state.sid = sid;
+    localStorage.setItem("newbee.sid", sid);
+    flow.innerHTML = "";
+    await rpc("session.resume", { sessionId: sid });
+    const hist = await rpc("session.history", { sessionId: sid });
+    renderHistory(hist.messages || []);
+    if (state.ws) state.ws.close();  // 重连到新 sid
+    connect();
+    loadSessions();
+    const firstUser = (hist.messages || []).find(m => m && m.role === "user");
+    const title = firstUser ? String(firstUser.content || "").replace(/\s+/g, " ").trim().slice(0, 48) : sid;
+    $("session-title").textContent = title || sid;
+  }
+
+  async function newSession() {
+    const created = await rpc("session.create", {});
+    await resume(created.sessionId);
+  }
+
+  function renderHistory(msgs) {
+    msgs.forEach((m) => {
+      if (!m) return;
+      if (m.role === "user") line("user", m.content);
+      else if (m.role === "assistant") {
+        if (m.reasoning) {
+          state.reasoningAcc = m.reasoning; state.reasoningOpen = false;
+          const d = el("msg-reasoning", "");
+          renderReasoningBody(d, false);
+          state.reasoningAcc = "";
+        }
+
+        if (m.content) { const d = el("msg-assistant", m.content, true); bindCopyButtons(d); }
+        (m.toolCalls || []).forEach((tc) => toolStart({ name: tc.name, title: tc.title, code: tc.code }));
+      } else if (m.role === "tool") {
+        const ok = !(m.content || "").startsWith("✗");
+        toolResult(m.content, ok);
+      }
+    });
+    scrollBottom();
+  }
+
+  // ── 发送 ──
+  async function send() {
+    const text = input.value.trim();
+    if (!text || !state.sid) return;
+    input.value = "";
+    autoGrow();
+    line("user", text);
+    state.busy = true; setBusy(true);
+    try {
+      if (state.ws && state.ws.readyState === 1) {
+        state.ws.send(JSON.stringify({ type: "prompt", text }));
+      } else {
+        await rpc("session.prompt", { sessionId: state.sid, text });
+      }
+    } catch (e) {
+      line("error", e.message);
+      state.busy = false; setBusy(false);
+    }
+  }
+
+  function interrupt() {
+    if (state.ws && state.ws.readyState === 1) {
+      state.ws.send(JSON.stringify({ type: "interrupt" }));
+    } else if (state.sid) {
+      rpc("session.cancel", { sessionId: state.sid }).catch(() => {});
+    }
+  }
+
+  // ── 模型 ──
+  async function openModels() {
+    const data = await rpc("llm.models", {});
+    const box = $("model-options");
+    box.innerHTML = "";
+    (data.models || []).forEach((m) => {
+      const o = document.createElement("div");
+      o.className = "model-opt" + (m === data.current ? " current" : "");
+      o.textContent = m;
+      o.onclick = async () => {
+        await rpc("session.selectModel", { sessionId: state.sid, modelId: m });
+        $("model-label").textContent = m;
+        $("model-modal").classList.add("hidden");
+      };
+      box.appendChild(o);
+    });
+    $("model-modal").classList.remove("hidden");
+  }
+
+  // ── utils ──
+  function setBusy(b) {
+    $("status-dot").className = `dot ${b ? "busy" : "idle"}`;
+    $("interrupt").classList.toggle("hidden", !b);
+    $("send").disabled = b && false;  // 允许排队发送
+    if (b) showTurnStatus(); else clearTurnStatus();
+  }
+  // dsh turn 状态行：shimmer 文字，turn 进行中显示
+  let turnStatusEl = null;
+  function showTurnStatus() {
+    if (turnStatusEl) return;
+    turnStatusEl = document.createElement("div");
+    turnStatusEl.className = "msg turn-status";
+    turnStatusEl.textContent = "正在思考…";
+    flow.appendChild(turnStatusEl);
+    scrollBottom();
+  }
+  function clearTurnStatus() {
+    if (turnStatusEl) { turnStatusEl.remove(); turnStatusEl = null; }
+  }
+  function setUsage(u) {
+    if (!u) return;
+    const t = u.total_tokens || u["total_tokens"];
+    if (t) $("usage-label").textContent = `${(t / 1000).toFixed(1)}k tok`;
+  }
+  function scrollBottom() {
+    transcript.scrollTop = transcript.scrollHeight;
+    $("to-bottom").classList.remove("show");
+  }
+  function autoGrow() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; }
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // 代码块复制按钮（dsh MarkdownText codeLabels: copy/copied）
+  function bindCopyButtons(root) {
+    root.querySelectorAll(".md-copy").forEach((btn) => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = "1";
+      btn.onclick = () => {
+        navigator.clipboard.writeText(btn.dataset.code || "").then(() => {
+          btn.textContent = "已复制";
+          setTimeout(() => (btn.textContent = "复制"), 1500);
+        });
+      };
+    });
+  }
+
+  // ── 绑定 ──
+  // 主题切换
+  $("theme-toggle").onclick = () => {
+    const cur = document.documentElement.getAttribute("data-theme") || "dark";
+    applyTheme(cur === "light" ? "dark" : "light", true);
+  };
+
+  $("send").onclick = send;
+  $("interrupt").onclick = interrupt;
+  $("new-session").onclick = newSession;
+  $("perm-yes").onclick = () => permission(true);
+  $("perm-no").onclick = () => permission(false);
+  $("model-label").onclick = openModels;
+  $("model-close").onclick = () => $("model-modal").classList.add("hidden");
+  input.addEventListener("input", autoGrow);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  // 回到底部：滚动远离底部时浮现（dsh to-bottom 悬浮钮）
+  transcript.addEventListener("scroll", () => {
+    const far = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight > 200;
+    $("to-bottom").classList.toggle("show", far);
+  });
+  $("to-bottom").onclick = () => scrollBottom();
+
+  // ── 状态栏（对齐 dsh StatsLine）：轮询 session.state，拼 左统计 | 右状态 ──
+  let statsTimer = null;
+  function startStats() {
+    if (statsTimer) clearInterval(statsTimer);
+    refreshStats();
+    statsTimer = setInterval(refreshStats, 2000);
+  }
+  async function refreshStats() {
+    if (!state.sid) return;
+    try {
+      const st = await rpc("session.state", { sessionId: state.sid });
+      renderStats(st);
+    } catch (e) { /* 忽略轮询错误 */ }
+  }
+  function fmtTok(n) {
+    if (n == null || isNaN(n)) return "0";
+    const sc = (v) => v >= 100 ? String(Math.round(v)) : (Math.round(v * 10) / 10).toString();
+    if (n < 1000) return String(n);
+    if (n < 1e6) return sc(n / 1000) + "K";
+    return sc(n / 1e6) + "M";
+  }
+  function renderStats(st) {
+    const u = st.usage || {};
+    const cacheRead = u.cache_read_tokens || u.cached_tokens
+      || (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
+    const inTok = (u.uncached_prompt_tokens || u.prompt_tokens || 0) + (u.cache_write_tokens || 0);
+    const outTok = u.completion_tokens || u.output_tokens || 0;
+    const cacheHit = inTok > 0 ? Math.round(cacheRead / inTok * 100) : null;
+    const left = [];
+    left.push(`<span class="model">${escapeHtml(st.model || "?")}</span> · newbee`);
+    const turns = st.turns || 0, steps = st.steps || 0;
+    if (turns > 0 || steps > 0) left.push(`${turns} 轮 · ${steps} 步`);
+    // LLM/工具耗时（dsh: LLM Xs · 工具 Ys）
+    const tm = state.timing;
+    const llmMs = tm.llmMs + (tm.llmStart !== null ? Date.now() - tm.llmStart : 0);
+    const toolMs = tm.toolMs + (tm.toolStart !== null ? Date.now() - tm.toolStart : 0);
+    if (llmMs > 0 || toolMs > 0) left.push(`LLM ${fmtDur(llmMs)} · 工具 ${fmtDur(toolMs)}`);
+    // 首 token · 速率（dsh: 首 token Zs · T tok/s）
+    const spd = [];
+    if (tm.ftCount > 0) spd.push(`首 token ${fmtDur(tm.ftSum / tm.ftCount)}`);
+    if (llmMs > 0 && tm.outTok > 0) spd.push(`${(tm.outTok / (llmMs / 1000)).toFixed(1)} tok/s`);
+    if (spd.length) left.push(spd.join(" · "));
+    if (cacheHit !== null) left.push(`缓存 ${cacheHit}%`);
+    if (inTok > 0 || outTok > 0) left.push(`入 ${fmtTok(inTok)} · 出 ${fmtTok(outTok)}`);
+    $("stats-left").innerHTML = left.join(" | ");
+    const stTxt = st.busy ? '<span class="st-busy">● 运行中</span>' : '<span class="st-ok">● 空闲</span>';
+    $("stats-right").innerHTML = `${stTxt} bind:${st.bindings || 0} ${escapeHtml(st.policy || "")}`;
+  }
+
+  // ── 启动 ──
+  (async () => {
+    initTheme();
+    const host = await rpc("host.describe", {});
+    $("model-label").textContent = host.model || "(no model)";
+    if (!state.sid) {
+      await newSession();
+    } else {
+      await resume(state.sid);
+    }
+    loadSessions();
+    startStats();
+  })().catch((e) => line("error", `启动失败: ${e.message}`));
+})();
