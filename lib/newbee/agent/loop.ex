@@ -734,7 +734,7 @@ defmodule Newbee.Agent.Loop do
 
   defp tool_placeholders(ids) do
     Enum.map(ids, fn id ->
-      %{"role" => "tool", "tool_call_id" => id, "content" => "（会话中断，该工具结果丢失）"}
+      %{"role" => "tool", "tool_call_id" => id, "content" => "（该工具调用因进程重启/中断未完成，结果已丢失）"}
     end)
   end
 
