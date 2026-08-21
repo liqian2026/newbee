@@ -12,14 +12,19 @@ defmodule Newbee.LLM.Client do
   @overload_delay 1_000
 
   @derive {Inspect, except: [:api_key]}
-  defstruct model: @default_model, api_key: nil, base_url: @default_base_url, reasoning_effort: nil
+  defstruct model: @default_model,
+            api_key: nil,
+            base_url: @default_base_url,
+            reasoning_effort: nil,
+            vision: true
 
   def new(opts \\ []) do
     %__MODULE__{
       model: Keyword.get(opts, :model, @default_model),
       api_key: Keyword.get(opts, :api_key, System.get_env("OPENROUTER_API_KEY")),
       base_url: Keyword.get(opts, :base_url, @default_base_url),
-      reasoning_effort: Keyword.get(opts, :reasoning_effort)
+      reasoning_effort: Keyword.get(opts, :reasoning_effort),
+      vision: Keyword.get(opts, :vision, true)
     }
   end
 

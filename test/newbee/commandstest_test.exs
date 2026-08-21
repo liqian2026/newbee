@@ -64,6 +64,11 @@ defmodule Newbee.CommandsTest do
     File.rm(tmp)
   end
 
+  test "/image 返回图片提交参数" do
+    assert {:image, "error.png", "分析堆栈"} = Commands.handle("/image error.png 分析堆栈", %{say: fn _ -> :ok end})
+    assert {:image, "error.png", ""} = Commands.handle("/image error.png", %{say: fn _ -> :ok end})
+  end
+
   test "/bindings 输出绑定清单" do
     said = self()
     say = fn line -> send(said, {:said, line}) end

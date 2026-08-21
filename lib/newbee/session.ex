@@ -366,7 +366,7 @@ defmodule Newbee.Session do
 
   @doc "会话标题：首条用户消息（太短则用最近一条），单行化 + 截断。"
   def title(msgs) do
-    users = msgs |> Enum.filter(&(&1["role"] == "user")) |> Enum.map(&(&1["content"] || ""))
+    users = msgs |> Enum.filter(&(&1["role"] == "user")) |> Enum.map(&content_text(&1["content"]))
 
     pick =
       case users do
@@ -376,6 +376,18 @@ defmodule Newbee.Session do
 
     pick |> String.replace(~r/\s+/, " ") |> String.trim() |> String.slice(0, 48)
   end
+
+  defp content_text(text) when is_binary(text), do: text
+
+  defp content_text(parts) when is_list(parts) do
+    parts
+    |> Enum.find_value("[图片]", fn
+      %{"type" => "text", "text" => text} when is_binary(text) -> text
+      _ -> nil
+    end)
+  end
+
+  defp content_text(_), do: ""
 
   @doc "按 id 精确或前缀匹配，返回匹配的 id 列表。"
   def find(input) do

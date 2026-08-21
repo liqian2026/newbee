@@ -663,6 +663,9 @@ defmodule Newbee.TUI do
           {:submit, text} ->
             run_submit(state, text)
 
+          {:image, path, prompt} ->
+            run_image_submit(state, path, prompt)
+
           :new ->
             GenServer.stop(state.kernel)
             {:ok, kernel2} = new_kernel(state.client)
@@ -757,6 +760,25 @@ defmodule Newbee.TUI do
     caller =
       spawn_link(fn ->
         Newbee.Agent.Loop.submit(state.kernel, text)
+      end)
+
+    Process.send_after(self(), :spinner_tick, 80)
+    %{state | busy: true, submit_pid: caller, submit_kind: :turn}
+  end
+
+  defp run_image_submit(state, path, prompt) do
+    parent = self()
+
+    caller =
+      spawn_link(fn ->
+        case Newbee.Agent.Loop.submit_image(state.kernel, path, prompt) do
+          {:error, reason} ->
+            send(parent, {:newbee_event, :error, {:error, reason}})
+            send(parent, {:newbee_event, :turn_end, {:turn_end, :error, 0}})
+
+          _reply ->
+            :ok
+        end
       end)
 
     Process.send_after(self(), :spinner_tick, 80)

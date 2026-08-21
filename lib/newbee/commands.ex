@@ -5,38 +5,29 @@ defmodule Newbee.Commands do
   """
 
   @commands ~w(/model /bindings /tokens /rules /status /dump /resume /reset /approve
-    /reject /log /environment /evolve /autonomy /bundles /goal /diff
+    /reject /log /environment /evolve /autonomy /bundles /goal /diff /image
     /undo /session /init /tools /permissions /compact /attach /new /quit)
 
   def commands, do: @commands
 
-  @doc "处理输入。返回 :ok | :handled | :quit | :new | {:submit, text} | {:resume, id} | {:resume_picker, metas} | {:shell, cmd}。"
+  @doc "处理输入。返回文本提交、图片提交或控制命令。"
   @spec handle(String.t(), map()) ::
           :ok
           | :handled
           | :quit
           | :new
           | {:submit, String.t()}
+          | {:image, String.t(), String.t()}
           | {:resume, String.t()}
           | {:resume_picker, list(map())}
           | {:shell, String.t()}
   def handle(input, ctx) do
     case String.trim(input) do
-      "" ->
-        :ok
-
-      "/quit" ->
-        :quit
-
-      "!" <> cmd when cmd != "" ->
-        # codex 式 !shell：直接在 DEE 里执行 shell 命令（DESIGN §5.3）
-        {:shell, cmd}
-
-      "/" <> _ = cmd ->
-        run_command(cmd, ctx)
-
-      text ->
-        {:submit, expand_at_files(text)}
+      "" -> :ok
+      "/quit" -> :quit
+      "!" <> cmd when cmd != "" -> {:shell, cmd}
+      "/" <> _ = cmd -> run_command(cmd, ctx)
+      text -> {:submit, expand_at_files(text)}
     end
   end
 
@@ -143,6 +134,20 @@ defmodule Newbee.Commands do
     end
 
     :handled
+  end
+
+  defp run("image", arg, ctx) do
+    case String.split(String.trim(arg), " ", parts: 2) do
+      [path] when path != "" ->
+        {:image, path, ""}
+
+      [path, prompt] when path != "" ->
+        {:image, path, prompt}
+
+      _ ->
+        ctx.say.("用法: /image <图片路径> [补充说明]")
+        :handled
+    end
   end
 
   defp run("model", "", ctx) do
@@ -313,6 +318,7 @@ defmodule Newbee.Commands do
       {_, 0} -> ctx.say.("（无改动）")
       {_, _} -> ctx.say.("git diff 不可用（非 git 仓库？）")
     end
+
     :handled
   end
 
@@ -344,7 +350,10 @@ defmodule Newbee.Commands do
 
           Enum.each(revs, fn r ->
             marker = if r["rev"] == current.revision, do: "▶", else: " "
-            ctx.say.(" #{marker} rev #{r["rev"]} [#{r["health"]}] #{map_size(r["active"])} 插件 · change #{r["change_id"]} · #{r["created_at"]}")
+
+            ctx.say.(
+              " #{marker} rev #{r["rev"]} [#{r["health"]}] #{map_size(r["active"])} 插件 · change #{r["change_id"]} · #{r["created_at"]}"
+            )
           end)
         end
 
@@ -665,7 +674,10 @@ defmodule Newbee.Commands do
 
             if Autonomy.suggest_upgrade?(evidence) do
               Autonomy.set(:autonomous)
-              ctx.say.("✓ 安全网足够厚（已验证抗体 #{evidence.verified_antibodies}，回放覆盖 #{evidence.replay_coverage}）——已升 autonomous")
+
+              ctx.say.(
+                "✓ 安全网足够厚（已验证抗体 #{evidence.verified_antibodies}，回放覆盖 #{evidence.replay_coverage}）——已升 autonomous"
+              )
             else
               ctx.say.("⚠ 自治是挣来的（§8.1）：当前证据 已验证抗体=#{evidence.verified_antibodies} 回放覆盖=#{evidence.replay_coverage}")
               ctx.say.("  未达建议阈值。确认仍要升级请再输入: /autonomy autonomous!")
@@ -689,7 +701,12 @@ defmodule Newbee.Commands do
         ctx.say.("（基因库为空；P5：L3 工具+规则+prompt 打成 bundle 带 fitness 跨用户分享）")
 
       bundles ->
-        Enum.each(bundles, &ctx.say.("  #{&1["name"]}@#{&1["version"]} releases=#{length(&1["releases"] || [])} from=#{inspect(&1["provenance"])}"))
+        Enum.each(
+          bundles,
+          &ctx.say.(
+            "  #{&1["name"]}@#{&1["version"]} releases=#{length(&1["releases"] || [])} from=#{inspect(&1["provenance"])}"
+          )
+        )
     end
 
     :handled

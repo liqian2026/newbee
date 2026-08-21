@@ -34,6 +34,8 @@ defmodule Newbee.Agent.Loop do
 
   @doc "提交一段用户输入，同步执行整个 turn，返回 {:done, summary} | {:ask, q} | {:text, body} | {:error, e}"
   def submit(kernel, text), do: GenServer.call(kernel, {:submit, text}, :infinity)
+  @doc "提交本地图片给视觉模型分析。"
+  def submit_image(kernel, path, prompt \\ nil), do: GenServer.call(kernel, {:submit_image, path, prompt}, :infinity)
   @doc "设定自主目标（/goal）：注入目标并异步启动自主循环，直到达成/取消/达上限。"
   def set_goal(kernel, text, opts \\ []), do: GenServer.call(kernel, {:set_goal, text, opts}, :infinity)
 
@@ -176,24 +178,37 @@ defmodule Newbee.Agent.Loop do
   end
 
   @impl true
+  def handle_call({:submit_image, _path, _prompt}, _from, %{client: %{vision: false}} = state) do
+    {:reply, {:error, {:image, :vision_not_supported}}, state}
+  end
+
+  def handle_call({:submit_image, path, prompt}, _from, state) do
+    case Newbee.LLM.Image.message(path, prompt) do
+      {:ok, message} ->
+        submit_message(state, message)
+
+      {:error, reason} ->
+        {:reply, {:error, {:image, reason}}, state}
+    end
+  end
+
   def handle_call({:submit, text}, _from, state) do
+    submit_message(state, %{"role" => "user", "content" => text})
+  end
+
+  defp submit_message(state, message) do
     # 注意：不能在回合开始清中断标志——execute_calls 阶段的中断检查依赖它。
     # 热加载中的 Loop 可能已持有启动前写入的空 assistant；提交前清掉，避免再次触发上游 400。
     t0 = :erlang.monotonic_time(:millisecond)
-    Newbee.DebugLog.log(:submit, "start text=#{String.slice(text, 0, 120) |> inspect()}")
     state = %{state | messages: drop_empty_assistant_messages(state.messages)}
-    state = push_msg(state, %{"role" => "user", "content" => text})
+    state = push_msg(state, message)
     {reply, state} = run_turn(state, 1)
     {reply, state} = after_turn(reply, state)
-    # 回合出口统一清标志：消费过的/残留的都不带进下一轮
     Newbee.LLM.Client.clear_interrupt()
     persist_bindings(state)
     ms = :erlang.monotonic_time(:millisecond) - t0
     Newbee.DebugLog.log(:submit, "done in #{ms}ms reply=#{elem(reply, 0)}")
     emit(state, {:turn_end, elem(reply, 0), ms})
-    # 同步屏障：本回合所有 Bus 广播都是 cast（异步）。测试用 assert_received
-    # （0 超时）要求事件在 submit 返回前已送达订阅者信箱——借 subscribers 的
-    # 同步调用按 FIFO 排空本进程先前的 cast。
     flush_bus()
     {:reply, reply, state}
   end
@@ -967,7 +982,8 @@ defmodule Newbee.Agent.Loop do
     prompt =
       "把以下 agent 对话压缩为要点摘要（任务、关键决策、文件改动、测试结果；≤500 字，中文）：\n" <>
         Enum.map_join(messages, "\n", fn m ->
-          "#{m["role"]}: #{String.slice(m["content"] || "", 0, 200)}"
+          "#{m["role"]}: #{message_content_text(m["content"])}"
+          |> String.slice(0, 240)
         end)
 
     case Newbee.LLM.Client.complete(client, [%{"role" => "user", "content" => prompt}]) do
@@ -977,6 +993,13 @@ defmodule Newbee.Agent.Loop do
   rescue
     _ -> "（摘要失败，历史已截断）"
   end
+
+  defp message_content_text(text) when is_binary(text), do: text
+  defp message_content_text(parts) when is_list(parts), do: Enum.find_value(parts, "[图片]", &image_text_part/1)
+  defp message_content_text(_), do: ""
+
+  defp image_text_part(%{"type" => "text", "text" => text}) when is_binary(text), do: text
+  defp image_text_part(_), do: nil
 
   # ── 终局验证（LLM-as-a-Verifier）──
 

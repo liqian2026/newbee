@@ -37,7 +37,8 @@ defmodule Newbee.LLM.Config do
       base_url: provider["baseUrl"],
       model: role_cfg["model"],
       api_key: expand_env(provider["apiKey"]),
-      reasoning_effort: role_cfg["reasoningEffort"]
+      reasoning_effort: role_cfg["reasoningEffort"],
+      vision: Map.get(role_cfg, "vision", Map.get(provider, "vision", true))
     )
   end
 

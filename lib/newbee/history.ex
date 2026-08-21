@@ -17,6 +17,16 @@ defmodule Newbee.History do
 
   # ── 单条消息 → 行列表 ──
 
+  defp msg_lines(%{"role" => "user", "content" => parts}) when is_list(parts) do
+    text =
+      Enum.find_value(parts, "[图片]", fn
+        %{"type" => "text", "text" => text} when is_binary(text) -> text
+        _ -> nil
+      end)
+
+    ["\e[32m›\e[0m " <> text <> " \e[2m[图片]\e[0m"]
+  end
+
   defp msg_lines(%{"role" => "user", "content" => c}) when is_binary(c) do
     case String.split(c, "\n") do
       [one] -> ["\e[32m›\e[0m " <> one]

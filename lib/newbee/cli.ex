@@ -32,8 +32,6 @@ defmodule Newbee.CLI do
     loop(kernel, client)
   end
 
-
-
   # ── 事件打印（独立进程，实时流式） ──
 
   defp printer(buffer) do
@@ -224,6 +222,10 @@ defmodule Newbee.CLI do
               run_submit(kernel, text)
               loop(kernel, client)
 
+            {:image, path, prompt} ->
+              run_image_submit(kernel, path, prompt)
+              loop(kernel, client)
+
             {:shell, cmd} ->
               # !shell 命令卡片（与 TUI 一致）
               result = Newbee.Tools.Run.sh(cmd, timeout: 300_000)
@@ -248,7 +250,13 @@ defmodule Newbee.CLI do
 
   defp resume_kernel(client, id) do
     {:ok, kernel} =
-      Newbee.Agent.Loop.start_link(client: client, evaluator: Newbee.Environment.Boot.evaluator_or_fallback(session_id: id), session_id: id, auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(
+        client: client,
+        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(session_id: id),
+        session_id: id,
+        auto_antibodies: true,
+        render: fn _ -> :ok end
+      )
 
     meta = Newbee.Session.meta(id)
     IO.puts("\e[2m已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}\e[0m")
@@ -258,7 +266,12 @@ defmodule Newbee.CLI do
   # /new：停掉旧 kernel，以 session_id: nil 起全新会话（全新消息历史与绑定）。
   defp new_kernel(client) do
     {:ok, kernel} =
-      Newbee.Agent.Loop.start_link(client: client, evaluator: Newbee.Environment.Boot.evaluator_or_fallback(), auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(
+        client: client,
+        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(),
+        auto_antibodies: true,
+        render: fn _ -> :ok end
+      )
 
     IO.puts("\e[2m已开启新会话\e[0m")
     {:ok, kernel}
@@ -290,6 +303,15 @@ defmodule Newbee.CLI do
         IO.puts("\e[36m◆ #{length(staged)} 项改动待批准:\e[0m")
         IO.puts(Newbee.Staging.render())
         IO.puts("\e[2m/approve 全部落盘 · /reject 丢弃\e[0m")
+    end
+  end
+
+  defp run_image_submit(kernel, path, prompt) do
+    case Newbee.Agent.Loop.submit_image(kernel, path, prompt) do
+      {:done, summary} -> IO.puts("\n\e[1m● \e[0m" <> Newbee.Markdown.render(summary) <> "\n")
+      {:ask, q} -> IO.puts("\n\e[33m? \e[0m" <> Newbee.Markdown.render(q) <> "\n")
+      {:text, _} -> IO.puts("")
+      {:error, e} -> IO.puts("\e[31m图片错误: #{inspect(e)}\e[0m")
     end
   end
 
