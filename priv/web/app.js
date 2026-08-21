@@ -133,8 +133,6 @@ const flow = $("flow");
     busy: false,
     currentAssistant: null,   // 流式 assistant 行
     currentReasoning: null,   // 流式 reasoning disclosure 元素
-    reasoningAcc: "",          // 当前 reasoning 块累计文本（摘要/展开用）
-    reasoningOpen: false,      // 当前 reasoning 块是否手动展开
     currentTool: null,        // 进行中的 tool 卡片
     timing: { llmMs: 0, toolMs: 0, llmStart: null, toolStart: null,
               ftSum: 0, ftCount: 0, ftRecorded: false, outTok: 0 },
@@ -171,12 +169,18 @@ const flow = $("flow");
       state.ws = null;
     }
     const proto = location.protocol === "https:" ? "wss" : "ws";
+    const boundSid = state.sid;          // 本连接绑定的会话（闭包固定，防切换后旧帧串入）
     const ws = new WebSocket(`${proto}://${location.host}/ws?session=${encodeURIComponent(state.sid)}`);
     state.ws = ws;
     ws.onmessage = (e) => {
       if (ws !== state.ws) return; // 过期连接的事件直接丢
       const frame = JSON.parse(e.data);
-      if (frame.type === "event") onEvent(frame.kind, frame.payload || {});
+      if (frame.type === "event") {
+        // 多会话并存：只渲染当前会话的事件；frame.sessionId 由后端 socket 下行携带
+        if (frame.sessionId && frame.sessionId !== state.sid) return;
+        if (boundSid !== state.sid) return; // 连接建立后用户已切到别的会话
+        onEvent(frame.kind, frame.payload || {});
+      }
       else if (frame.type === "system") pushEvoEvent(frame.topic, frame.payload);
     };
     ws.onclose = () => {
@@ -273,13 +277,12 @@ case "goal_round": break;
       state.currentAssistant.innerHTML = renderMarkdown(streamAcc);
       bindCopyButtons(state.currentAssistant);
     }
+    archiveReasoning();
     state.currentAssistant = null;
-    state.currentReasoning = null;
     state.currentTool = null;
     setBusy(false);
     hidePermission();
     clearTurnStatus();
-    document.querySelectorAll(".msg-reasoning.running").forEach(x => x.classList.remove("running"));
     streamAcc = "";
   }
 
@@ -340,13 +343,7 @@ case "goal_round": break;
   let streamRaf = 0;
   function appendStream(delta) {
     // 文本到来时归档 reasoning（去 running，下次 reasoning 开新块）
-    if (state.currentReasoning) {
-      state.currentReasoning.classList.remove("running");
-      renderReasoningBody(state.currentReasoning, state.reasoningOpen);
-      state.reasoningAcc = "";
-      state.reasoningOpen = false;
-      state.currentReasoning = null;
-    }
+    archiveReasoning();
     if (!state.currentAssistant) {
       state.busy = true; setBusy(true);
       clearTurnStatus();
@@ -370,42 +367,54 @@ case "goal_round": break;
   // 标题行 ▸/▾ Think + 摘要；流式时摘要跟随最新一行，完成后收敛到首行；点击展开全文。
   function firstLine(t) { const i = t.indexOf("\n"); return i === -1 ? t : t.slice(0, i); }
   function latestLine(t) { const v = t.replace(/\s+$/, ""); const i = v.lastIndexOf("\n"); return i === -1 ? v : v.slice(i + 1); }
-  function renderReasoningBody(el, full) {
+  // Think 块：自包含 disclosure。数据存在元素 dataset 上（thinkText 全文、open 0/1），
+  // 每个块独立展开/收缩，互不影响；归档后留在页面原位。
+  function renderReasoningBody(el) {
+    const text = el.dataset.thinkText || "";
+    const open = el.dataset.open === "1";
+    const running = el.classList.contains("running");
     el.innerHTML = "";
     const head = document.createElement("div");
     head.className = "think-head";
-    const running = el.classList.contains("running");
-    const summary = state.reasoningAcc.trim() === "" ? "" : (running ? latestLine(state.reasoningAcc) : firstLine(state.reasoningAcc));
-    head.innerHTML = `<span class="think-chev">${state.reasoningOpen ? "▾" : "▸"}</span><span class="think-title">Think</span><span class="think-sep"></span><span class="think-summary">${escapeHtml(summary)}</span>`;
+    const trimmed = text.replace(/\s+$/, "");
+    const summary = trimmed === "" ? "…" : (running ? latestLine(trimmed) : firstLine(trimmed));
+    head.innerHTML = `<span class="think-chev">${open ? "▾" : "▸"}</span><span class="think-title">Think</span><span class="think-sep"></span><span class="think-summary">${escapeHtml(summary)}</span>`;
+    head.addEventListener("click", () => {
+      el.dataset.open = open ? "0" : "1";
+      renderReasoningBody(el);
+      if (!open) scrollBottom();
+    });
     el.appendChild(head);
-    if (full) {
+    if (open && trimmed !== "") {
       const body = document.createElement("div");
       body.className = "think-body";
-      body.textContent = state.reasoningAcc;
+      body.textContent = text;
       el.appendChild(body);
     }
-    head.addEventListener("click", () => { state.reasoningOpen = !state.reasoningOpen; renderReasoningBody(el, state.reasoningOpen); scrollBottom(); });
   }
   function appendReasoning(delta) {
     if (!state.currentReasoning) {
-      state.reasoningAcc = ""; state.reasoningOpen = false;
       state.currentReasoning = el("msg-reasoning running", "");
+      state.currentReasoning.dataset.thinkText = "";
+      state.currentReasoning.dataset.open = "0";
       state.currentAssistant = null;
     }
-    state.reasoningAcc += delta || "";
-    renderReasoningBody(state.currentReasoning, state.reasoningOpen);
+    state.currentReasoning.dataset.thinkText += delta || "";
+    renderReasoningBody(state.currentReasoning);
     scrollBottom();
+  }
+  function archiveReasoning() {
+    const r = state.currentReasoning;
+    if (!r) return;
+    r.classList.remove("running");
+    r.dataset.open = "0";
+    renderReasoningBody(r);
+    state.currentReasoning = null;
   }
 
   function toolStart(p) {
     // 工具开始时归档当前 reasoning 块（去 running，下次 reasoning 开新块）
-    if (state.currentReasoning) {
-      state.currentReasoning.classList.remove("running");
-      renderReasoningBody(state.currentReasoning, state.reasoningOpen);
-      state.currentReasoning = null;
-      state.reasoningAcc = "";
-      state.reasoningOpen = false;
-    }
+    archiveReasoning();
     const card = document.createElement("div");
     card.className = "msg msg-tool";
     const head = document.createElement("div");
@@ -700,9 +709,12 @@ case "goal_round": break;
     localStorage.setItem("newbee.sid", sid);
     flow.innerHTML = "";
     await rpc("session.resume", { sessionId: sid });
-    const hist = await rpc("session.history", { sessionId: sid });
+    const [hist, sessionState] = await Promise.all([
+      rpc("session.history", { sessionId: sid }),
+      rpc("session.state", { sessionId: sid }),
+    ]);
     renderHistory(hist.messages || []);
-    if (state.ws) state.ws.close();  // 重连到新 sid
+    $("model-label").textContent = sessionState.model || "(no model)";
     connect();
     loadSessions();
     const firstUser = (hist.messages || []).find(m => m && m.role === "user");
@@ -721,10 +733,10 @@ case "goal_round": break;
       if (m.role === "user") line("user", m.content);
       else if (m.role === "assistant") {
         if (m.reasoning) {
-          state.reasoningAcc = m.reasoning; state.reasoningOpen = false;
           const d = el("msg-reasoning", "");
-          renderReasoningBody(d, false);
-          state.reasoningAcc = "";
+          d.dataset.thinkText = m.reasoning;
+          d.dataset.open = "0";
+          renderReasoningBody(d);
         }
 
         if (m.content) { const d = el("msg-assistant", m.content, true); bindCopyButtons(d); }
@@ -767,7 +779,7 @@ case "goal_round": break;
 
   // ── 模型 ──
   async function openModels() {
-    const data = await rpc("llm.models", {});
+    const data = await rpc("llm.models", { sessionId: state.sid });
     const box = $("model-options");
     box.innerHTML = "";
     (data.models || []).forEach((m) => {

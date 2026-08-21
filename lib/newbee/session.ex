@@ -291,36 +291,51 @@ defmodule Newbee.Session do
     end
   end
 
-  @doc "重命名会话标题：把 %{title: ...} 元信息落到会话目录的 meta.json（list_with_meta 优先读取）。"
+  @doc "重命名会话标题：把 title 元信息落到会话目录的 meta.json（list_with_meta 优先读取）。"
   def rename(id, title) when is_binary(id) and is_binary(title) do
+    update_metadata(id, &Map.put(&1, "title", title))
+  end
+
+  @doc "保存该会话选用的模型；不会修改全局模型配置。"
+  def set_model(id, model) when is_binary(id) and is_binary(model) do
+    update_metadata(id, &Map.put(&1, "model", model))
+  end
+
+  @doc "读取该会话选用的模型；未选择时返回 nil。"
+  def model(id) when is_binary(id) do
+    case metadata(id)["model"] do
+      model when is_binary(model) and model != "" -> model
+      _ -> nil
+    end
+  end
+
+  defp update_metadata(id, fun) do
     dir = Path.join(@artifacts, id)
     File.mkdir_p!(dir)
     meta_path = Path.join(dir, "meta.json")
 
-    base =
-      case File.read(meta_path) do
-        {:ok, body} ->
-          case Jason.decode(body) do
-            {:ok, m} when is_map(m) -> m
-            _ -> %{}
-          end
-
-        _ ->
-          %{}
-      end
-
-    File.write!(meta_path, Jason.encode_to_iodata!(Map.put(base, "title", title)))
+    meta = metadata(id) |> fun.()
+    tmp_path = meta_path <> ".tmp-#{System.unique_integer([:positive])}"
+    File.write!(tmp_path, Jason.encode_to_iodata!(meta))
+    File.rename!(tmp_path, meta_path)
     :ok
+  end
+
+  defp metadata(id) do
+    meta_path = Path.join([@artifacts, id, "meta.json"])
+
+    with {:ok, body} <- File.read(meta_path),
+         {:ok, meta} when is_map(meta) <- Jason.decode(body) do
+      meta
+    else
+      _ -> %{}
+    end
   end
 
   @doc "读取用户自定义标题（rename 落盘）；没有返回 nil。"
   def custom_title(id) when is_binary(id) do
-    meta_path = Path.join([@artifacts, id, "meta.json"])
-
-    with {:ok, body} <- File.read(meta_path),
-         {:ok, %{"title" => t}} when is_binary(t) <- Jason.decode(body) do
-      t
-    else
+    case metadata(id)["title"] do
+      title when is_binary(title) -> title
       _ -> nil
     end
   end

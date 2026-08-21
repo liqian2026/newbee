@@ -74,4 +74,18 @@ defmodule Newbee.SessionTest do
     pad = &String.pad_leading(Integer.to_string(&1), 2, "0")
     assert Session.meta(s.id).when_str =~ "#{pad.(hour)}:#{pad.(minute)}"
   end
+
+  test "会话模型独立持久化且不覆盖标题" do
+    id = "test_#{:erlang.unique_integer([:positive])}"
+    Session.open(id)
+
+    assert Session.model(id) == nil
+    assert :ok = Session.rename(id, "独立会话")
+    assert :ok = Session.set_model(id, "provider/session-model")
+    assert Session.model(id) == "provider/session-model"
+    assert Session.custom_title(id) == "独立会话"
+
+    assert :ok = Session.rename(id, "新标题")
+    assert Session.model(id) == "provider/session-model"
+  end
 end

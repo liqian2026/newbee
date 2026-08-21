@@ -221,8 +221,8 @@ body {
 .think-title { color: var(--nb-label-2); font-weight: 600; flex: none; }
 .think-sep { flex: none; width: 1px; height: 12px; background: var(--nb-border); align-self: center; }
 .think-summary {
-  color: var(--nb-label-3); overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; min-width: 0; flex: 1;
+  color: var(--nb-label-3);
+  white-space: nowrap; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
 .msg-reasoning.running .think-summary { color: var(--nb-label-2); }
 .think-body {

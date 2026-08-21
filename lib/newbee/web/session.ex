@@ -100,9 +100,43 @@ defmodule Newbee.Web.Session do
 
   # ── GenServer ──
 
+  @doc false
+  def client_for_session(sid) do
+    base = Newbee.LLM.Config.client_for()
+
+    case Newbee.Session.model(sid) do
+      nil -> base
+      model -> %{base | model: model}
+    end
+  end
+
+  @doc false
+  def switch_session_model(st, model_id) do
+    cond do
+      not is_binary(model_id) ->
+        {:error, :bad_model_id}
+
+      String.trim(model_id) == "" or not String.contains?(model_id, "/") ->
+        {:error, :bad_model_id}
+
+      true ->
+        :ok = Newbee.Session.set_model(st.sid, model_id)
+        client = %{st.client | model: model_id}
+
+        case Newbee.Agent.Loop.switch_model(st.kernel, client) do
+          :ok ->
+            broadcast(st.sid, :model_switched, %{model: model_id})
+            {:ok, %{st | client: client}}
+
+          {:error, _} = err ->
+            err
+        end
+    end
+  end
+
   @impl true
   def init(sid) do
-    client = Newbee.LLM.Config.client_for()
+    client = client_for_session(sid)
 
     if client.api_key do
       kernel = start_kernel(sid, client)
@@ -166,16 +200,9 @@ defmodule Newbee.Web.Session do
 
   @impl true
   def handle_call({:switch_model, model_id}, _from, st) do
-    client = %{st.client | model: model_id}
-
-    case Newbee.Agent.Loop.switch_model(st.kernel, client) do
-      :ok ->
-        Newbee.LLM.Config.set_default_model(model_id)
-        broadcast(st.sid, :model_switched, %{model: model_id})
-        {:reply, :ok, %{st | client: client}}
-
-      {:error, _} = err ->
-        {:reply, err, st}
+    case switch_session_model(st, model_id) do
+      {:ok, next} -> {:reply, :ok, next}
+      {:error, reason} -> {:reply, {:error, reason}, st}
     end
   end
 
