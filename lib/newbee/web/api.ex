@@ -131,8 +131,120 @@ get "/health" do
     {:ok, %{models: Newbee.LLM.Config.model_candidates(), current: current_model()}}
   end
 
+  # 进化域（左侧进化面板数据）
+  defp dispatch_rpc("evolution.feed", p) do
+    n = min(max(p["n"] || 100, 1), 500)
+
+    topics = [
+      "evolution_published",
+      "evolution_rejected",
+      "release_observation",
+      "change_activated",
+      "change_rejected",
+      "change_rolled_back",
+      "revision_advanced",
+      "revision_degraded",
+      "snapshot_created",
+      "snapshot_restored",
+      "generation_switched",
+      "generation_switch_failed",
+      "audit"
+    ]
+
+    events =
+      Newbee.EventLog.read(n * 3, topics)
+      |> Enum.take(n)
+      |> Enum.map(&json_safe/1)
+
+    {:ok, %{events: events}}
+  end
+
+  defp dispatch_rpc("evolution.status", _p) do
+    autonomy = Newbee.Environment.Autonomy.get()
+
+    {coord_state, active_releases} =
+      case Process.whereis(Newbee.Environment.Coordinator) do
+        nil ->
+          {:down, []}
+
+        _pid ->
+          try do
+            current = Newbee.Environment.Coordinator.current(Newbee.Environment.Coordinator)
+            changes = Newbee.Environment.Coordinator.changes(Newbee.Environment.Coordinator)
+
+            releases =
+              (current && current.active && Enum.map(current.active, fn {plugin_id, release_id} ->
+                %{
+                  "plugin" => plugin_id,
+                  "release" => release_id,
+                  "kind" => plugin_id |> String.split(".") |> List.first(),
+                  "name" => plugin_id |> String.split(".") |> Enum.drop(1) |> Enum.join(".")
+                }
+              end)) || []
+
+            {%{
+               active_revision: current && current.rev,
+               changes: length(changes),
+               active_count: length(releases)
+             }, releases}
+          rescue
+            _ -> {:error, []}
+          catch
+            :exit, _ -> {:error, []}
+          end
+      end
+
+    # 最近一轮 adapter 运行痕迹：从 EventLog 找最近的 evolution_* 事件
+    recent_evo =
+      Newbee.EventLog.read(50, ["evolution_published", "evolution_rejected"])
+      |> List.first()
+
+    # 每个 release 的使用统计（fitness 聚合）
+    release_stats =
+      active_releases
+      |> Enum.map(fn rel ->
+        rid = rel["release"]
+
+        obs =
+          try do
+            Newbee.Environment.Fitness.observations(rid)
+          rescue
+            _ -> []
+          catch
+            :exit, _ -> []
+          end
+
+        n = length(obs)
+
+        if n > 0 do
+          succ = Enum.count(obs, & &1["success"])
+          avg_tok = obs |> Enum.map(&(&1["tokens"] || 0)) |> Enum.sum() |> div(max(n, 1))
+
+          Map.merge(rel, %{
+            "uses" => n,
+            "success_rate" => Float.round(succ / n, 2),
+            "avg_tokens" => avg_tok
+          })
+        else
+          Map.merge(rel, %{"uses" => 0})
+        end
+      end)
+      # 按使用次数倒序
+      |> Enum.sort_by(&(-Map.get(&1, "uses", 0)))
+
+    {:ok,
+     %{
+       autonomy: autonomy,
+       coordinator: json_safe(coord_state),
+       active_releases: json_safe(release_stats),
+       last_evolution: json_safe(recent_evo),
+       event_log_bytes: Newbee.EventLog.size()
+     }}
+  end
+
   # 主机域
   defp dispatch_rpc("host.describe", _p) do
+
     {:ok,
      %{
        cwd: File.cwd!(),

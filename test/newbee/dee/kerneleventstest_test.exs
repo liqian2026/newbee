@@ -58,6 +58,42 @@ defmodule Newbee.Agent.LoopEventsTest do
     GenServer.stop(kernel)
     GenServer.stop(ev)
   end
+
+  test "沉睡规则命中时公开实际 prompt 注入详情" do
+    Newbee.Bus.subscribe()
+    Newbee.DEE.Rules.add("test-prompt-audit", "AUDIT_TRIGGER", "请改写输出", scope: :content)
+    on_exit(fn -> Newbee.DEE.Rules.remove("test-prompt-audit") end)
+
+    {:ok, ev} = Evaluator.start(mode: :local)
+
+    {:ok, kernel} =
+      Loop.start_link(
+        client: %{},
+        evaluator: ev,
+        session: false,
+        client_fun:
+          scripted([
+            fn _m, _o ->
+              {:ok, %{"role" => "assistant", "content" => "结果 AUDIT_TRIGGER", "tool_calls" => []}, %{}}
+            end
+          ])
+      )
+
+    assert {:text, "结果 AUDIT_TRIGGER"} = Loop.submit(kernel, "go")
+    assert_received {:newbee_event, :rule_hit, {:rule_hit, [%{id: "test-prompt-audit"}]}}
+
+    assert_received {:newbee_event, :prompt_injection, {:prompt_injection, details}}
+    assert details.source == "sleeping_rule"
+    assert details.role == "system"
+    assert details.timing == "next_user_turn"
+    assert details.trigger == "结果 AUDIT_TRIGGER"
+    assert details.content =~ "[沉睡规则注入]"
+    assert details.content =~ "请改写输出"
+    assert [%{id: "test-prompt-audit", pattern: "AUDIT_TRIGGER"}] = details.rules
+
+    GenServer.stop(kernel)
+    GenServer.stop(ev)
+  end
 end
 
 :ok

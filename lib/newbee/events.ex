@@ -14,7 +14,7 @@ defmodule Newbee.Events do
   adapter 触发——零各自为政的监听点。
   """
 
-  @durable_prefixes ~w(turn step change release revision tool user assistant goal audit feedback need rolled_back module evaluation antibody usage progress rule candidate rollback)
+  @durable_prefixes ~w(turn step change release revision tool user assistant goal audit feedback need rolled_back module evaluation antibody usage progress prompt rule candidate rollback)
 
   @live_topics [:"agent/pre-step", :"llm/stream", :"tools/pre-execute"]
 

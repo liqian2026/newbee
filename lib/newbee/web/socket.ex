@@ -46,7 +46,25 @@ defmodule Newbee.Web.Socket do
     {:push, [{:text, frame}], st}
   end
 
-  # 其它会话的事件、以及总线上所有非 web_event，直接忽略
+  # 系统级进化事件下行（与具体 session 无关；前端进化面板消费）
+  @evo_topics ~w(evolution_published evolution_rejected release_observation
+                 change_activated change_rejected change_rolled_back
+                 revision_advanced revision_degraded
+                 snapshot_created snapshot_restored
+                 generation_switched generation_switch_failed audit)a
+
+  def handle_info({:newbee_event, topic, payload}, st) when topic in @evo_topics do
+    frame =
+      Jason.encode_to_iodata!(%{
+        type: "system",
+        topic: to_string(topic),
+        payload: json_safe(payload)
+      })
+
+    {:push, [{:text, frame}], st}
+  end
+
+  # 其它会话的事件、以及总线上其它事件，直接忽略
   def handle_info({:newbee_event, _, _}, st), do: {:ok, st}
   def handle_info(_, st), do: {:ok, st}
 
@@ -56,7 +74,17 @@ defmodule Newbee.Web.Socket do
     {:ok, st}
   end
 
+  # JSON 安全化（atom key / tuple / struct 都能编）
+  defp json_safe(%{__struct__: _} = v), do: v |> Map.from_struct() |> json_safe()
+  defp json_safe(%{} = v), do: Map.new(v, fn {k, val} -> {to_string(k), json_safe(val)} end)
+  defp json_safe(v) when is_list(v), do: Enum.map(v, &json_safe/1)
+  defp json_safe(v) when is_tuple(v), do: v |> Tuple.to_list() |> json_safe()
+  defp json_safe(v) when is_atom(v), do: to_string(v)
+  defp json_safe(v) when is_binary(v) or is_number(v) or is_boolean(v) or is_nil(v), do: v
+  defp json_safe(v), do: inspect(v)
+
   defp cast_session(sid, fun) do
+
     case WSession.ensure(sid) do
       {:ok, pid, _} -> fun.(pid)
       _ -> :ok

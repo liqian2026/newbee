@@ -13,6 +13,7 @@ defmodule Newbee.Daemon do
   require Logger
 
   @evolve_interval :timer.minutes(10)
+  @evolve_debounce 1_000
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -36,20 +37,42 @@ defmodule Newbee.Daemon do
     end
 
     Process.send_after(self(), :evolve_tick, @evolve_interval)
-    {:ok, %{}}
+    {:ok, %{evolve_timer: nil, adapter_ref: nil, cycle_pending: false}}
   end
 
   @impl true
   def handle_cast(:evolve_now, state) do
-    run_adapter_cycle()
-    {:noreply, state}
+    {:noreply, start_or_queue_cycle(state)}
   end
 
   @impl true
   def handle_info(:evolve_tick, state) do
-    run_adapter_cycle()
     Process.send_after(self(), :evolve_tick, @evolve_interval)
-    {:noreply, state}
+    {:noreply, start_or_queue_cycle(state)}
+  end
+
+  def handle_info(:evolve_debounced, state) do
+    {:noreply, state |> Map.put(:evolve_timer, nil) |> start_or_queue_cycle()}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{adapter_ref: ref} = state) do
+    state = %{state | adapter_ref: nil}
+
+    if state.cycle_pending do
+      {:noreply, state |> Map.put(:cycle_pending, false) |> start_or_queue_cycle()}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:newbee_event, :prompt_injection, _event}, state) do
+    # 注入事实已经同步落 EventStore；短暂去抖后立即让 JIT 判断是否达到优化阈值。
+    if state.evolve_timer do
+      {:noreply, state}
+    else
+      timer = Process.send_after(self(), :evolve_debounced, @evolve_debounce)
+      {:noreply, %{state | evolve_timer: timer}}
+    end
   end
 
   def handle_info({:newbee_event, topic, event}, state) do
@@ -62,6 +85,13 @@ defmodule Newbee.Daemon do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp start_or_queue_cycle(%{adapter_ref: nil} = state) do
+    {_pid, ref} = spawn_monitor(fn -> run_adapter_cycle() end)
+    %{state | adapter_ref: ref}
+  end
+
+  defp start_or_queue_cycle(state), do: %{state | cycle_pending: true}
 
   defp run_adapter_cycle do
     case Newbee.Agent.Adapter.run_once() do

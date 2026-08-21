@@ -239,7 +239,11 @@ defmodule Newbee.Agent.Loop do
     else
       state =
         state
-        |> push_msg(%{"role" => "system", "content" => goal_system_prompt(text)})
+        |> inject_prompt(%{"role" => "system", "content" => goal_system_prompt(text)}, %{
+          source: "goal_start",
+          reason: "启动自主目标模式",
+          timing: "current_turn"
+        })
         |> push_msg(%{"role" => "user", "content" => "（自主目标模式启动）目标：#{text}\n请开始自主工作，直到达成目标。"})
 
       goal = %{
@@ -317,14 +321,24 @@ defmodule Newbee.Agent.Loop do
 
       state =
         if idle >= 3 do
-          push_msg(state, %{"role" => "system", "content" => goal_idle_reminder(rounds)})
+          inject_prompt(state, %{"role" => "system", "content" => goal_idle_reminder(rounds)}, %{
+            source: "goal_idle",
+            reason: "自主目标连续多轮没有工具进展",
+            timing: "next_request",
+            round: rounds
+          })
           |> then(fn s -> %{s | goal: %{s.goal | idle: 0}} end)
         else
           state
         end
 
       state =
-        push_msg(state, %{"role" => "system", "content" => goal_continue_msg(rounds)})
+        inject_prompt(state, %{"role" => "system", "content" => goal_continue_msg(rounds)}, %{
+          source: "goal_continue",
+          reason: "自主目标尚未确认完成",
+          timing: "next_request",
+          round: rounds
+        })
         |> then(fn s -> %{s | goal: %{s.goal | msg_len: length(s.messages)}} end)
 
       send(self(), :goal_next)
@@ -446,7 +460,18 @@ defmodule Newbee.Agent.Loop do
                     Enum.each(hits, &Newbee.DEE.Rules.hit(&1.id))
                     injections = Enum.map_join(hits, "\n", &("- [" <> &1.id <> "] " <> &1.injection))
                     reminder = %{"role" => "system", "content" => "[沉睡规则注入] " <> injections}
-                    {{:text, msg["content"]}, push_msg(state, reminder)}
+
+                    state =
+                      inject_prompt(state, reminder, %{
+                        source: "sleeping_rule",
+                        reason: "模型可见正文或隐藏思考流命中沉睡规则",
+                        timing: "next_user_turn",
+                        step: step,
+                        trigger: visible_rule_trigger(msg["content"] || "", hits),
+                        rules: rule_audit_details(hits)
+                      })
+
+                    {{:text, msg["content"]}, state}
                 end
 
               {blocks, cleaned} ->
@@ -514,13 +539,32 @@ defmodule Newbee.Agent.Loop do
           if all_ok? do
             # 全部成功：清理后的正文继续（块已执行）
             if String.trim(cleaned) == "" do
-              push_msg(state, reminder)
+              inject_prompt(state, reminder, %{
+                source: "fallback_parser",
+                reason: "模型用正文代码块代替 run_elixir 工具调用",
+                timing: "current_turn_retry",
+                step: step
+              })
             else
-              state |> push_msg(%{"role" => "assistant", "content" => cleaned}) |> push_msg(reminder)
+              state
+              |> push_msg(%{"role" => "assistant", "content" => cleaned})
+              |> inject_prompt(reminder, %{
+                source: "fallback_parser",
+                reason: "模型用正文代码块代替 run_elixir 工具调用",
+                timing: "current_turn_retry",
+                step: step
+              })
             end
           else
             # 有失败：保留原文 + 错误已在 tool 消息里
-            state |> push_msg(%{"role" => "assistant", "content" => cleaned}) |> push_msg(reminder)
+            state
+            |> push_msg(%{"role" => "assistant", "content" => cleaned})
+            |> inject_prompt(reminder, %{
+              source: "fallback_parser",
+              reason: "正文代码块执行失败，要求改用工具调用重试",
+              timing: "current_turn_retry",
+              step: step
+            })
           end
 
         run_turn(state, step + 1)
@@ -583,7 +627,18 @@ defmodule Newbee.Agent.Loop do
                     "content" => "[沉睡规则注入] 你刚才的代码命中了以下环境规则:\n" <> injections
                   }
 
-                  {:cont, {:cont, state |> push_msg(tool_msg) |> push_msg(reminder)}}
+                  state =
+                    state
+                    |> push_msg(tool_msg)
+                    |> inject_prompt(reminder, %{
+                      source: "sleeping_rule",
+                      reason: "run_elixir 代码命中执行前规则",
+                      timing: "current_turn_retry",
+                      trigger: String.slice(code, 0, 1_000),
+                      rules: rule_audit_details(hits)
+                    })
+
+                  {:cont, {:cont, state}}
               end
 
             "done" ->
@@ -600,7 +655,17 @@ defmodule Newbee.Agent.Loop do
                 {:retry, state, reminder} ->
                   emit(state, {:final_check_low, state.progress.final_score})
                   # 低分：注入提醒 + 让循环继续，模型重新评估后再 done
-                  {:cont, {:cont, state |> push_msg(tool_msg) |> push_msg(%{"role" => "user", "content" => reminder})}}
+                  state =
+                    state
+                    |> push_msg(tool_msg)
+                    |> inject_prompt(%{"role" => "user", "content" => reminder}, %{
+                      source: "final_verifier",
+                      reason: "终局验证分数低于完成阈值",
+                      timing: "current_turn_retry",
+                      score: state.progress.final_score
+                    })
+
+                  {:cont, {:cont, state}}
               end
 
             "ask" ->
@@ -954,6 +1019,42 @@ defmodule Newbee.Agent.Loop do
     end
   end
 
+  defp inject_prompt(state, message, details) do
+    audit_prompt_injection(state, message, details)
+    push_msg(state, message)
+  end
+
+  defp audit_prompt_injection(state, message, details) do
+    event =
+      details
+      |> Map.new()
+      |> Map.merge(%{
+        role: message["role"] || "system",
+        content: message["content"] || "",
+        session_id: if(state.session, do: state.session.id, else: nil)
+      })
+
+    emit(state, {:prompt_injection, event})
+    state
+  end
+
+  # 只展示可见正文中的触发内容。规则若只命中 reasoning，不把隐藏思考复制到审计事件。
+  defp visible_rule_trigger(content, hits) do
+    visible? =
+      Enum.any?(hits, fn rule ->
+        case Regex.compile(rule.pattern) do
+          {:ok, regex} -> Regex.match?(regex, content)
+          {:error, _} -> false
+        end
+      end)
+
+    if visible?, do: String.slice(content, 0, 1_000), else: "（命中位于隐藏思考流，内容不展示）"
+  end
+
+  defp rule_audit_details(hits) do
+    Enum.map(hits, &Map.take(&1, [:id, :pattern, :injection, :scope, :source]))
+  end
+
   defp push_msg(state, msg) do
     msg = sanitize_msg(msg)
     if state.session, do: Newbee.Session.append(state.session, msg)
@@ -1160,7 +1261,12 @@ defmodule Newbee.Agent.Loop do
           Newbee.DebugLog.log(:progress, "stalled, injecting reminder")
 
           %{state | progress: %{p | scores: scores, injected: true}}
-          |> push_msg(%{"role" => "user", "content" => reminder})
+          |> inject_prompt(%{"role" => "user", "content" => reminder}, %{
+            source: "progress_stall",
+            reason: "连续轨迹评分显示进度停滞",
+            timing: "current_turn_retry",
+            scores: scores
+          })
         else
           %{state | progress: %{p | scores: scores}}
         end

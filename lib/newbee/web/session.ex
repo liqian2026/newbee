@@ -334,6 +334,7 @@ defmodule Newbee.Web.Session do
   defp encode_event({:usage, usage}), do: %{usage: usage}
   defp encode_event({:compacted, n}), do: %{count: n}
   defp encode_event({:rule_hit, hits}) when is_list(hits), do: %{hits: Enum.map(hits, &Map.take(&1, [:id, :injection]))}
+  defp encode_event({:prompt_injection, details}) when is_map(details), do: details
   defp encode_event({:progress, score, scores}), do: %{score: score, scores: scores}
   defp encode_event({:progress_stall, scores}), do: %{scores: scores}
   defp encode_event({:final_check, score}), do: %{score: score}

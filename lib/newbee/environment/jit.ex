@@ -35,6 +35,8 @@ defmodule Newbee.Environment.Jit do
   def pattern_key(%{"topic" => "tool_start", "data" => %{"name" => name}}), do: {:tool_use, to_string(name)}
   def pattern_key(%{topic: :tool_error, data: %{error_class: cls}}), do: {:error, to_string(cls)}
   def pattern_key(%{"topic" => "tool_error", "data" => %{"error_class" => cls}}), do: {:error, to_string(cls)}
+  def pattern_key(%{topic: :prompt_injection, data: data}), do: prompt_injection_key(data)
+  def pattern_key(%{"topic" => "prompt_injection", "data" => data}), do: prompt_injection_key(data)
   def pattern_key(_), do: nil
 
   @doc """
@@ -67,7 +69,7 @@ defmodule Newbee.Environment.Jit do
         hot?: benefit > compile_cost
       }
     end)
-    |> Enum.sort_by(& -&1.compile_benefit)
+    |> Enum.sort_by(&(-&1.compile_benefit))
   end
 
   @doc """
@@ -80,12 +82,39 @@ defmodule Newbee.Environment.Jit do
     |> Enum.filter(& &1.hot?)
     |> Enum.map(fn p ->
       %{
-        capability: "distill #{inspect(p.pattern)}",
+        capability: capability_for(p.pattern),
         evidence: %{pattern: p.pattern, count: p.count, compile_benefit: p.compile_benefit},
         urgency: :high
       }
     end)
   end
+
+  defp prompt_injection_key(data) do
+    details =
+      case data do
+        %{"payload" => ["prompt_injection", details]} when is_map(details) -> details
+        %{payload: [:prompt_injection, details]} when is_map(details) -> details
+        details when is_map(details) -> details
+        _ -> %{}
+      end
+
+    rule_ids =
+      (details["rules"] || details[:rules] || [])
+      |> Enum.map(&(&1["id"] || &1[:id]))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.sort()
+
+    key =
+      case rule_ids do
+        [] -> details["source"] || details[:source] || "unknown"
+        ids -> Enum.join(ids, ",")
+      end
+
+    {:prompt_injection, key}
+  end
+
+  defp capability_for({:prompt_injection, key}), do: "optimize prompt injection #{key}"
+  defp capability_for(pattern), do: "distill #{inspect(pattern)}"
 
   # ── 晋升/降级路径 ──
 

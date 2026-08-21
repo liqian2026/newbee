@@ -24,6 +24,23 @@ defmodule Newbee.Environment.JitTest do
     assert Enum.all?(needs, &(&1.urgency == :high))
   end
 
+  test "高成本 prompt 注入进入 adapter 优化队列" do
+    event = %{
+      topic: :prompt_injection,
+      data: %{
+        "payload" => [
+          "prompt_injection",
+          %{"source" => "sleeping_rule", "rules" => [%{"id" => "jspace-outer"}]}
+        ]
+      },
+      tokens: 6_000
+    }
+
+    assert [need] = Jit.hot_needs([event])
+    assert need.capability == "optimize prompt injection jspace-outer"
+    assert need.evidence.pattern == {:prompt_injection, "jspace-outer"}
+  end
+
   test "晋升路径产物（L1→L2 rule / L2→L3 tool）" do
     l2 = Jit.promote_l1_to_l2("总在提交前忘跑测试", "git commit", "先跑 mix test")
     assert l2.kind == :rule

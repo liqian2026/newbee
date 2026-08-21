@@ -10,6 +10,7 @@
 <body>
 <div id="app">
   <aside id="sidebar">
+
     <div class="brand">
       <span class="logo">🐝</span><span class="name">newbee</span>
       <button id="sidebar-toggle" class="icon-btn" title="收起侧栏">⟨</button>
@@ -57,6 +58,25 @@
       </div>
     </footer>
   </main>
+
+  <button id="evo-expand" class="evo-expand" title="打开进化面板">⟁</button>
+  <aside id="evolution-panel">
+    <div class="evo-head">
+      <span class="evo-title">⟁ 进化</span>
+      <button id="evo-collapse" class="icon-btn" title="收起面板">⟩</button>
+    </div>
+    <div id="evo-status" class="evo-status">
+      <div class="evo-status-row"><span class="k">档位</span><span class="v" id="evo-autonomy">-</span></div>
+      <div class="evo-status-row"><span class="k">激活 revision</span><span class="v" id="evo-revision">-</span></div>
+      <div class="evo-status-row"><span class="k">进行中的 change</span><span class="v" id="evo-changes">-</span></div>
+      <div class="evo-status-row"><span class="k">事件日志</span><span class="v" id="evo-events-size">-</span></div>
+    </div>
+    <div class="evo-feed-head">
+      <span>实时事件</span>
+      <button id="evo-refresh" class="icon-btn" title="刷新">↻</button>
+    </div>
+    <div id="evo-feed" class="evo-feed"></div>
+  </aside>
 </div>
 
 <div id="model-modal" class="modal hidden">

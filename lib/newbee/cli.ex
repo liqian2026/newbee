@@ -102,6 +102,18 @@ defmodule Newbee.CLI do
 
         printer(buf)
 
+      {:newbee_event, :prompt_injection, {:prompt_injection, details}} ->
+        buf = flush_buffer(buffer)
+        source = details[:source] || "unknown"
+        role = details[:role] || "system"
+        timing = details[:timing] || "next_request"
+        IO.puts("\n\e[35m◆ Prompt 注入\e[0m source=#{source} role=#{role} timing=#{timing}")
+        IO.puts("\e[2m原因: #{details[:reason] || "未说明"}\e[0m")
+
+        if details[:trigger], do: IO.puts("\e[2m触发内容:\n#{details[:trigger]}\e[0m")
+        IO.puts("\e[2m实际注入:\n#{details[:content] || ""}\e[0m\n")
+        printer(buf)
+
       {:newbee_event, :audit, {:audit, verdict, actor, target, ring}} ->
         buf = flush_buffer(buffer)
         IO.puts("[2m\u2696 审计: #{verdict} #{actor} \u2192 ring#{ring} #{inspect(target) |> String.slice(0, 60)}[0m")

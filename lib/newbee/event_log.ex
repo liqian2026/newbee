@@ -15,7 +15,7 @@ defmodule Newbee.EventLog do
   @max_bytes 50_000_000
 
   @durable ~w(
-    turn_end usage tool_start tool_result tool_error rule_hit audit
+    turn_end usage tool_start tool_result tool_error rule_hit prompt_injection audit
     goal_start goal_round goal_retry goal_done goal_ask goal_cancelled goal_limit
     progress progress_stall final_check interrupted error done ask
     evolution_published evolution_rejected snapshot_created snapshot_restored

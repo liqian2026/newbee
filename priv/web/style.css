@@ -228,6 +228,9 @@ body {
 .think-body {
   white-space: pre-wrap; margin-top: 4px; padding-left: 18px;
   border-left: 2px solid var(--nb-border);
+  /* 防横向滚动：长单词/URL 强制断行；高度上限防刷屏，内容滚动 */
+  overflow-wrap: anywhere; word-break: break-word;
+  max-height: 300px; overflow-y: auto;
 }
 .msg-reasoning::before {
   content: ''; position: absolute; left: 6px; top: 8px; bottom: 8px; width: 2px;
@@ -268,6 +271,23 @@ body {
 .msg-ask { color: var(--nb-warn); white-space: pre-wrap; font-size: 15px; }
 .msg-ask::before { content: '? '; font-weight: 700; }
 .msg-notice { color: var(--nb-label-caption); font-size: 13px; font-style: italic; }
+
+/* Prompt 注入审计：摘要留在主流，完整正文按需展开。 */
+.msg-prompt-injection {
+  border-left: 3px solid var(--nb-warn); background: var(--nb-bg-panel);
+  padding: 9px 12px; font: 12px/19px var(--nb-mono); color: var(--nb-label-2);
+}
+.msg-prompt-injection summary {
+  cursor: pointer; color: var(--nb-warn); font-weight: 600; user-select: none;
+}
+.prompt-injection-meta { margin-top: 8px; color: var(--nb-label-2); }
+.prompt-injection-trigger, .prompt-injection-rules, .prompt-injection-content {
+  margin: 8px 0 0; padding: 8px 10px; border-top: 1px solid var(--nb-border);
+  color: var(--nb-label-3); white-space: pre-wrap; word-break: break-word;
+  overflow-wrap: anywhere; max-height: 260px; overflow: auto;
+}
+.prompt-injection-content { color: var(--nb-label-1); }
+
 
 /* turn 进行中状态行（shimmer 文字） */
 .turn-status {
@@ -436,3 +456,69 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 15px; }
 #app.sidebar-collapsed .statsbar {
   --nb-content-w: min(1240px, calc(100vw - 96px));
 }
+
+/* ── 进化面板（最右，默认收起）── */
+#evolution-panel {
+  width: 320px; min-width: 320px;
+  background: var(--nb-bg-panel);
+  border-left: 1px solid var(--nb-border);
+  display: flex; flex-direction: column;
+  margin-right: -320px;
+  transition: margin-right var(--nb-dur) var(--nb-ease);
+  overflow: hidden;
+}
+#app.evo-open #evolution-panel { margin-right: 0; }
+
+.evo-expand {
+  position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 64px; z-index: 20;
+  background: var(--nb-bg-panel); border: 1px solid var(--nb-border);
+  border-right: none; border-radius: 10px 0 0 10px;
+  color: var(--nb-label-3); cursor: pointer; font-size: 14px;
+  transition: background var(--nb-dur), color var(--nb-dur), right var(--nb-dur) var(--nb-ease);
+  display: flex; align-items: center; justify-content: center;
+}
+.evo-expand:hover { background: var(--nb-bg-elev); color: var(--nb-accent); }
+#app.evo-open .evo-expand { right: 320px; }
+
+.evo-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 14px 10px; border-bottom: 1px solid var(--nb-border);
+}
+.evo-title { font-weight: 600; font-size: 13px; color: var(--nb-accent-soft); letter-spacing: 0.3px; }
+
+.evo-status {
+  padding: 10px 14px; border-bottom: 1px solid var(--nb-border);
+  display: flex; flex-direction: column; gap: 5px; font-size: 12px;
+}
+.evo-status-row { display: flex; justify-content: space-between; gap: 12px; }
+.evo-status-row .k { color: var(--nb-label-caption); }
+.evo-status-row .v { color: var(--nb-label-1); font-family: var(--nb-mono); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.evo-feed-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px 6px; font-size: 12px; color: var(--nb-label-3); font-weight: 600;
+}
+
+.evo-feed {
+  flex: 1; overflow-y: auto; padding: 4px 10px 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.evo-event {
+  background: var(--nb-bg-elev); border: 1px solid var(--nb-border);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.5;
+}
+.evo-event .evo-kind {
+  display: inline-block; font-family: var(--nb-mono); font-size: 10.5px;
+  padding: 1px 6px; border-radius: 4px; margin-bottom: 4px;
+  background: var(--nb-bg-panel); color: var(--nb-accent-soft);
+}
+.evo-event.kind-rejected .evo-kind,
+.evo-event.kind-error .evo-kind { color: var(--nb-red); }
+.evo-event.kind-activated .evo-kind,
+.evo-event.kind-published .evo-kind { color: var(--nb-green); }
+.evo-event .evo-time { color: var(--nb-label-caption); font-size: 10.5px; margin-left: 6px; }
+.evo-event .evo-body { color: var(--nb-label-2); font-family: var(--nb-mono);
+  font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 80px; overflow: hidden; }
+.evo-empty { padding: 20px 8px; text-align: center; color: var(--nb-label-caption); font-size: 12px; font-style: italic; }

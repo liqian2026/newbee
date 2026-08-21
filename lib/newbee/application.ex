@@ -4,6 +4,8 @@ defmodule Newbee.Application do
 
   @impl true
   def start(_type, _args) do
+    # test 环境不自动启动 Coordinator/Daemon（避免污染 cwd 的 .newbee；
+    # 测试按需 start_link 并在 tmp 目录运行）
     children =
       [
         Newbee.Bus,
@@ -14,12 +16,10 @@ defmodule Newbee.Application do
         {Registry, keys: :unique, name: Newbee.Web.SessionRegistry},
         {DynamicSupervisor, strategy: :one_for_one, name: Newbee.Web.SessionSup}
       ] ++
-        # test 环境不自动启动 Coordinator/Daemon（避免污染 cwd 的 .newbee；
-        # 测试按需 start_link 并在 tmp 目录运行）
         if Mix.env() == :test do
           []
         else
-          [Newbee.Environment.Coordinator, Newbee.Daemon]
+          [Newbee.Environment.Coordinator, Newbee.Daemon, Newbee.HotReloader]
         end
 
     opts = [strategy: :one_for_one, name: Newbee.Supervisor]

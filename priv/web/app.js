@@ -177,6 +177,7 @@ const flow = $("flow");
       if (ws !== state.ws) return; // 过期连接的事件直接丢
       const frame = JSON.parse(e.data);
       if (frame.type === "event") onEvent(frame.kind, frame.payload || {});
+      else if (frame.type === "system") pushEvoEvent(frame.topic, frame.payload);
     };
     ws.onclose = () => {
       if (ws !== state.ws) return; // 过期连接不重连
@@ -216,6 +217,7 @@ const flow = $("flow");
   }
   function fmtDur(ms) {
     const s = ms / 1000;
+    if (ms > 0 && s < 0.05) return "<0.1s";
     if (s < 60) return (Math.round(s * 10) / 10) + "s";
     const w = Math.round(s);
     return Math.floor(w / 60) + "m" + (w % 60) + "s";
@@ -245,6 +247,7 @@ case "done": finishTurn(); line("done", p.summary, true); break;
       case "rule_hit":
         (p.hits || []).forEach(h => line("notice", `⚑ 沉睡规则命中 [${h.id}] ${h.injection}`));
         break;
+      case "prompt_injection": promptInjection(p); break;
 case "advisor_note": line("notice", `◉ advisor: ${p.text}`); break;
 case "notice": line("notice", p.text); break;
 case "shell_result": shellResult(p); break;
@@ -293,10 +296,57 @@ case "goal_round": break;
     scrollBottom();
   }
 
+  function promptInjection(p) {
+    const d = document.createElement("details");
+    d.className = "msg msg-prompt-injection";
+
+    const summary = document.createElement("summary");
+    const source = p.source || "unknown";
+    const role = p.role || "system";
+    const timing = p.timing || "next_request";
+    summary.textContent = `Prompt 注入 · ${source} · ${role} · ${timing}`;
+    d.appendChild(summary);
+
+    const meta = document.createElement("div");
+    meta.className = "prompt-injection-meta";
+    meta.textContent = `原因: ${p.reason || "未说明"}`;
+    d.appendChild(meta);
+
+    if (p.trigger) {
+      const trigger = document.createElement("pre");
+      trigger.className = "prompt-injection-trigger";
+      trigger.textContent = `触发内容:\n${p.trigger}`;
+      d.appendChild(trigger);
+    }
+
+    if (Array.isArray(p.rules) && p.rules.length) {
+      const rules = document.createElement("pre");
+      rules.className = "prompt-injection-rules";
+      rules.textContent = "规则:\n" + p.rules.map(r =>
+        `[${r.id}] scope=${r.scope || "all"} source=${r.source || "unknown"}\n/${r.pattern || ""}/`
+      ).join("\n");
+      d.appendChild(rules);
+    }
+
+    const content = document.createElement("pre");
+    content.className = "prompt-injection-content";
+    content.textContent = `实际注入 (${role}):\n${p.content || ""}`;
+    d.appendChild(content);
+    flow.appendChild(d);
+  }
+
+
   let streamAcc = "";
   let streamRaf = 0;
   function appendStream(delta) {
-    state.currentReasoning = null;
+    // 文本到来时归档 reasoning（去 running，下次 reasoning 开新块）
+    if (state.currentReasoning) {
+      state.currentReasoning.classList.remove("running");
+      renderReasoningBody(state.currentReasoning, state.reasoningOpen);
+      state.reasoningAcc = "";
+      state.reasoningOpen = false;
+      state.currentReasoning = null;
+    }
     if (!state.currentAssistant) {
       state.busy = true; setBusy(true);
       clearTurnStatus();
@@ -348,17 +398,39 @@ case "goal_round": break;
   }
 
   function toolStart(p) {
+    // 工具开始时归档当前 reasoning 块（去 running，下次 reasoning 开新块）
+    if (state.currentReasoning) {
+      state.currentReasoning.classList.remove("running");
+      renderReasoningBody(state.currentReasoning, state.reasoningOpen);
+      state.currentReasoning = null;
+      state.reasoningAcc = "";
+      state.reasoningOpen = false;
+    }
     const card = document.createElement("div");
     card.className = "msg msg-tool";
     const head = document.createElement("div");
     head.className = "tool-head";
     head.innerHTML = `<b>${escapeHtml(p.name || "tool")}</b> <span class="diffstat">${escapeHtml(p.title || "")}</span><span class="tool-dur"></span>`;
     const code = document.createElement("div");
-    code.className = "tool-code";
+    code.className = "tool-code hidden";
     code.textContent = (p.code || "").split("\n").slice(0, 12).join("\n");
     const result = document.createElement("div");
-    result.className = "tool-result";
+    result.className = "tool-result hidden";
     card.append(head, code, result);
+    // 默认折叠，点 head 展开 code + result
+    head.style.cursor = "pointer";
+    head.addEventListener("click", () => {
+      const open = code.classList.contains("hidden");
+      code.classList.toggle("hidden", !open);
+      result.classList.toggle("hidden", !open);
+      head.querySelector(".tool-chev")?.remove();
+      if (!open) return;
+      const chev = document.createElement("span");
+      chev.className = "tool-chev";
+      chev.textContent = " ▾";
+      chev.style.color = "var(--nb-label-caption)";
+      head.appendChild(chev);
+    });
     flow.appendChild(card);
     card.dataset.startedAt = Date.now();
     state.currentTool = result;
@@ -377,6 +449,7 @@ case "goal_round": break;
   // 工具用时（对齐 TUI ⏱ format_duration）：<60s → X.Xs，否则 Xm Y.Ys
   function formatDur(ms) {
     const secs = ms / 1000;
+    if (ms > 0 && secs < 0.05) return "<0.1s";
     if (secs < 60) return (Math.round(secs * 10) / 10) + "s";
     const m = Math.floor(secs / 60);
     const s = Math.round((secs - m * 60) * 10) / 10;
@@ -833,10 +906,159 @@ case "goal_round": break;
     $("stats-right").innerHTML = `${stTxt} bind:${st.bindings || 0} ${escapeHtml(st.policy || "")}`;
   }
 
+  // ── 进化面板（最左，默认收起）──
+  function initEvolution() {
+    applyEvo(localStorage.getItem("newbee.evo") === "1", false);
+    const expandBtn = $("evo-expand");
+    if (expandBtn) expandBtn.onclick = () => applyEvo(true, true);
+    const collapseBtn = $("evo-collapse");
+    if (collapseBtn) collapseBtn.onclick = () => applyEvo(false, true);
+    const refreshBtn = $("evo-refresh");
+    if (refreshBtn) refreshBtn.onclick = () => refreshEvolution();
+    refreshEvolution();
+    // 每 10s 轮询状态；事件经 WS 实时增量（onEvent 里的 evo_* 分支）
+    setInterval(refreshEvoStatus, 10_000);
+  }
+
+  function applyEvo(open, persist) {
+    document.getElementById("app").classList.toggle("evo-open", open);
+    const expandBtn = $("evo-expand");
+    if (expandBtn) expandBtn.style.display = open ? "none" : "flex";
+    if (persist) localStorage.setItem("newbee.evo", open ? "1" : "0");
+    if (open) flushEvoBuffer();
+  }
+
+  async function refreshEvolution() {
+    await Promise.all([refreshEvoStatus(), refreshEvoFeed()]);
+  }
+
+  async function refreshEvoStatus() {
+    try {
+      const st = await rpc("evolution.status", {});
+      const setV = (id, v) => { const el = $(id); if (el) el.textContent = v == null ? "-" : String(v); };
+      setV("evo-autonomy", st.autonomy);
+      const cs = st.coordinator || {};
+      if (typeof cs === "object") {
+        setV("evo-revision", cs.active_revision != null ? "r" + cs.active_revision : "-");
+        setV("evo-changes", cs.changes != null ? cs.changes : "-");
+      } else {
+        setV("evo-revision", "-");
+        setV("evo-changes", "-");
+      }
+      const kb = (st.event_log_bytes || 0) / 1024;
+      setV("evo-events-size", kb >= 1024 ? (kb / 1024).toFixed(1) + " MB" : Math.round(kb) + " KB");
+    } catch (e) { /* 忽略轮询错误 */ }
+  }
+
+  async function refreshEvoFeed() {
+    try {
+      const feed = await rpc("evolution.feed", { n: 80 });
+      renderEvoFeed(feed.events || []);
+    } catch (e) { /* 忽略 */ }
+  }
+
+  function renderEvoFeed(events) {
+    const box = $("evo-feed");
+    if (!box) return;
+    box.innerHTML = "";
+    if (events.length === 0) {
+      const d = document.createElement("div");
+      d.className = "evo-empty";
+      d.textContent = "暂无进化事件";
+      box.appendChild(d);
+      return;
+    }
+    events.forEach((ev) => box.appendChild(evoEventEl(ev)));
+  }
+
+  function evoEventEl(ev) {
+    const d = document.createElement("div");
+    const kind = ev.topic || "event";
+    d.className = "evo-event kind-" + evoKindClass(kind);
+    const time = (ev.at || "").replace("T", " ").slice(5, 19);
+    const body = evoEventSummary(kind, ev.event);
+    d.innerHTML = `<span class="evo-kind">${escapeHtml(kind)}</span><span class="evo-time">${escapeHtml(time)}</span><div class="evo-body">${escapeHtml(body)}</div>`;
+    return d;
+  }
+
+  function evoKindClass(kind) {
+    if (/reject|error|fail|degraded/.test(kind)) return "rejected";
+    if (/activated|published|switched|created|advanced/.test(kind)) return "activated";
+    return "info";
+  }
+
+  function evoEventSummary(kind, payload) {
+    if (payload == null) return "";
+    if (typeof payload === "string") return payload.slice(0, 200);
+    try {
+      // 对齐 Adapter 日志：列出关键字段
+      const p = payload;
+      switch (kind) {
+        case "evolution_published":
+          return `发布 ${p.release_id || p.plugin_id || "?"} · ${p.kind || ""}`;
+        case "evolution_rejected":
+          return `拒绝 ${p.release_id || p.plugin_id || "?"}: ${p.reason || ""}`;
+        case "release_observation":
+          return `${p.release_id || "?"} · ${p.model || ""} · ${p.success ? "✓" : "✗"} ${p.tokens || 0}tok ${p.latency_ms || 0}ms`;
+        case "change_activated":
+          return `激活 ${p.change_id || p.revision || "?"}`;
+        case "change_rejected":
+          return `拒绝 ${p.change_id || "?"}: ${p.reason || ""}`;
+        case "change_rolled_back":
+          return `回滚 ${p.change_id || "?"}: ${p.reason || ""}`;
+        case "revision_advanced":
+          return `推进至 r${p.revision || "?"}`;
+        case "revision_degraded":
+          return `r${p.revision || "?"} 退化: ${p.reason || ""}`;
+        case "snapshot_created":
+          return `快照 ${p.snapshot_id || p.generation || "?"}`;
+        case "snapshot_restored":
+          return `恢复快照 ${p.snapshot_id || p.generation || "?"}`;
+        case "generation_switched":
+          return `切换 gen → r${p.revision || "?"}`;
+        case "generation_switch_failed":
+          return `切换失败 r${p.revision || "?"}: ${p.reason || ""}`;
+        case "audit":
+          // audit 可能是 tuple 数组 ["audit","dangerous_code",[...],"none"]
+          if (Array.isArray(p)) {
+            const kind = p[1] || "";
+            const arg1 = Array.isArray(p[2]) ? p[2].join(",") : String(p[2] || "");
+            const arg2 = String(p[3] || "");
+            return (kind + " " + arg1 + " " + arg2).trim();
+          }
+          return `${p.action || p.kind || ""} ${p.who || ""} ${Array.isArray(p.paths) ? p.paths.join(",") : (p.what || "")}`.trim();
+        default:
+          return JSON.stringify(payload).slice(0, 200);
+      }
+    } catch (e) {
+      return String(payload).slice(0, 200);
+    }
+  }
+
+  // 实时接收进化事件（从 WS 下行）。先入内存缓冲，面板展开时 flush；
+  // 缓冲满则截断。这样即使面板收起，事件也不丢。
+  let evoBuffer = [];
+  function pushEvoEvent(topic, payload) {
+    evoBuffer.unshift({ topic, event: payload, at: new Date().toISOString() });
+    if (evoBuffer.length > 200) evoBuffer.length = 200;
+    flushEvoBuffer();
+  }
+  function flushEvoBuffer() {
+    const box = $("evo-feed");
+    if (!box || !document.getElementById("app").classList.contains("evo-open")) return;
+    if (evoBuffer.length === 0) return;
+    const empty = box.querySelector(".evo-empty");
+    if (empty) empty.remove();
+    evoBuffer.forEach((ev) => box.prepend(evoEventEl(ev)));
+    evoBuffer = [];
+    while (box.children.length > 100) box.removeChild(box.lastChild);
+  }
+
   // ── 启动 ──
   (async () => {
     initTheme();
     initSidebar();
+    initEvolution();
     const host = await rpc("host.describe", {});
     $("model-label").textContent = host.model || "(no model)";
     if (!state.sid) {

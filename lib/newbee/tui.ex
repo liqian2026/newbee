@@ -849,6 +849,7 @@ defmodule Newbee.TUI do
   """
   def render_event(%__MODULE__{} = state, :text, {:text, delta}) do
     state = finalize_think_block(state)
+
     {ft_sum_ms, ft_count, awaiting} =
       if state.awaiting_first_token and state.llm_step_start do
         now = System.monotonic_time(:millisecond)
@@ -1018,6 +1019,23 @@ defmodule Newbee.TUI do
     Enum.reduce(lines, state, &push_line(&2, &1))
   end
 
+  def render_event(%__MODULE__{} = state, :prompt_injection, {:prompt_injection, details}) do
+    state = flush_text_buffer(state)
+    source = details[:source] || "unknown"
+    role = details[:role] || "system"
+    timing = details[:timing] || "next_request"
+
+    lines =
+      [
+        "\e[35m◆ Prompt 注入\e[0m \e[2msource=#{source} role=#{role} timing=#{timing}\e[0m",
+        "\e[2m原因: #{details[:reason] || "未说明"}\e[0m"
+      ] ++
+        if(details[:trigger], do: ["\e[2m触发内容: #{details[:trigger]}\e[0m"], else: []) ++
+        ["\e[2m实际注入:\n#{details[:content] || ""}\e[0m"]
+
+    Enum.reduce(lines, state, &push_line(&2, &1))
+  end
+
   def render_event(%__MODULE__{} = state, :audit, {:audit, :dangerous_code, hits}) do
     push_line(state, "\e[31m⚖ 审计: 危险代码 #{inspect(hits)}\e[0m")
   end
@@ -1181,7 +1199,17 @@ defmodule Newbee.TUI do
 
   defp ensure_think_block(%__MODULE__{} = state) do
     id = :erlang.unique_integer([:positive])
-    block = %{id: id, kind: :think, name: "think", title: "", code: "", result: "", warnings: nil, started_at: System.monotonic_time(:millisecond)}
+
+    block = %{
+      id: id,
+      kind: :think,
+      name: "think",
+      title: "",
+      code: "",
+      result: "",
+      warnings: nil,
+      started_at: System.monotonic_time(:millisecond)
+    }
 
     state = %{state | tool_blocks: Map.put(state.tool_blocks, id, block), last_block_id: id, think_block_id: id}
 
@@ -1485,6 +1513,7 @@ defmodule Newbee.TUI do
     :io_lib.format("~2..0B:~2..0B", [h, m]) |> IO.iodata_to_binary()
   end
 
+  defp format_duration(secs) when secs > 0 and secs < 0.05, do: "<0.1s"
   defp format_duration(secs) when secs < 60, do: :io_lib.format("~.1fs", [secs]) |> IO.iodata_to_binary()
 
   defp format_duration(secs) do
