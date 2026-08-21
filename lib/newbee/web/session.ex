@@ -176,13 +176,40 @@ defmodule Newbee.Web.Session do
   end
 
 
+  # ── 会话统计持久化（Web.Session 进程重启后保留 usage/turns/steps）──
+  defp stats_path(sid), do: Path.join(Newbee.Session.open(sid).dir, "stats.json")
+
+  defp load_stats(sid) do
+    case File.read(stats_path(sid)) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, m} when is_map(m) ->
+            %{
+              usage_snap: Map.get(m, "usage_snap", %{}),
+              turns: Map.get(m, "turns", 0) || 0,
+              steps_snap: Map.get(m, "steps_snap", 0) || 0
+            }
+          _ -> %{usage_snap: %{}, turns: 0, steps_snap: 0}
+        end
+      _ -> %{usage_snap: %{}, turns: 0, steps_snap: 0}
+    end
+  end
+
+  defp save_stats(%{sid: sid, usage_snap: u, turns: t, steps_snap: s}) do
+    File.mkdir_p!(Path.dirname(stats_path(sid)))
+    File.write!(stats_path(sid), Jason.encode!(%{usage_snap: u, turns: t, steps_snap: s}))
+  rescue
+    _ -> :ok
+  end
   @impl true
   def init(sid) do
     client = client_for_session(sid)
 
     if client.api_key do
       kernel = start_kernel(sid, client)
-      {:ok, %__MODULE__{kernel: kernel, sid: sid, client: client}}
+      stats = load_stats(sid)
+      {:ok, %__MODULE__{kernel: kernel, sid: sid, client: client,
+                        usage_snap: stats.usage_snap, turns: stats.turns, steps_snap: stats.steps_snap}}
     else
       broadcast(sid, :error, %{message: "缺少 API key：检查 ~/.newbee/model.json"})
       {:stop, :no_api_key}
@@ -236,7 +263,9 @@ defmodule Newbee.Web.Session do
   # usage 快照（render 回调经 cast 推来，绝不 call 忙碌 kernel）
   def handle_cast({:usage_snap, usage}, st) when is_map(usage) do
     merged = Map.merge(st.usage_snap, usage, fn _k, a, b -> (num(a) || 0) + (num(b) || 0) end)
-    {:noreply, %{st | usage_snap: merged, steps_snap: st.steps_snap + 1}}
+    next = %{st | usage_snap: merged, steps_snap: st.steps_snap + 1}
+    save_stats(next)
+    {:noreply, next}
   end
 
 
@@ -287,6 +316,7 @@ defmodule Newbee.Web.Session do
   @impl true
   def handle_info({:turn_finished, result}, st) do
     st = %{st | turns: st.turns + 1}
+    save_stats(st)
     broadcast_turn_end(st.sid, result)
 
     case :queue.out(st.queue) do

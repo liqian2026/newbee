@@ -138,6 +138,27 @@ const flow = $("flow");
               ftSum: 0, ftCount: 0, ftRecorded: false, outTok: 0 },
   };
 
+  // ── 会话统计持久化（按 sessionId 存 localStorage，刷新/重连后保留）──
+  const statsKey = (sid) => "newbee.stats." + sid;
+  function saveTiming() {
+    if (!state.sid) return;
+    try { localStorage.setItem(statsKey(state.sid), JSON.stringify(state.timing)); } catch (e) {}
+  }
+  function loadTiming(sid) {
+    try {
+      const raw = localStorage.getItem(statsKey(sid));
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved && typeof saved === "object") {
+        state.timing = { llmMs: 0, toolMs: 0, llmStart: null, toolStart: null,
+                         ftSum: 0, ftCount: 0, ftRecorded: false, outTok: 0, ...saved };
+        // 活动计时器跨刷新无意义，置空
+        state.timing.llmStart = null; state.timing.toolStart = null;
+      }
+    } catch (e) {}
+  }
+  function clearTiming(sid) { try { localStorage.removeItem(statsKey(sid)); } catch (e) {} }
+
   // ── RPC ──
   let rpcSeq = 0;
   async function rpc(method, payload) {
@@ -218,6 +239,7 @@ const flow = $("flow");
         if (t.toolStart !== null) { t.toolMs += now - t.toolStart; t.toolStart = null; }
         break;
     }
+    saveTiming();
   }
   function fmtDur(ms) {
     const s = ms / 1000;
@@ -736,6 +758,7 @@ case "goal_round": break;
   async function resume(sid) {
     state.sid = sid;
     localStorage.setItem("newbee.sid", sid);
+    loadTiming(sid);
     flow.innerHTML = "";
     await rpc("session.resume", { sessionId: sid });
     const [hist, sessionState] = await Promise.all([
