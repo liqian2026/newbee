@@ -402,6 +402,7 @@ defmodule Newbee.Web.Session do
         {:ask, q} -> {:ask, %{question: q}}
         {:text, body} -> {:text_end, %{body: body}}
         {:error, e} -> {:error, %{message: inspect(e)}}
+        {:interrupted, _} -> {:interrupted, %{}}
         other -> {:error, %{message: inspect(other)}}
       end
 

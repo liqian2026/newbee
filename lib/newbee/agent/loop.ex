@@ -64,10 +64,7 @@ defmodule Newbee.Agent.Loop do
     if is_pid(kernel) and Process.alive?(kernel), do: send(kernel, :interrupt)
 
     # 求值路由：优先 EvaluatorPool（generation 路由），否则具名 Evaluator
-    # 这是非阻塞控制面：不能向正在 handle_call/2 中运行的 Loop 发 call。
-    Newbee.LLM.Client.interrupt()
 
-    # 求值路由：优先 EvaluatorPool（generation 路由），否则具名 Evaluator
     case Newbee.Environment.EvaluatorPool.current() do
       nil ->
         if Process.whereis(Newbee.DEE.Evaluator), do: Newbee.DEE.Evaluator.interrupt()
