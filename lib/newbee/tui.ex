@@ -55,7 +55,19 @@ defmodule Newbee.TUI do
             search_mode: false,
             search_query: "",
             search_idx: 0,
-            search_orig: ""
+            search_orig: "",
+            turns: 0,
+            steps: 0,
+            llm_ms: 0,
+            tool_ms: 0,
+            llm_step_start: nil,
+            tool_step_start: nil,
+            awaiting_first_token: false,
+            ft_sum_ms: 0,
+            ft_count: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0
 
   @scrollback 5_000
 
@@ -76,7 +88,12 @@ defmodule Newbee.TUI do
     Newbee.Bus.subscribe()
 
     {:ok, kernel} =
-      Newbee.Agent.Loop.start_link(client: client, evaluator: Newbee.Environment.Boot.evaluator_or_fallback(), auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(
+        client: client,
+        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(),
+        auto_antibodies: true,
+        render: fn _ -> :ok end
+      )
 
     # 输出走独立 fd 端口：IO.getn 挂起时 group leader 会排队所有输出
     # （"不输入就不输出"的根因），端口直写 tty 与输入解耦。
@@ -218,7 +235,15 @@ defmodule Newbee.TUI do
             send(state.kernel, {:permission_reply, false})
             state |> Map.put(:awaiting_permission, false) |> push_line("\e[31m⏹ 已拒绝并中断\e[0m")
           else
-            state |> push_line("\e[31m⏹ 已请求中断…\e[0m")
+            kind_hint =
+              cond do
+                state.submit_kind == :shell -> "shell 任务"
+                state.streaming -> "模型推理/工具执行"
+                true -> "当前任务"
+              end
+
+            state
+            |> push_line("\e[31m⏹ 中断已触发 · 正在取消 #{kind_hint}…\e[0m \e[2m（若 1s 内未停止可再按 Esc）\e[0m")
           end
 
         # 丢弃已排队的滞后渲染事件，防"取消后仍吐字"
@@ -227,7 +252,7 @@ defmodule Newbee.TUI do
           |> Map.merge(%{busy: false, submit_pid: nil, submit_kind: nil})
           |> maybe_start_next()
 
-        loop(paint(state), reader)
+        loop(paint(state, true), reader)
 
       {:key, key} ->
         if state.picker do
@@ -279,7 +304,7 @@ defmodule Newbee.TUI do
           loop(state, reader)
         else
           state = state |> render_event(topic, payload) |> schedule_paint()
-          state = if topic == :turn_done, do: maybe_start_next(state), else: state
+          state = if topic == :turn_end, do: maybe_start_next(state), else: state
           loop(state, reader)
         end
 
@@ -595,6 +620,9 @@ defmodule Newbee.TUI do
           |> Map.put(:busy, true)
           |> Map.put(:page, 0)
           |> Map.put(:turn_started_at, System.monotonic_time(:millisecond))
+          |> Map.put(:llm_step_start, System.monotonic_time(:millisecond))
+          |> Map.put(:awaiting_first_token, true)
+          |> Map.update(:turns, 1, &(&1 + 1))
 
         state = paint(state)
 
@@ -705,31 +733,10 @@ defmodule Newbee.TUI do
   defp next_pane(:queue), do: nil
 
   defp run_submit(state, text) do
-    parent = self()
-
     # 异步跑 turn：主循环继续处理输入/中断
     caller =
       spawn_link(fn ->
-        case Newbee.Agent.Loop.submit(state.kernel, text) do
-          {:done, summary} ->
-            send(parent, {:newbee_event, :done, {:done, summary}})
-            send(parent, {:newbee_event, :turn_done, {:turn_done, nil}})
-
-          {:ask, q} ->
-            send(parent, {:newbee_event, :ask, {:ask, q}})
-            send(parent, {:newbee_event, :turn_done, {:turn_done, nil}})
-
-          {:text, _} ->
-            send(parent, {:newbee_event, :turn_done, {:turn_done, nil}})
-
-          {:error, e} ->
-            send(parent, {:newbee_event, :error, {:error, e}})
-            send(parent, {:newbee_event, :turn_done, {:turn_done, nil}})
-
-          {:interrupted, content} ->
-            send(parent, {:newbee_event, :interrupted, {:interrupted, content}})
-            send(parent, {:newbee_event, :turn_done, {:turn_done, nil}})
-        end
+        Newbee.Agent.Loop.submit(state.kernel, text)
       end)
 
     Process.send_after(self(), :spinner_tick, 80)
@@ -738,7 +745,13 @@ defmodule Newbee.TUI do
 
   defp resume_kernel(client, id) do
     {:ok, kernel} =
-      Newbee.Agent.Loop.start_link(client: client, evaluator: Newbee.Environment.Boot.evaluator_or_fallback(session_id: id), session_id: id, auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(
+        client: client,
+        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(session_id: id),
+        session_id: id,
+        auto_antibodies: true,
+        render: fn _ -> :ok end
+      )
 
     meta = Newbee.Session.meta(id)
     send(self(), {:newbee_event, :tui_say, {:tui_say, "已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}"}})
@@ -777,6 +790,15 @@ defmodule Newbee.TUI do
     - 其余 topic 渲染成一行后 push_line
   """
   def render_event(%__MODULE__{} = state, :text, {:text, delta}) do
+    {ft_sum_ms, ft_count, awaiting} =
+      if state.awaiting_first_token and state.llm_step_start do
+        now = System.monotonic_time(:millisecond)
+        {state.ft_sum_ms + max(now - state.llm_step_start, 0), state.ft_count + 1, false}
+      else
+        {state.ft_sum_ms, state.ft_count, state.awaiting_first_token}
+      end
+
+    state = %{state | ft_sum_ms: ft_sum_ms, ft_count: ft_count, awaiting_first_token: awaiting}
     # 缓冲 delta 中的文本, 遇到换行符时渲染完整行
     combined = state.text_buffer <> delta
 
@@ -835,10 +857,47 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :usage, {:usage, usage}) do
-    %{state | usage: merge_usage(state.usage, usage)}
+    now = System.monotonic_time(:millisecond)
+    llm_ms = if state.llm_step_start, do: state.llm_ms + max(now - state.llm_step_start, 0), else: state.llm_ms
+    pt = to_num(usage["prompt_tokens"] || usage[:prompt_tokens]) || 0
+    ct = to_num(usage["completion_tokens"] || usage[:completion_tokens]) || 0
+
+    cr0 =
+      to_num(usage["cache_read_tokens"] || usage[:cache_read_tokens] || usage["cached_tokens"] || usage[:cached_tokens]) ||
+        0
+
+    cr =
+      if cr0 == 0,
+        do:
+          to_num(
+            get_in(usage, ["prompt_tokens_details", "cached_tokens"]) ||
+              get_in(usage, [:prompt_tokens_details, :cached_tokens])
+          ) || 0,
+        else: cr0
+
+    %{
+      state
+      | usage: merge_usage(state.usage, usage),
+        llm_ms: llm_ms,
+        llm_step_start: nil,
+        steps: state.steps + 1,
+        prompt_tokens: state.prompt_tokens + pt,
+        completion_tokens: state.completion_tokens + ct,
+        cached_tokens: state.cached_tokens + cr
+    }
   end
 
   def render_event(%__MODULE__{} = state, :tool_start, {:tool_start, name, title, code}) do
+    now = System.monotonic_time(:millisecond)
+
+    {llm_ms, llm_step_start} =
+      if state.llm_step_start do
+        {state.llm_ms + max(now - state.llm_step_start, 0), nil}
+      else
+        {state.llm_ms, nil}
+      end
+
+    state = %{state | llm_ms: llm_ms, llm_step_start: llm_step_start, tool_step_start: now}
     state = flush_text_buffer(state)
     id = :erlang.unique_integer([:positive])
 
@@ -856,6 +915,9 @@ defmodule Newbee.TUI do
   end
 
   def render_event(%__MODULE__{} = state, :tool_result, {:tool_result, _name, text}) do
+    now = System.monotonic_time(:millisecond)
+    tool_ms = if state.tool_step_start, do: state.tool_ms + max(now - state.tool_step_start, 0), else: state.tool_ms
+    state = %{state | tool_ms: tool_ms, tool_step_start: nil, llm_step_start: now, awaiting_first_token: true}
     state = flush_text_buffer(state)
     id = Map.get(state, :last_block_id)
 
@@ -960,17 +1022,18 @@ defmodule Newbee.TUI do
     dur_str =
       if state.turn_started_at do
         secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
-        "\e[2m⏱ 用时 #{format_duration(secs)} · 已中断\e[0m"
+        "\e[31m⏹ 已中断\e[0m \e[2m· 用时 #{format_duration(secs)} · 回合已取消，可继续输入\e[0m"
       else
-        "\e[31m⏹ 已中断\e[0m"
+        "\e[31m⏹ 已中断 · 回合已取消，可继续输入\e[0m"
       end
 
     state = push_line(state, dur_str)
-    state = %{state | turn_started_at: nil}
-    if content, do: push_line(state, content), else: state
+    state = %{state | turn_started_at: nil, busy: false, streaming: false, submit_pid: nil, submit_kind: nil}
+    state = if content && content != "", do: push_line(state, "\e[2m  #{content}\e[0m"), else: state
+    state
   end
 
-  def render_event(%__MODULE__{} = state, :turn_done, _) do
+  def render_event(%__MODULE__{} = state, :turn_end, _) do
     state = flush_text_buffer(state)
     state = refresh_bindings(state)
 
@@ -1315,45 +1378,115 @@ defmodule Newbee.TUI do
   end
 
   defp status_line(state) do
-    usage = state.usage
-    tokens = Map.get(usage, "total_tokens", 0)
-    tok_str = human_tok(tokens)
     bs = state.bindings_cache || []
     bindings = length(bs)
     dots = spinner(state)
 
-    elapsed_str =
-      if state.busy and state.turn_started_at do
-        secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
-        " ⏱ #{format_duration(secs)}"
+    # —— 轮·步 ——
+    turns = Map.get(state, :turns, 0)
+    steps = Map.get(state, :steps, 0)
+    seg_turn = if turns > 0 or steps > 0, do: "#{turns} 轮 · #{steps} 步", else: nil
+
+    # —— LLM/工具耗时（累计 + 忙时含当前段）——
+    {live_llm, live_tool} =
+      if state.busy do
+        now = System.monotonic_time(:millisecond)
+        extra_llm = if state.llm_step_start, do: max(now - state.llm_step_start, 0), else: 0
+        extra_tool = if state.tool_step_start, do: max(now - state.tool_step_start, 0), else: 0
+        {state.llm_ms + extra_llm, state.tool_ms + extra_tool}
       else
-        ""
+        {state.llm_ms, state.tool_ms}
+      end
+
+    seg_time =
+      if live_llm > 0 or live_tool > 0,
+        do: "LLM #{format_duration(live_llm / 1000)} · 工具 #{format_duration(live_tool / 1000)}",
+        else: nil
+
+    # —— 首 token · 速率 ——
+    ft_str = if state.ft_count > 0, do: "首 token #{format_duration(state.ft_sum_ms / state.ft_count / 1000)}", else: nil
+
+    rate_str =
+      if live_llm > 0 and state.completion_tokens > 0 do
+        "#{Float.round(state.completion_tokens / (live_llm / 1000), 1)} tok/s"
+      end
+
+    seg_speed =
+      case Enum.reject([ft_str, rate_str], &is_nil/1) do
+        [] -> nil
+        xs -> Enum.join(xs, " · ")
+      end
+
+    # —— 缓存 ——
+    cache_str =
+      if state.prompt_tokens > 0 do
+        pct = trunc(state.cached_tokens * 100.0 / state.prompt_tokens)
+        "缓存 #{pct}%"
+      end
+
+    # —— 输入/输出 ——
+    seg_io =
+      if state.prompt_tokens > 0 or state.completion_tokens > 0 do
+        "入 #{human_tok(state.prompt_tokens)} · 出 #{human_tok(state.completion_tokens)}"
+      end
+
+    segments = Enum.reject([seg_turn, seg_time, seg_speed, cache_str, seg_io], &is_nil/1)
+    dashboard = if segments == [], do: nil, else: Enum.join(segments, " | ")
+
+    status_badge =
+      cond do
+        state.awaiting_permission -> "\e[35m? 等待确认\e[0m"
+        state.busy and state.submit_kind == :shell -> "\e[33m$ shell#{elapsed_str(state)}\e[0m"
+        state.busy -> "\e[33m▶ 运行#{elapsed_str(state)}\e[0m"
+        true -> "\e[32m● 空闲\e[0m"
       end
 
     page_hint = if state.page > 0, do: " ↕#{state.page}", else: ""
     q = length(state.pending_inputs)
     qpart = if q > 0, do: " q:#{q}", else: ""
+
     left = "\e[2m#{dots}#{state.client.model} · #{Path.basename(File.cwd!())}\e[0m"
-    # 人性化 tok + 窄屏自适应：右栏过长时优先缩 model 名，仍保证 tok/bind/policy 可见
-    right_core = "tok:#{tok_str} bind:#{bindings}#{qpart} #{Newbee.Environment.Autonomy.get()}"
-    right = "\e[2m#{page_hint}\e[33m#{elapsed_str}\e[0m\e[2m #{right_core}\e[0m"
+    right_core = "bind:#{bindings}#{qpart} #{Newbee.Environment.Autonomy.get()}"
+    right = "\e[2m#{page_hint}\e[0m#{status_badge}\e[2m #{right_core}\e[0m"
+
     cols = max(terminal_cols(), 40)
     lw = visible_len(left)
     rw = visible_len(right)
-    # 窄屏：右栏 tok/bind/policy 永远完整，左栏 model 名可截断
-    {left, lw} =
-      if cols < lw + rw + 4 do
-        # 截断左边可见文本而非原始 ANSI 串，避免半个转义被切
-        visible_left = left |> String.replace(~r/\e\[[0-9;]*m/, "")
-        keep = max(cols - rw - 6, 8)
-        truncated = String.slice(visible_left, 0, keep) <> "…"
-        {"\e[2m#{truncated}\e[0m", keep + 1}
-      else
-        {left, lw}
-      end
+    dw = if dashboard, do: visible_len(dashboard), else: 0
 
-    pad = max(cols - lw - rw - 2, 1)
-    left <> String.duplicate(" ", pad) <> right
+    cond do
+      dashboard != nil and cols >= lw + dw + rw + 8 ->
+        gap1 = max(div(cols - lw - dw - rw, 2), 1)
+        gap2 = max(cols - lw - dw - rw - gap1, 1)
+        left <> String.duplicate(" ", gap1) <> "\e[36m" <> dashboard <> "\e[0m" <> String.duplicate(" ", gap2) <> right
+
+      dashboard != nil and cols >= lw + dw + 4 ->
+        pad = max(cols - lw - dw - 2, 1)
+        left <> String.duplicate(" ", pad) <> "\e[36m" <> dashboard <> "\e[0m"
+
+      true ->
+        {left, lw} =
+          if cols < lw + rw + 4 do
+            visible_left = left |> String.replace(~r/\e\[[0-9;]*m/, "")
+            keep = max(cols - rw - 6, 8)
+            truncated = String.slice(visible_left, 0, keep) <> "…"
+            {"\e[2m#{truncated}\e[0m", keep + 1}
+          else
+            {left, lw}
+          end
+
+        pad = max(cols - lw - rw - 2, 1)
+        left <> String.duplicate(" ", pad) <> right
+    end
+  end
+
+  defp elapsed_str(state) do
+    if state.busy and state.turn_started_at do
+      secs = (System.monotonic_time(:millisecond) - state.turn_started_at) / 1000
+      " #{format_duration(secs)}"
+    else
+      ""
+    end
   end
 
   defp human_tok(n) when is_integer(n) and n >= 1_000_000_000,

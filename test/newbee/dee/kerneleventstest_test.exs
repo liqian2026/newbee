@@ -22,7 +22,8 @@ defmodule Newbee.Agent.LoopEventsTest do
       )
 
     assert {:done, "done"} = Loop.submit(kernel, "go")
-
+    assert_received {:newbee_event, :done, {:done, "done"}}
+    refute_received {:newbee_event, :done, {:done, "done"}}
     assert_received {:newbee_event, :usage, {:usage, %{"prompt_tokens" => 3}}}
     assert_received {:newbee_event, :tool_error, {:tool_error, rendered}}
     assert rendered =~ "boom"

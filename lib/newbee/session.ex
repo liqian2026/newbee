@@ -392,8 +392,9 @@ defmodule Newbee.Session do
     |> Enum.sort(:desc)
   end
 
-  # 文件 mtime 为本地时间。相对化：今天/昨天显示时段，跨年显示日期。
-  defp when_str({{y, m, d}, {h, mi, _}}) do
+  # File.stat/1 的 datetime tuple 按 UTC 返回；显示前必须转换为系统本地时间。
+  defp when_str(utc_datetime) do
+    {{y, m, d}, {h, mi, _}} = :calendar.universal_time_to_local_time(utc_datetime)
     {{ny, nm, nd}, _} = :calendar.local_time()
     yesterday = (:calendar.date_to_gregorian_days({ny, nm, nd}) - 1) |> :calendar.gregorian_days_to_date()
     pad = &String.pad_leading(Integer.to_string(&1), 2, "0")

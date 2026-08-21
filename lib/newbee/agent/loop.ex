@@ -178,8 +178,10 @@ defmodule Newbee.Agent.Loop do
   @impl true
   def handle_call({:submit, text}, _from, state) do
     # 注意：不能在回合开始清中断标志——execute_calls 阶段的中断检查依赖它。
+    # 热加载中的 Loop 可能已持有启动前写入的空 assistant；提交前清掉，避免再次触发上游 400。
     t0 = :erlang.monotonic_time(:millisecond)
     Newbee.DebugLog.log(:submit, "start text=#{String.slice(text, 0, 120) |> inspect()}")
+    state = %{state | messages: drop_empty_assistant_messages(state.messages)}
     state = push_msg(state, %{"role" => "user", "content" => text})
     {reply, state} = run_turn(state, 1)
     {reply, state} = after_turn(reply, state)
@@ -406,7 +408,19 @@ defmodule Newbee.Agent.Loop do
       {:ok, msg, usage} ->
         Newbee.DebugLog.log(:turn, "step #{step} llm ok calls=#{length(msg["tool_calls"] || [])}")
         emit(state, {:usage, Map.put(usage, "model", client_model(state.client))})
-        state = %{push_msg(state, msg) | usage: merge_usage(state.usage, usage)}
+        state = %{state | usage: merge_usage(state.usage, usage)}
+
+        # 上游（DeepSeek/OpenRouter 系）拒绝 content 为空的 assistant 消息（400）：
+        # 模型偶发返回"空正文且无工具调用"（只吐思考流/空串），该消息一旦落进
+        # transcript，后续整个历史请求都会 400 卡死。空回复无信息量，不进历史
+        # （同时也保持原 msg 继续走下方空文本回合结束逻辑）。
+        state =
+          if empty_assistant_msg?(msg) do
+            Newbee.DebugLog.log(:turn, "step #{step} empty assistant response dropped")
+            state
+          else
+            push_msg(state, msg)
+          end
 
         case Newbee.Codec.extract_tool_calls(msg) do
           [] ->
@@ -611,9 +625,27 @@ defmodule Newbee.Agent.Loop do
   # 宽松沙箱（§8 放行+审计）：危险模式不拦，但写事件日志留证
   @dangerous ~w(:init.stop System.halt :erlang.halt :code.delete :code.purge File.rm_rf!)
 
+  # assistant 消息"空"= 无正文（含空白）且无工具调用。上游（DeepSeek/OpenRouter 系）
+  # 直接拒绝这类消息（400），它们对模型也毫无信息量。
+  defp empty_assistant_msg?(%{"role" => "assistant", "content" => content} = msg) do
+    tool_calls = msg["tool_calls"] || []
+
+    if is_binary(content) do
+      String.trim(content) == "" and tool_calls == []
+    else
+      tool_calls == []
+    end
+  end
+
+  defp empty_assistant_msg?(_), do: false
+  defp drop_empty_assistant_messages(messages), do: Enum.reject(messages, &empty_assistant_msg?/1)
+
   # 崩溃/中断会在 transcript 留下悬空 tool_calls（DeepSeek 严格校验直接 400）。
-  # 载入时修补：缺响应的补占位 tool 消息，孤立 tool 消息丢弃。
+  # 载入时修补：缺响应的补占位 tool 消息，孤立 tool 消息丢弃；
+  # 顺带丢弃空 assistant 消息（否则整段历史请求被上游 400 拒）。
   defp repair_history(messages) do
+    messages = Enum.reject(messages, &empty_assistant_msg?/1)
+
     {chunks, pending} =
       Enum.map_reduce(messages, [], fn msg, pending ->
         case msg do

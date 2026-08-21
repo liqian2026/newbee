@@ -271,24 +271,22 @@ defmodule Newbee do
 
       # docs_v1 外层：{annotation, beam_lang, format, module_doc, metadata, docs}
       # 函数元组：{{kind, name, arity}, annotation, signature, doc, metadata}
-      moduledoc =
-        case module_doc do
-          %{"en" => doc} when is_binary(doc) -> doc
-          _ -> ""
-        end
+      # 文档值在 Elixir ≥1.15 是 `%{"en" => text}` 语言分键 map，旧版才是裸 binary；
+      # 只认 binary 会把所有函数 @doc 渲染成空串（模型从此对工具 API 一无所知，
+      # 只能瞎猜函数名，如 Fs.write 猜成 write_file）。
+      moduledoc = doc_text(module_doc)
 
       funcs =
         func_docs
         |> Enum.filter(fn
           {{:function, name, _arity}, _, _, doc, _} when name not in [:__info__, :module_info] ->
-            is_binary(doc) or doc != :none
+            doc_text(doc) != ""
 
           _ ->
             false
         end)
         |> Enum.map_join("\n", fn {{:function, name, arity}, _, _, doc, _} ->
-          doc = if is_binary(doc), do: doc, else: ""
-          "  #{name}/#{arity}: #{String.slice(doc, 0, 200)}"
+          "  #{name}/#{arity}: #{String.slice(doc_text(doc), 0, 200)}"
         end)
 
       {:ok, "## #{module_name}\n" <> moduledoc <> "\n" <> funcs}
@@ -298,4 +296,12 @@ defmodule Newbee do
   rescue
     _ -> {:error, :module_not_found}
   end
+
+  # docs_v1 文档值统一提文本：language-keyed map（%{"en" => …}）、{format, text} 元组、
+  # 裸 binary 都收；:none/缺文档 → ""。
+  defp doc_text(%{"en" => text}) when is_binary(text), do: text
+  defp doc_text(%{"zh" => text}) when is_binary(text), do: text
+  defp doc_text({_format, text}) when is_binary(text), do: text
+  defp doc_text(text) when is_binary(text), do: text
+  defp doc_text(_), do: ""
 end

@@ -121,6 +121,85 @@ defmodule Newbee.Agent.LoopTest do
     File.rm(s.transcript)
   end
 
+  test "模型返回空正文且无工具调用：不给历史落空 assistant（上游 400 根因）" do
+    {:ok, ev} = Evaluator.start(mode: :local)
+
+    script = [
+      fn _messages, _on_text -> {:ok, %{"role" => "assistant", "content" => " \n "}, %{}} end
+    ]
+
+    {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
+    assert {:text, " \n "} = Loop.submit(kernel, "hi")
+
+    msgs = :sys.get_state(kernel).messages
+
+    refute Enum.any?(msgs, fn m ->
+             m["role"] == "assistant" and String.trim(m["content"] || "") == "" and
+               (m["tool_calls"] || []) == []
+           end)
+  end
+
+  test "热加载后的活动 Loop：提交前清理旧空 assistant" do
+    {:ok, ev} = Evaluator.start(mode: :local)
+
+    script = [
+      fn messages, _on_text ->
+        refute Enum.any?(messages, fn m ->
+                 m["role"] == "assistant" and String.trim(m["content"] || "") == "" and
+                   (m["tool_calls"] || []) == []
+               end)
+
+        {:ok, %{"role" => "assistant", "content" => "fine", "tool_calls" => []}, %{}}
+      end
+    ]
+
+    {:ok, kernel} =
+      Loop.start_link(
+        client: %{},
+        evaluator: ev,
+        session: false,
+        client_fun: scripted(script)
+      )
+
+    :sys.replace_state(kernel, fn state ->
+      %{state | messages: state.messages ++ [%{"role" => "assistant", "content" => ""}]}
+    end)
+
+    assert {:text, "fine"} = Loop.submit(kernel, "继续")
+  end
+
+  test "恢复含空 assistant 的 transcript：载入时丢弃（上游 400 根因）" do
+    {:ok, ev} = Evaluator.start(mode: :local)
+    sid = "test_repair_empty_#{:erlang.unique_integer([:positive])}"
+    s = Newbee.Session.open(sid)
+    Newbee.Session.append(s, %{"role" => "user", "content" => "hi"})
+    # 污染现场：模型某轮返回了空正文且无工具调用的 assistant
+    Newbee.Session.append(s, %{"role" => "assistant", "content" => "   "})
+    Newbee.Session.append(s, %{"role" => "assistant", "content" => "ok", "tool_calls" => []})
+
+    script = [
+      fn messages, _t ->
+        refute Enum.any?(messages, fn m ->
+                 m["role"] == "assistant" and String.trim(m["content"] || "") == "" and
+                   (m["tool_calls"] || []) == []
+               end)
+
+        {:ok, %{"role" => "assistant", "content" => "fine", "tool_calls" => []}, %{}}
+      end
+    ]
+
+    {:ok, kernel} =
+      Loop.start_link(
+        client: %{},
+        evaluator: ev,
+        session_id: sid,
+        client_fun: scripted(script)
+      )
+
+    assert {:text, "fine"} = Loop.submit(kernel, "继续")
+    File.rm(s.transcript)
+  end
+
   test "恢复会话逐字复用首次 system prompt" do
     {:ok, ev} = Evaluator.start(mode: :local)
     sid = "test_prefix_resume_#{System.unique_integer([:positive, :monotonic])}_#{System.system_time(:microsecond)}"

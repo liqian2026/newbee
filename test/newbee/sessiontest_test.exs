@@ -61,4 +61,17 @@ defmodule Newbee.SessionTest do
     msgs = Session.messages(s)
     assert Enum.map(msgs, & &1["content"]) == ["hi", "after"]
   end
+
+  test "会话时间按本地时区显示" do
+    s = Session.open("test_#{:erlang.unique_integer([:positive])}")
+    Session.append(s, %{"role" => "user", "content" => "time"})
+
+    stat = File.stat!(s.transcript)
+
+    {{_y, _m, _d}, {hour, minute, _second}} =
+      :calendar.universal_time_to_local_time(stat.mtime)
+
+    pad = &String.pad_leading(Integer.to_string(&1), 2, "0")
+    assert Session.meta(s.id).when_str =~ "#{pad.(hour)}:#{pad.(minute)}"
+  end
 end
