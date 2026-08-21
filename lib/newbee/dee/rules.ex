@@ -26,6 +26,28 @@ defmodule Newbee.DEE.Rules do
 
   # ── 内建 J-Space invariants（§?）：可文本检测的 outer 纪律 ──
 
+  # Generic rules distilled from HA drill (cross-project, notify-worthy)
+  @generic_rules [
+    %{
+      id: "ssh-quote-nesting",
+      scope: :code,
+      pattern: "ssh.*curl.*python.*f\"",
+      injection: "[Rule] ssh 嵌套引号易炸：外层用单引号包 ssh 命令，内层 curl|python 用双引号；f-string 内不要出现反斜杠，改用 format 或拼接。"
+    },
+    %{
+      id: "py-runtime-drift",
+      scope: :code,
+      pattern: "ModuleNotFoundError|No module named",
+      injection: "[Rule] 解释器版本漂移：多版本 Python 共存时用显式版本调用；留意 3.12+ 已移除的标准库，先判运行时版本再决定回退或兼容。"
+    },
+    %{
+      id: "api-type-dual-track",
+      scope: :all,
+      pattern: "boolean.*string|string.*boolean",
+      injection: "[Rule] API 类型双轨：同一字段在不同端点可能是 bool 与 string 双轨；前端用联合类型兼容，后端源头统一为 bool。"
+    }
+  ]
+
   @jspace_rules [
     %{
       id: "jspace-outer",
@@ -112,7 +134,7 @@ defmodule Newbee.DEE.Rules do
 
   @impl true
   def init(_) do
-    rules = seed_jspace(load())
+    rules = load() |> seed_generic() |> seed_jspace()
     {:ok, %__MODULE__{rules: rules}}
   end
 
@@ -157,6 +179,15 @@ defmodule Newbee.DEE.Rules do
   end
 
   # 内建 J-Space 规则播种：缺则补（用户删过的不会复活），有改动才落盘
+  defp seed_generic(rules) do
+    {rules, added?} =
+      Enum.reduce(@generic_rules, {rules, false}, fn r, {acc, added?} ->
+        if Enum.any?(acc, &(&1.id == r.id)), do: {acc, added?}, else: {acc ++ [%{id: r.id, pattern: r.pattern, injection: r.injection, source: :generic, scope: r.scope}], true}
+      end)
+    if added?, do: persist(rules)
+    rules
+  end
+
   defp seed_jspace(rules) do
     {rules, added?} =
       Enum.reduce(@jspace_rules, {rules, false}, fn r, {acc, added?} ->

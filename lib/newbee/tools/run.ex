@@ -17,9 +17,14 @@ defmodule Newbee.Tools.Run do
   defp gate(cmd) do
     if Regex.match?(@dangerous_re, cmd) do
       case Newbee.Permissions.get() do
-        :lenient -> :allow
-        :ask -> {:deny, "[denied: ask 档 — 高危命令需 /permissions lenient 或 /approve 后执行: #{String.slice(cmd, 0, 120)}]"}
-        :deny -> {:deny, "[denied: deny 档 — 高危命令已拦截: #{String.slice(cmd, 0, 120)}]"}
+        :lenient ->
+          :allow
+
+        :ask ->
+          {:deny, "[denied: ask 档 — 高危命令需 /permissions lenient 或 /approve 后执行: " <> String.slice(cmd, 0, 120) <> "]"}
+
+        :deny ->
+          {:deny, "[denied: deny 档 — 高危命令已拦截: " <> String.slice(cmd, 0, 120) <> "]"}
       end
     else
       :allow
@@ -68,11 +73,22 @@ defmodule Newbee.Tools.Run do
     if result.exit == 0, do: {:ok, result.output}, else: {:error, result.output}
   end
 
+  @doc "Django test helper: auto picks python3.11 when cgi missing."
+  def django_test(args \\ "apps.ha_bridge", opts \\ []) do
+    py = if System.find_executable("python3.11"), do: "python3.11", else: "python3"
+    sh(py <> " BackCode/manage.py test " <> args, opts)
+  end
+
+  @doc "Long-running variant: default 180s for harness run-group."
+  def sh_long(cmd, opts \\ []) do
+    sh(cmd, Keyword.put_new(opts, :timeout, 180_000))
+  end
+
   defp truncate(s) when byte_size(s) <= @max_output, do: s
 
   defp truncate(s) do
     head = binary_part(s, 0, div(@max_output, 2))
     tail = binary_part(s, byte_size(s) - div(@max_output, 2), div(@max_output, 2))
-    head <> "\n… [输出截断: #{byte_size(s)} bytes] …\n" <> tail
+    head <> "\n… [输出截断: " <> to_string(byte_size(s)) <> " bytes] …\n" <> tail
   end
 end
