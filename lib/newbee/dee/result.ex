@@ -62,6 +62,31 @@ defmodule Newbee.DEE.Result do
         💡 修复建议：函数收到的参数类型/数量没有匹配任何子句。先用 `IO.inspect(value, label: "value")` 检查实际值，并为预期类型增加匹配或兜底子句。
         """
 
+
+      String.contains?(error, "MatchError") and String.contains?(error, "%{") ->
+        """
+
+        💡 修复建议：返回值是 map 而非 tuple。工具函数如 `Run.sh/1`、`Run.sh/2` 返回 `%{exit:, output:}`，用 `result = Run.sh(cmd)` 再取 `result.output` / `result.exit`，不要用 `{out, code} = ...` 解构。
+        """
+
+      String.contains?(error, "MatchError") ->
+        """
+
+        💡 修复建议：模式匹配失败。先用 `IO.inspect(value, label: "debug")` 查看实际值结构，再写匹配模式。常见原因：函数返回值结构和预期不一致。
+        """
+
+      String.contains?(error, "UndefinedFunctionError") ->
+        """
+
+        💡 修复建议：函数不存在或不可见。检查：1) 模块名/函数名拼写；2) 函数是 public（def）还是 private（defp）；3) 用 `Newbee.Tools.Introspect.exports(Module)` 查看可用函数列表。
+        """
+
+      String.contains?(error, "timeout") ->
+        """
+
+        💡 修复建议：操作超时。可尝试：1) 拆分大操作为小步骤；2) 增加 timeout 参数；3) 如果是 shell 命令，检查是否有交互式输入阻塞。
+        """
+
       String.contains?(error, "SyntaxError") or String.contains?(error, "CompileError") ->
         """
 
