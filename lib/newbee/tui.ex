@@ -780,7 +780,7 @@ defmodule Newbee.TUI do
   @doc "追加一行到 transcript；重置 streaming 状态。"
   def push_line(%__MODULE__{} = state, line) do
     lines = (state.lines ++ [line]) |> Enum.take(-@scrollback)
-    %{state | lines: lines, streaming: false, stream_kind: nil, render_pending: false}
+    %{state | lines: lines, streaming: false, stream_kind: nil, text_buffer: <<>>, render_pending: false}
   end
 
   @doc """
@@ -799,43 +799,7 @@ defmodule Newbee.TUI do
       end
 
     state = %{state | ft_sum_ms: ft_sum_ms, ft_count: ft_count, awaiting_first_token: awaiting}
-    # 缓冲 delta 中的文本, 遇到换行符时渲染完整行
-    combined = state.text_buffer <> delta
-
-    case String.split(combined, "\n") do
-      [_] ->
-        # 没有换行：streaming 中追加到当前行，否则开新行（实时显示，不等换行）
-        if state.streaming and state.stream_kind == :text do
-          state
-          |> append_text(delta)
-          |> Map.put(:text_buffer, combined)
-        else
-          state
-          |> push_line(delta)
-          |> Map.put(:streaming, true)
-          |> Map.put(:stream_kind, :text)
-          |> Map.put(:text_buffer, combined)
-        end
-
-      parts ->
-        {completed, [remaining]} = Enum.split(parts, -1)
-
-        # 渲染完整行通过 Markdown
-        state =
-          if not (state.streaming and state.stream_kind == :text) do
-            state |> push_line("") |> Map.put(:streaming, true) |> Map.put(:stream_kind, :text)
-          else
-            state
-          end
-
-        state =
-          Enum.reduce(completed, state, fn line, acc ->
-            push_line(acc, Newbee.Markdown.render(line))
-          end)
-
-        # 重新开始缓冲剩余文本
-        %{state | text_buffer: remaining}
-    end
+    render_text_delta(state, delta)
   end
 
   def render_event(%__MODULE__{} = state, :reasoning, {:reasoning, delta}) do
@@ -1098,10 +1062,17 @@ defmodule Newbee.TUI do
 
   # ── 流式追加 ──
 
-  # Flush 缓冲的 markdown 文本到显示行
-  # streaming 时 delta 已实时 append 到行尾，只清空缓冲避免重复
+  # Flush 缓冲的 markdown 文本到显示行；流式行先显示原文，收尾时原位替换为渲染结果，
+  # 避免列表等 markdown 在跨 chunk 换行时同时留下原文和 ANSI 渲染行。
+  defp flush_text_buffer(%__MODULE__{streaming: true, stream_kind: :text, text_buffer: buffer} = state)
+       when buffer != "" do
+    state
+    |> replace_last_line(Newbee.Markdown.render(buffer))
+    |> Map.merge(%{text_buffer: <<>>, streaming: false, stream_kind: nil})
+  end
+
   defp flush_text_buffer(%__MODULE__{streaming: true, stream_kind: :text} = state) do
-    %{state | text_buffer: <<>>}
+    %{state | text_buffer: <<>>, streaming: false, stream_kind: nil}
   end
 
   defp flush_text_buffer(%__MODULE__{text_buffer: <<>>} = state), do: state
@@ -1110,10 +1081,10 @@ defmodule Newbee.TUI do
     if String.trim_leading(state.text_buffer) != <<>> do
       state
       |> push_line(Newbee.Markdown.render(state.text_buffer))
+      |> Map.put(:text_buffer, <<>>)
     else
-      state
+      %{state | text_buffer: <<>>}
     end
-    |> Map.put(:text_buffer, <<>>)
   end
 
   defp append_text(state, delta), do: append_text(state, delta, "")
@@ -1146,6 +1117,53 @@ defmodule Newbee.TUI do
           expand_block(state, block)
         end
     end
+  end
+
+  defp render_text_delta(state, delta) do
+    combined = state.text_buffer <> delta
+
+    case String.split(combined, "\n") do
+      [line] ->
+        state =
+          if state.streaming and state.stream_kind == :text and state.text_buffer != "" do
+            append_text(state, delta)
+          else
+            push_line(state, line)
+          end
+
+        %{state | text_buffer: line, streaming: true, stream_kind: :text}
+
+      parts ->
+        {completed, [remaining]} = Enum.split(parts, -1)
+        state = commit_text_lines(state, completed)
+
+        if remaining == "" do
+          %{state | text_buffer: <<>>, streaming: false, stream_kind: nil}
+        else
+          state
+          |> push_line(remaining)
+          |> Map.put(:text_buffer, remaining)
+          |> Map.put(:streaming, true)
+          |> Map.put(:stream_kind, :text)
+        end
+    end
+  end
+
+  defp commit_text_lines(
+         %{streaming: true, stream_kind: :text, text_buffer: buffer} = state,
+         [first | rest]
+       )
+       when buffer != "" do
+    state = replace_last_line(state, Newbee.Markdown.render(first))
+    Enum.reduce(rest, state, fn line, acc -> push_line(acc, Newbee.Markdown.render(line)) end)
+  end
+
+  defp commit_text_lines(state, lines) do
+    Enum.reduce(lines, state, fn line, acc -> push_line(acc, Newbee.Markdown.render(line)) end)
+  end
+
+  defp replace_last_line(%__MODULE__{lines: lines} = state, line) do
+    %{state | lines: List.replace_at(lines, -1, line)}
   end
 
   defp expand_block(state, block) do

@@ -18,6 +18,21 @@ defmodule Newbee.TUIStreamTest do
     assert length(s3.lines) == length(state.lines) + 1
   end
 
+  test "跨 chunk 的 Markdown 列表原位渲染，不重复显示原文" do
+    state = %TUI{} |> TUI.push_line("› 清理")
+    first = TUI.render_event(state, :text, {:text, "- ✅ 环境已干净"})
+    second = TUI.render_event(first, :text, {:text, "\n- ✅ worktree 已删除"})
+
+    assert length(second.lines) == 3
+    assert Enum.count(second.lines, &String.contains?(&1, "环境已干净")) == 1
+    assert Enum.count(second.lines, &String.contains?(&1, "worktree 已删除")) == 1
+
+    finished = TUI.render_event(second, :turn_end, {:turn_end, :text, 0})
+    assert length(finished.lines) == 3
+    assert Enum.count(finished.lines, &String.contains?(&1, "环境已干净")) == 1
+    assert Enum.count(finished.lines, &String.contains?(&1, "worktree 已删除")) == 1
+  end
+
   test "非 :text 事件后 streaming 重置，下一个回复仍开新行" do
     state = %TUI{} |> TUI.push_line("› a")
     s1 = TUI.render_event(state, :text, {:text, "x"})
