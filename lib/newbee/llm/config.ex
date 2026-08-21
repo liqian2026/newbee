@@ -25,23 +25,41 @@ defmodule Newbee.LLM.Config do
   end
 
   @doc "按角色构建 Client。"
-  def client_for(role \\ "default") do
+  def client_for(role \\ "default", opts \\ []) do
     cfg = load()
     role_cfg = get_in(cfg, ["roles", role]) || get_in(cfg, ["roles", "default"])
-    provider_name = role_cfg["provider"]
+    provider_name = Keyword.get(opts, :provider, role_cfg["provider"])
+    model = Keyword.get(opts, :model, role_cfg["model"])
     provider = cfg["providers"][provider_name]
 
     unless provider, do: raise("model.json: 未知 provider #{inspect(provider_name)}")
 
     Newbee.LLM.Client.new(
       base_url: provider["baseUrl"],
-      model: role_cfg["model"],
+      model: model,
       api_key: expand_env(provider["apiKey"]),
       reasoning_effort: role_cfg["reasoningEffort"],
       context_window: role_cfg["contextWindow"] || provider["contextWindow"],
       vision: Map.get(role_cfg, "vision", Map.get(provider, "vision", true))
     )
   end
+
+  @doc "WebUI 模型目录：按厂家分组的完整列表 + 当前默认（provider/model）。"
+  def model_catalog do
+    cfg = load()
+
+    providers =
+      for {name, p} <- cfg["providers"] || %{}, is_map(p) do
+        %{
+          name: name,
+          models: provider_models(name, p)
+        }
+      end
+
+    default = get_in(cfg, ["roles", "default"]) || %{}
+    %{providers: providers, current: %{provider: default["provider"], model: default["model"]}}
+  end
+
 
   @doc """
   切换默认模型（/model <id>）：改写 roles.default.model，落盘到
@@ -98,6 +116,104 @@ defmodule Newbee.LLM.Config do
     |> Enum.sort()
   end
 
+  # ── 模型列表自动拉取 ──
+
+  @models_cache :newbee_llm_models_cache
+  @models_ttl 300_000
+
+  @doc """
+  取某 provider 的模型列表：优先缓存（5 分钟），其次 GET {baseUrl}/models
+  （OpenAI 兼容 data[].id），失败回退配置里的静态 models 列表。
+  """
+  def provider_models(name, provider) do
+    ensure_cache_table()
+    key = {name, provider["baseUrl"]}
+
+    case :ets.lookup(@models_cache, key) do
+      [{^key, ids, ts}] when :erlang.monotonic_time(:millisecond) - ts < @models_ttl ->
+        ids
+
+      _ ->
+        ids = fetch_models(provider) || static_models(provider)
+        :ets.insert(@models_cache, {key, ids, :erlang.monotonic_time(:millisecond)})
+        ids
+    end
+  end
+
+  # 从 provider 的 OpenAI 兼容 /models 接口拉取模型 id 列表
+  defp fetch_models(provider) do
+    base = provider["baseUrl"]
+    key = expand_env(provider["apiKey"])
+
+    if is_binary(base) and String.trim(base) != "" do
+      url = String.trim_trailing(base, "/") <> "/models"
+
+      with {:ok, body} <- http_get(url, key),
+           {:ok, %{"data" => data}} when is_list(data) <- Jason.decode(body) do
+        data
+        |> Enum.map(fn m -> m["id"] end)
+        |> Enum.filter(&is_binary/1)
+        |> Enum.uniq()
+        |> case do
+          [] -> nil
+          ids -> ids
+        end
+      else
+        _ -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp static_models(provider) do
+    Enum.filter(provider["models"] || [], &is_binary/1)
+  end
+
+  defp ensure_cache_table do
+    case :ets.whereis(@models_cache) do
+      :undefined ->
+        try do
+          :ets.new(@models_cache, [:named_table, :public, :set, read_concurrency: true])
+        rescue
+          ArgumentError -> :ok
+        end
+
+      _ ->
+        :ok
+    end
+      :ets.new(@models_cache, [:named_table, :public, :set, read_concurrency: true])
+    end
+
+    :ok
+  end
+
+  defp http_get(url, api_key) do
+    _ = Application.ensure_all_started(:inets)
+    _ = Application.ensure_all_started(:ssl)
+
+    headers =
+      if is_binary(api_key) and api_key != "" do
+        [{~c"authorization", ~c"Bearer " <> String.to_charlist(api_key)}]
+      else
+        []
+      end
+
+    request = {String.to_charlist(url), headers}
+    http_opts = [timeout: 8_000, connect_timeout: 5_000, ssl: [verify: :verify_none]]
+
+    case :httpc.request(:get, request, http_opts, []) do
+      {:ok, {{_, status, _}, _headers, body}} when status in 200..299 ->
+        {:ok, body}
+
+      _ ->
+        :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
   # ── internals ──
 
   defp resolve_path do

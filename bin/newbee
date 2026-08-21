@@ -75,6 +75,12 @@ case "${1:-}" in
     exec mix newbee.bench "$@"
     ;;
 
+  make)
+    shift
+    exec mix compile
+    ;;
+
+
   "")
     exec mix newbee
     ;;

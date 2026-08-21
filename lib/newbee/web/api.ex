@@ -54,7 +54,20 @@ get "/health" do
 
   # 会话域
   defp dispatch_rpc("session.list", _p) do
-    {:ok, %{sessions: Enum.map(Newbee.Session.list_with_meta(50), &json_safe/1)}}
+    sessions =
+      Newbee.Session.list_with_meta(50)
+      |> Enum.map(fn s ->
+        id = s[:id] || s["id"]
+        busy = Newbee.Web.Session.peek_busy(id)
+        running = match?({:ok, _}, Newbee.Web.Session.lookup(id))
+
+        Map.merge(s, %{
+          running: running,
+          busy: busy
+        })
+      end)
+
+    {:ok, %{sessions: Enum.map(sessions, &json_safe/1)}}
   end
 
   defp dispatch_rpc("session.history", %{"sessionId" => sid}) do
@@ -109,6 +122,16 @@ get "/health" do
     end
   end
 
+  defp dispatch_rpc("session.selectModel", %{"sessionId" => sid, "provider" => provider, "model" => model}) do
+    with {:ok, pid} <- find_session(sid) do
+      case Newbee.Web.Session.switch_model(pid, provider, model) do
+        :ok -> {:ok, %{provider: provider, model: model}}
+        {:error, r} -> {:error, "model_error", inspect(r)}
+      end
+    end
+  end
+
+  # 兼容旧调用：仅 modelId
   defp dispatch_rpc("session.selectModel", %{"sessionId" => sid, "modelId" => mid}) do
     with {:ok, pid} <- find_session(sid) do
       case Newbee.Web.Session.switch_model(pid, mid) do
@@ -117,6 +140,7 @@ get "/health" do
       end
     end
   end
+
 
   # 权限回复（server-request 象限的 respond 语义）
   defp dispatch_rpc("respond", %{"sessionId" => sid, "permission" => ok}) do
@@ -127,9 +151,12 @@ get "/health" do
   end
 
   # 模型目录
-  defp dispatch_rpc("llm.models", _p) do
-    {:ok, %{models: Newbee.LLM.Config.model_candidates(), current: current_model()}}
+  defp dispatch_rpc("llm.models", p) do
+    cat = Newbee.LLM.Config.model_catalog()
+    {:ok, %{providers: cat.providers, current: current_model_info(p["sessionId"])}}
   end
+
+
 
   # 进化域（左侧进化面板数据）
   defp dispatch_rpc("evolution.feed", p) do
@@ -248,7 +275,7 @@ get "/health" do
     {:ok,
      %{
        cwd: File.cwd!(),
-       model: current_model(),
+       model: current_model_label(),
        policy: Newbee.Environment.Autonomy.get(),
        version: "0.1.0"
      }}
@@ -269,13 +296,40 @@ get "/health" do
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(s), do: s
 
-  defp current_model do
+  defp current_model(sid \\ nil) do
     try do
-      Newbee.LLM.Config.client_for().model
+      if sid do
+        case Newbee.Web.Session.lookup(sid) do
+          {:ok, pid} -> Newbee.Web.Session.state(pid)["model"]
+          _ -> Newbee.LLM.Config.client_for().model
+        end
+      else
+        Newbee.LLM.Config.client_for().model
+      end
     rescue
       _ -> nil
     end
   end
+
+  defp current_model_info(sid) do
+    provider = if sid, do: Newbee.Session.provider(sid), else: nil
+    model = if sid, do: Newbee.Session.model(sid), else: nil
+
+    if provider do
+      %{provider: provider, model: model}
+    else
+      cfg = Newbee.LLM.Config.load()
+      default = get_in(cfg, ["roles", "default"]) || %{}
+      %{provider: default["provider"], model: model || default["model"]}
+    end
+  end
+
+  defp current_model_label do
+    info = current_model_info(nil)
+    if info.model, do: "#{info.provider}/#{info.model}", else: nil
+  end
+
+
 
   # transcript 消息 → 前端可渲染结构
   defp history_msg(%{"role" => "user", "content" => c}) when is_binary(c),

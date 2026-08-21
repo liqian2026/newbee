@@ -95,44 +95,86 @@ defmodule Newbee.Web.Session do
   @doc "热切模型：model_id 如 openrouter/anthropic/claude-sonnet-4。"
   def switch_model(pid, model_id), do: GenServer.call(pid, {:switch_model, model_id}, 10_000)
 
+  @doc "热切切换：provider + model（WebUI 两级选择用）。"
+  def switch_model(pid, provider, model), do: GenServer.call(pid, {:switch_model, provider, model}, 10_000)
+
   @doc "当前状态快照（供 HTTP 轮询 / socket 重连对齐）。"
   def state(pid), do: GenServer.call(pid, :state, 5_000)
+  @doc "轻量探测会话是否正在运行（非阻塞，短超时；失败视为离线）。"
+  def peek_busy(sid) when is_binary(sid) do
+    case lookup(sid) do
+      {:ok, pid} ->
+        try do
+          GenServer.call(pid, :peek_busy, 300) || false
+        catch
+          :exit, _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
 
   # ── GenServer ──
 
   @doc false
   def client_for_session(sid) do
-    base = Newbee.LLM.Config.client_for()
+    provider = Newbee.Session.provider(sid)
+    model = Newbee.Session.model(sid)
 
-    case Newbee.Session.model(sid) do
+    base =
+      if provider do
+        Newbee.LLM.Config.client_for("default", provider: provider)
+      else
+        Newbee.LLM.Config.client_for()
+      end
+
+    case model do
       nil -> base
       model -> %{base | model: model}
     end
   end
 
+
   @doc false
-  def switch_session_model(st, model_id) do
+  def switch_session_model(st, provider_name, model_id) do
     cond do
-      not is_binary(model_id) ->
+      not is_binary(model_id) or not is_binary(provider_name) ->
         {:error, :bad_model_id}
 
-      String.trim(model_id) == "" or not String.contains?(model_id, "/") ->
+      String.trim(model_id) == "" or String.trim(provider_name) == "" ->
         {:error, :bad_model_id}
 
       true ->
-        :ok = Newbee.Session.set_model(st.sid, model_id)
-        client = %{st.client | model: model_id}
+        provider_name = String.trim(provider_name)
+        model_id = String.trim(model_id)
 
-        case Newbee.Agent.Loop.switch_model(st.kernel, client) do
-          :ok ->
-            broadcast(st.sid, :model_switched, %{model: model_id})
-            {:ok, %{st | client: client}}
+        client = build_client(provider_name, model_id)
 
-          {:error, _} = err ->
-            err
+        if client do
+          :ok = Newbee.Session.set_provider(st.sid, provider_name)
+          :ok = Newbee.Session.set_model(st.sid, model_id)
+
+          case Newbee.Agent.Loop.switch_model(st.kernel, client) do
+            :ok ->
+              broadcast(st.sid, :model_switched, %{model: "#{provider_name}/#{model_id}", provider: provider_name, modelId: model_id})
+              {:ok, %{st | client: client}}
+
+            {:error, _} = err ->
+              err
+          end
+        else
+          {:error, :bad_model_id}
         end
     end
   end
+
+  defp build_client(nil, _model_id), do: nil
+  defp build_client(provider_name, model_id) when not is_binary(model_id) or model_id == "" or not is_binary(provider_name) or provider_name == "", do: nil
+  defp build_client(provider_name, model_id) do
+    Newbee.LLM.Config.client_for("default", provider: provider_name, model: model_id)
+  end
+
 
   @impl true
   def init(sid) do
@@ -199,13 +241,25 @@ defmodule Newbee.Web.Session do
 
 
   @impl true
-  def handle_call({:switch_model, model_id}, _from, st) do
-    case switch_session_model(st, model_id) do
+  def handle_call({:switch_model, provider, model}, _from, st) when is_binary(provider) do
+    case switch_session_model(st, provider, model) do
       {:ok, next} -> {:reply, :ok, next}
       {:error, reason} -> {:reply, {:error, reason}, st}
     end
   end
 
+  # 兼容旧调用：仅 modelId（保持当前 provider）
+  def handle_call({:switch_model, model_id}, _from, st) when is_binary(model_id) do
+    provider = Newbee.Session.provider(st.sid) || (Newbee.LLM.Config.load() |> get_in(["roles", "default", "provider"]))
+
+    case switch_session_model(st, provider, model_id) do
+      {:ok, next} -> {:reply, :ok, next}
+      {:error, reason} -> {:reply, {:error, reason}, st}
+    end
+  end
+
+
+  def handle_call(:peek_busy, _from, st), do: {:reply, st.busy, st}
   def handle_call(:state, _from, st) do
     # 只读本地快照：turn 进行中 Loop 的 GenServer.call 会排队超时（state 不该被阻塞）
     usage = st.usage_snap
@@ -218,14 +272,15 @@ defmodule Newbee.Web.Session do
        sid: st.sid,
        busy: st.busy,
        queued: :queue.len(st.queue),
-       model: st.client.model,
+       provider: provider_of(st),
+       model: st.client && st.client.model,
        usage: usage,
        goal: goal,
-        awaiting_permission: Newbee.Agent.Loop.awaiting_permission?(),
-        steps: steps,
-        bindings: bindings,
-        policy: Newbee.Environment.Autonomy.get(),
-        turns: st.turns
+       awaiting_permission: Newbee.Agent.Loop.awaiting_permission?(),
+       steps: steps,
+       bindings: bindings,
+       policy: Newbee.Environment.Autonomy.get(),
+       turns: st.turns
      }, st}
   end
 
@@ -325,6 +380,19 @@ defmodule Newbee.Web.Session do
 
   defp num(n) when is_number(n), do: n
   defp num(_), do: nil
+
+  defp provider_of(st) do
+    case Newbee.Session.provider(st.sid) do
+      nil ->
+        try do
+          Newbee.LLM.Config.load() |> get_in(["roles", "default", "provider"])
+        rescue
+          _ -> nil
+        end
+
+      p -> p
+    end
+  end
 
 
   defp broadcast_turn_end(sid, result) do

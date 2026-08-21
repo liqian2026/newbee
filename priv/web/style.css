@@ -118,7 +118,15 @@ body {
 .session-item .t {
   display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   color: var(--nb-label-1); font-size: 13px;
-}
+  }
+  /* 会话运行状态点 */
+  .session-item .sess-dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    margin-right: 6px; vertical-align: 1px; flex: none;
+    background: var(--nb-label-caption);
+  }
+  .session-item .sess-dot.busy { background: var(--nb-accent); animation: nb-pulse 1.4s var(--nb-ease) infinite; }
+  .session-item .sess-dot.online { background: var(--nb-green); }
 .session-item .meta {
   display: block; font-size: 11px; color: var(--nb-label-caption);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -186,7 +194,7 @@ body {
 
 /* ── 消息流：宽列居中 ── */
 .transcript {
-  flex: 1; overflow-y: auto; padding: 20px 28px;
+  flex: 1; overflow-y: auto; overflow-x: hidden; padding: 20px 28px;
   scroll-behavior: smooth;
 }
 .flow {
@@ -211,7 +219,7 @@ body {
 .msg-reasoning {
   color: var(--nb-label-3); font-size: 14px; line-height: 24px;
   word-break: break-word; padding-left: 22px;
-  position: relative;
+  position: relative; overflow-x: hidden;
 }
 .think-head {
   display: flex; align-items: baseline; gap: 6px; cursor: pointer;
@@ -230,7 +238,7 @@ body {
   border-left: 2px solid var(--nb-border);
   /* 防横向滚动：长单词/URL 强制断行；高度上限防刷屏，内容滚动 */
   overflow-wrap: anywhere; word-break: break-word;
-  max-height: 300px; overflow-y: auto;
+  max-height: 300px; overflow-y: auto; overflow-x: hidden;
 }
 .msg-reasoning::before {
   content: ''; position: absolute; left: 6px; top: 8px; bottom: 8px; width: 2px;
@@ -384,6 +392,21 @@ body {
 .model-opt:hover { background: var(--nb-bg-elev); color: var(--nb-label-1); }
 .model-opt.current { background: var(--nb-bg-elev); color: var(--nb-accent-soft);
   box-shadow: inset 2px 0 0 var(--nb-accent); }
+
+/* 模型选择：左厂家右模型两级 */
+.modal-box-wide { width: 620px; max-width: 90vw; }
+.model-picker { display: flex; gap: 10px; height: min(50vh, 420px); }
+.model-providers { flex: 0 0 150px; overflow-y: auto; border-right: 1px solid var(--nb-border);
+  padding-right: 8px; display: flex; flex-direction: column; gap: 4px; }
+.model-provider {
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  font-family: var(--nb-mono); font-size: 12.5px; color: var(--nb-label-2);
+  transition: background var(--nb-dur);
+}
+.model-provider:hover { background: var(--nb-bg-elev); color: var(--nb-label-1); }
+.model-provider.current { background: var(--nb-bg-elev); color: var(--nb-accent-soft);
+  box-shadow: inset 2px 0 0 var(--nb-accent); }
+.model-options { flex: 1; overflow-y: auto; margin-bottom: 0; }
 
 /* ── Markdown 渲染样式 ── */
 .msg-assistant .md-p { margin: 0 0 10px; }

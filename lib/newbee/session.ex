@@ -308,6 +308,19 @@ defmodule Newbee.Session do
       _ -> nil
     end
   end
+  @doc "保存该会话选用的厂家（provider）；不会修改全局模型配置。"
+  def set_provider(id, provider) when is_binary(id) and is_binary(provider) do
+    update_metadata(id, &Map.put(&1, "provider", provider))
+  end
+
+  @doc "读取该会话选用的厂家；未选择时返回 nil。"
+  def provider(id) when is_binary(id) do
+    case metadata(id)["provider"] do
+      provider when is_binary(provider) and provider != "" -> provider
+      _ -> nil
+    end
+  end
+
 
   defp update_metadata(id, fun) do
     dir = Path.join(@artifacts, id)

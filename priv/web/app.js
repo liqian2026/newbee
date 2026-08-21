@@ -392,6 +392,7 @@ case "goal_round": break;
       el.appendChild(body);
     }
   }
+  let reasoningRaf = 0;
   function appendReasoning(delta) {
     if (!state.currentReasoning) {
       state.currentReasoning = el("msg-reasoning running", "");
@@ -400,8 +401,15 @@ case "goal_round": break;
       state.currentAssistant = null;
     }
     state.currentReasoning.dataset.thinkText += delta || "";
-    renderReasoningBody(state.currentReasoning);
-    scrollBottom();
+    if (!reasoningRaf) {
+      reasoningRaf = requestAnimationFrame(() => {
+        reasoningRaf = 0;
+        if (state.currentReasoning) {
+          renderReasoningBody(state.currentReasoning);
+          scrollBottom();
+        }
+      });
+    }
   }
   function archiveReasoning() {
     const r = state.currentReasoning;
@@ -558,7 +566,8 @@ case "goal_round": break;
       const item = document.createElement("div");
       item.className = "session-item" + (s.id === state.sid ? " active" : "");
       const title = String(s.title || s.id).replace(/\s+/g, " ").trim().slice(0, 40) || "(未命名)";
-      item.innerHTML = `<span class="t">${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条</span>`;
+      const stCls = s.busy ? "busy" : (s.running ? "online" : "offline");
+      item.innerHTML = `<span class="t"><span class="sess-dot ${stCls}"></span>${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条</span>`;
       item.dataset.sid = s.id;
       item.onclick = (e) => {
         if (e.target.classList.contains("menu-btn")) return; // 点 ⋯ 不切换会话
@@ -573,6 +582,26 @@ case "goal_round": break;
       item.appendChild(btn);
       box.appendChild(item);
     });
+  }
+
+  // 轻量刷新会话运行状态：只更新已渲染列表项的状态点，不重建 DOM（避免闪烁）。
+  // 会新增/删除的会话（如另一个 tab 新建）不处理，由 loadSessions 全量刷新负责。
+  function refreshSessionStatus() {
+    const box = $("session-list");
+    if (!box || box.children.length === 0) return;
+    rpc("session.list", {}).then((list) => {
+      const all = list.sessions || [];
+      const byId = {};
+      all.forEach((s) => { byId[s.id] = s; });
+      box.querySelectorAll(".session-item").forEach((item) => {
+        const s = byId[item.dataset.sid];
+        if (!s) return;
+        const dot = item.querySelector(".sess-dot");
+        if (!dot) return;
+        const cls = s.busy ? "busy" : (s.running ? "online" : "offline");
+        if (dot.className !== "sess-dot " + cls) dot.className = "sess-dot " + cls;
+      });
+    }).catch(() => {});
   }
 
   // ── 会话右键菜单（重命名 / 删除）──
@@ -714,7 +743,9 @@ case "goal_round": break;
       rpc("session.state", { sessionId: sid }),
     ]);
     renderHistory(hist.messages || []);
-    $("model-label").textContent = sessionState.model || "(no model)";
+    const curModel = sessionState.model || "";
+    const curProvider = sessionState.provider || "";
+    $("model-label").textContent = (curProvider && curModel) ? curProvider + "/" + curModel : (curModel || "(no model)");
     connect();
     loadSessions();
     const firstUser = (hist.messages || []).find(m => m && m.role === "user");
@@ -780,21 +811,67 @@ case "goal_round": break;
   // ── 模型 ──
   async function openModels() {
     const data = await rpc("llm.models", { sessionId: state.sid });
-    const box = $("model-options");
-    box.innerHTML = "";
-    (data.models || []).forEach((m) => {
-      const o = document.createElement("div");
-      o.className = "model-opt" + (m === data.current ? " current" : "");
-      o.textContent = m;
-      o.onclick = async () => {
-        await rpc("session.selectModel", { sessionId: state.sid, modelId: m });
-        $("model-label").textContent = m;
-        $("model-modal").classList.add("hidden");
+    const providers = data.providers || [];
+    const current = data.current || {};
+    const curProvider = current.provider || "";
+    const curModel = current.model || "";
+
+    const pbox = $("model-providers");
+    const mbox = $("model-options");
+    pbox.innerHTML = "";
+    mbox.innerHTML = "";
+
+    // 待确认的选择（确定按钮点击时生效）
+    let pending = { provider: curProvider, model: curModel };
+
+    providers.forEach((p) => {
+      if (!p || !p.name || !(p.models || []).length) return;
+      const po = document.createElement("div");
+      po.className = "model-provider" + (p.name === curProvider ? " current" : "");
+      po.textContent = p.name;
+      po.onclick = () => {
+        pbox.querySelectorAll(".model-provider").forEach((x) => x.classList.remove("current"));
+        po.classList.add("current");
+        renderModels(p);
       };
-      box.appendChild(o);
+      pbox.appendChild(po);
     });
+
+    function renderModels(p) {
+      mbox.innerHTML = "";
+      (p.models || []).forEach((m) => {
+        const o = document.createElement("div");
+        const isSel = (p.name === pending.provider) && (m === pending.model);
+        o.className = "model-opt" + (isSel ? " current" : "");
+        o.textContent = m;
+        o.onclick = () => {
+          mbox.querySelectorAll(".model-opt").forEach((x) => x.classList.remove("current"));
+          o.classList.add("current");
+          pending = { provider: p.name, model: m };
+        };
+        mbox.appendChild(o);
+      });
+    }
+
+    const def = providers.find((p) => p.name === curProvider) || providers[0];
+    if (def) renderModels(def);
+
+    // 确定：应用待选
+    $("model-confirm").onclick = async () => {
+      if (!pending.provider || !pending.model) return;
+      try {
+        await rpc("session.selectModel", { sessionId: state.sid, provider: pending.provider, model: pending.model });
+        $("model-label").textContent = pending.provider + "/" + pending.model;
+        $("model-modal").classList.add("hidden");
+      } catch (e) {
+        line("error", "切模型失败: " + e.message);
+      }
+    };
+
     $("model-modal").classList.remove("hidden");
   }
+
+
 
   // ── utils ──
   function setBusy(b) {
@@ -857,7 +934,8 @@ case "goal_round": break;
   $("perm-yes").onclick = () => permission(true);
   $("perm-no").onclick = () => permission(false);
   $("model-label").onclick = openModels;
-  $("model-close").onclick = () => $("model-modal").classList.add("hidden");
+  $("model-cancel").onclick = () => $("model-modal").classList.add("hidden");
+  // model-confirm 的 onclick 在 openModels 里动态绑定（每次打开重新捕获 pending）
   input.addEventListener("input", autoGrow);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
@@ -874,7 +952,10 @@ case "goal_round": break;
   function startStats() {
     if (statsTimer) clearInterval(statsTimer);
     refreshStats();
-    statsTimer = setInterval(refreshStats, 2000);
+    statsTimer = setInterval(() => {
+      refreshStats();
+      refreshSessionStatus();
+    }, 2000);
   }
   async function refreshStats() {
     if (!state.sid) return;
@@ -891,14 +972,19 @@ case "goal_round": break;
     return sc(n / 1e6) + "M";
   }
   function renderStats(st) {
+    // 同步左侧模型名（provider/model）；轮询每 2s 自愈一次
+    if (st && st.model) {
+      const m = (st.provider && st.provider !== "default") ? st.provider + "/" + st.model : st.model;
+      const el = $("model-label");
+      if (el && el.textContent !== m) el.textContent = m;
+    }
     const u = st.usage || {};
     const cacheRead = u.cache_read_tokens || u.cached_tokens
       || (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
     const inTok = (u.uncached_prompt_tokens || u.prompt_tokens || 0) + (u.cache_write_tokens || 0);
     const outTok = u.completion_tokens || u.output_tokens || 0;
     const cacheHit = inTok > 0 ? Math.round(cacheRead / inTok * 100) : null;
-    const left = [];
-    left.push(`<span class="model">${escapeHtml(st.model || "?")}</span> · newbee`);
+    const left = ["newbee"];
     const turns = st.turns || 0, steps = st.steps || 0;
     if (turns > 0 || steps > 0) left.push(`${turns} 轮 · ${steps} 步`);
     // LLM/工具耗时（dsh: LLM Xs · 工具 Ys）
