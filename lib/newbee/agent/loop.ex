@@ -18,7 +18,12 @@ defmodule Newbee.Agent.Loop do
             auto_antibodies: false,
             error_sigs: %{},
             advisor: nil,
-            advisor_client: nil
+            advisor_client: nil,
+            context_window: 128_000,
+            compaction_threshold: 0.8,
+            compaction_retain: 0.16,
+            compaction_max_tokens: 1_024,
+            auto_compact: true
 
   # ── API ──
 
@@ -173,7 +178,12 @@ defmodule Newbee.Agent.Loop do
        progress: progress,
        auto_antibodies: Keyword.get(opts, :auto_antibodies, false),
        advisor: advisor,
-       advisor_client: advisor
+       advisor_client: advisor,
+       context_window: Keyword.get_lazy(opts, :context_window, fn -> Newbee.LLM.Client.context_window(client) end),
+       compaction_threshold: Keyword.get(opts, :compaction_threshold, 0.8),
+       compaction_retain: Keyword.get(opts, :compaction_retain, 0.16),
+       compaction_max_tokens: Keyword.get(opts, :compaction_max_tokens, 1_024),
+       auto_compact: Keyword.get(opts, :auto_compact, true)
      }}
   end
 
@@ -216,31 +226,8 @@ defmodule Newbee.Agent.Loop do
   def handle_call(:usage, _from, state), do: {:reply, state.usage, state}
 
   def handle_call(:compact, _from, state) do
-    {old, recent} = Enum.split(Enum.drop(state.messages, 1), max(length(state.messages) - 1 - 8, 0))
-
-    if old == [] do
-      {:reply, {:ok, 0}, state}
-    else
-      summary = summarize_conversation(state.client, old)
-      summary_msg = %{"role" => "system", "content" => "（以下为较早对话的压缩摘要，细节已丢失）\n" <> summary}
-      messages = [List.first(state.messages), summary_msg | recent]
-
-      # J-Space 恢复协议：压缩 = 长间隔，有 ledger 则注入恢复提醒
-      messages =
-        if state.session && Newbee.Tools.JSpace.exists?(state.session.id) do
-          [List.first(messages), %{"role" => "system", "content" => jspace_recovery_reminder()} | tl(messages)]
-        else
-          messages
-        end
-
-      if state.session do
-        Newbee.Session.rewrite(state.session, messages)
-      end
-
-      emit(state, {:compacted, length(old)})
-      Newbee.DebugLog.log(:compact, "compacted #{length(old)} messages")
-      {:reply, {:ok, length(old)}, %{state | messages: messages}}
-    end
+    {state, count} = compact_state(state, 8)
+    {:reply, {:ok, count}, state}
   end
 
   def handle_call({:set_goal, text, opts}, _from, state) do
@@ -287,7 +274,9 @@ defmodule Newbee.Agent.Loop do
     end
 
     emit(state, {:model_switched, client.model})
-    {:reply, :ok, %{state | client: client, client_fun: client_fun}}
+
+    {:reply, :ok,
+     %{state | client: client, client_fun: client_fun, context_window: Newbee.LLM.Client.context_window(client)}}
   end
 
   # 自主目标循环：异步驱动（每轮之间可处理 mailbox，/goal clear 可插入取消）。
@@ -415,6 +404,7 @@ defmodule Newbee.Agent.Loop do
       emit(state, {:turn_long, step})
     end
 
+    state = maybe_auto_compact(state)
     Newbee.DebugLog.log(:turn, "step #{step} messages=#{length(state.messages)}")
     on_text = fn delta -> emit(state, {:text, delta}) end
     on_reasoning = fn delta -> emit(state, {:reasoning, delta}) end
@@ -982,7 +972,7 @@ defmodule Newbee.Agent.Loop do
   defp sanitize_msg(other), do: other
 
   # 对话摘要（§6.5 物化视图的维护操作）：旧消息 → 要点摘要
-  defp summarize_conversation(client, messages) do
+  defp summarize_conversation(client, messages, max_tokens) do
     prompt =
       "把以下 agent 对话压缩为要点摘要（任务、关键决策、文件改动、测试结果；≤500 字，中文）：\n" <>
         Enum.map_join(messages, "\n", fn m ->
@@ -990,7 +980,9 @@ defmodule Newbee.Agent.Loop do
           |> String.slice(0, 240)
         end)
 
-    case Newbee.LLM.Client.complete(client, [%{"role" => "user", "content" => prompt}]) do
+    case Newbee.LLM.Client.complete(client, [%{"role" => "user", "content" => prompt}],
+           extra: %{max_tokens: max_tokens}
+         ) do
       {:ok, content, _} when is_binary(content) and content != "" -> content
       _ -> "（摘要失败，历史已截断）"
     end
@@ -998,7 +990,73 @@ defmodule Newbee.Agent.Loop do
     _ -> "（摘要失败，历史已截断）"
   end
 
-  defp message_content_text(text) when is_binary(text), do: text
+  # Automatic pressure check follows deepseek-harness: compact before the request,
+  # at a configurable fraction of the model window.
+  defp maybe_auto_compact(%{auto_compact: false} = state), do: state
+
+  defp maybe_auto_compact(state) do
+    pressure = estimate_request_tokens(state.messages)
+    limit = trunc(state.context_window * state.compaction_threshold)
+
+    if pressure >= limit and length(state.messages) > 2 do
+      retain = max(trunc(state.context_window * state.compaction_retain), 512)
+      {state, count} = compact_state(state, retain)
+      if count > 0, do: Newbee.DebugLog.log(:compact, "automatic pressure=#{pressure}/#{limit}")
+      state
+    else
+      state
+    end
+  end
+
+  defp estimate_request_tokens(messages) do
+    div(byte_size(Jason.encode!(messages)) + 2, 3) + 2_000
+  rescue
+    _ -> Enum.count(messages) * 100
+  end
+
+  defp estimate_message_tokens(message) do
+    div(byte_size(Jason.encode!(message)) + 2, 3) + 8
+  end
+
+  defp compact_state(state, retain_target) do
+    body = tl(state.messages)
+    {old, recent} = split_for_retention(body, retain_target)
+
+    if old == [] do
+      {state, 0}
+    else
+      summary = summarize_conversation(state.client, old, state.compaction_max_tokens)
+      summary_msg = %{"role" => "system", "content" => "（以下为较早对话的压缩摘要，细节已丢失）\n" <> summary}
+      messages = [hd(state.messages), summary_msg | recent]
+
+      messages =
+        if state.session && Newbee.Tools.JSpace.exists?(state.session.id) do
+          [hd(messages), %{"role" => "system", "content" => jspace_recovery_reminder()} | tl(messages)]
+        else
+          messages
+        end
+
+      if state.session, do: Newbee.Session.rewrite(state.session, messages)
+      emit(state, {:compacted, length(old)})
+      Newbee.DebugLog.log(:compact, "compacted #{length(old)} messages")
+      {%{state | messages: messages}, length(old)}
+    end
+  end
+
+  defp split_for_retention(messages, count) when count <= 64 do
+    Enum.split(messages, max(length(messages) - count, 0))
+  end
+
+  defp split_for_retention(messages, target) do
+    {recent, _tokens} =
+      Enum.reduce(Enum.reverse(messages), {[], 0}, fn message, {keep, tokens} ->
+        cost = estimate_message_tokens(message)
+        if keep != [] and tokens + cost > target, do: {keep, tokens}, else: {[message | keep], tokens + cost}
+      end)
+
+    Enum.split(messages, max(length(messages) - length(recent), 0))
+  end
+
   defp message_content_text(parts) when is_list(parts), do: Enum.find_value(parts, "[图片]", &image_text_part/1)
   defp message_content_text(_), do: ""
 

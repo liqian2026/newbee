@@ -246,6 +246,85 @@ defmodule Newbee.Session do
     end
   end
 
+  @doc "删除会话：transcript + artifacts 目录 + 索引。返回 :ok | {:error, reason}。"
+  def delete(id) when is_binary(id) do
+    transcript = Path.join(@root, "#{id}.jsonl")
+    artifacts = Path.join(@artifacts, id)
+
+    with :ok <- remove_file(transcript),
+         :ok <- remove_dir(artifacts),
+         :ok <- remove_from_index(id) do
+      :ok
+    end
+  end
+
+  defp remove_file(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, r} -> {:error, r}
+    end
+  end
+
+  defp remove_dir(path) do
+    case File.rm_rf(path) do
+      {:ok, _} -> :ok
+      {:error, r, _} -> {:error, r}
+    end
+  end
+
+  defp remove_from_index(id) do
+    case File.read(@index) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, entries} when is_list(entries) ->
+            kept = Enum.reject(entries, &(&1["id"] == id))
+            File.write!(@index, Jason.encode_to_iodata!(kept))
+            :ok
+
+          _ ->
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  @doc "重命名会话标题：把 %{title: ...} 元信息落到会话目录的 meta.json（list_with_meta 优先读取）。"
+  def rename(id, title) when is_binary(id) and is_binary(title) do
+    dir = Path.join(@artifacts, id)
+    File.mkdir_p!(dir)
+    meta_path = Path.join(dir, "meta.json")
+
+    base =
+      case File.read(meta_path) do
+        {:ok, body} ->
+          case Jason.decode(body) do
+            {:ok, m} when is_map(m) -> m
+            _ -> %{}
+          end
+
+        _ ->
+          %{}
+      end
+
+    File.write!(meta_path, Jason.encode_to_iodata!(Map.put(base, "title", title)))
+    :ok
+  end
+
+  @doc "读取用户自定义标题（rename 落盘）；没有返回 nil。"
+  def custom_title(id) when is_binary(id) do
+    meta_path = Path.join([@artifacts, id, "meta.json"])
+
+    with {:ok, body} <- File.read(meta_path),
+         {:ok, %{"title" => t}} when is_binary(t) <- Jason.decode(body) do
+      t
+    else
+      _ -> nil
+    end
+  end
+
   @doc "会话总数（廉价：单次 File.ls；/status 用）。"
   def count do
     case File.ls(@root) do
@@ -290,7 +369,7 @@ defmodule Newbee.Session do
               mtime: stat.mtime,
               when_str: when_str(stat.mtime),
               messages: length(msgs),
-              title: title(msgs)
+              title: custom_title(id) || title(msgs)
             }
           ]
 

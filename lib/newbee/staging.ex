@@ -171,8 +171,20 @@ defmodule Newbee.Staging do
       case File.read(f) do
         {:ok, body} ->
           case Jason.decode(body) do
-            {:ok, entry} -> Map.put(acc, entry["id"], entry)
-            _ -> acc
+            {:ok, entry} when is_map(entry) ->
+              # JSON 回来是 string-key，归一成 atom-key（与 stage 路径一致）
+              entry = %{
+                id: entry["id"],
+                path: entry["path"],
+                content: entry["content"] || "",
+                source: String.to_atom(entry["source"] || "model"),
+                when: entry["when"]
+              }
+
+              Map.put(acc, entry.id, entry)
+
+            _ ->
+              acc
           end
 
         _ ->

@@ -75,6 +75,20 @@ get "/health" do
     end
   end
 
+  defp dispatch_rpc("session.delete", %{"sessionId" => sid}) do
+    case Newbee.Web.Session.destroy(sid) do
+      :ok -> {:ok, %{deleted: sid}}
+      {:error, r} -> {:error, "delete_error", inspect(r)}
+    end
+  end
+
+  defp dispatch_rpc("session.rename", %{"sessionId" => sid, "title" => t}) do
+    Newbee.Session.rename(sid, String.trim(t || ""))
+    {:ok, %{sessionId: sid, title: t}}
+  rescue
+    e -> {:error, "rename_error", Exception.message(e)}
+  end
+
   defp dispatch_rpc("session.prompt", %{"sessionId" => sid, "text" => text}) do
     with {:ok, pid} <- find_session(sid) do
       Newbee.Web.Session.prompt(pid, text)

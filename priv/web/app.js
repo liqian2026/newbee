@@ -445,19 +445,182 @@ case "goal_round": break;
   }
 
   // ── 会话管理 ──
+  // 搜索关键字（"" 表示不过滤）；state.allSessions 缓存最近一次 session.list 响应
+  let sessionFilter = "";
+
   async function loadSessions() {
     const list = await rpc("session.list", {});
+    state.allSessions = list.sessions || [];
+    renderSessionList();
+  }
+
+  function renderSessionList() {
     const box = $("session-list");
     box.innerHTML = "";
-    (list.sessions || []).forEach((s) => {
+    const kw = sessionFilter.trim().toLowerCase();
+    const all = state.allSessions || [];
+    // 过滤：关键字命中 title/id；空会话（0 条消息且非当前）不显示
+    const items = all.filter((s) => {
+      if (kw && !String(s.title || "").toLowerCase().includes(kw) && !String(s.id).toLowerCase().includes(kw)) return false;
+      if ((s.messages || 0) === 0 && s.id !== state.sid) return false;
+      return true;
+    });
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "session-empty";
+      empty.textContent = kw ? "没有匹配「" + kw + "」的会话" : "暂无会话";
+      box.appendChild(empty);
+      return;
+    }
+    items.forEach((s) => {
       const item = document.createElement("div");
       item.className = "session-item" + (s.id === state.sid ? " active" : "");
-      const title = String(s.title || s.id).replace(/\s+/g, " ").trim().slice(0, 40);
+      const title = String(s.title || s.id).replace(/\s+/g, " ").trim().slice(0, 40) || "(未命名)";
       item.innerHTML = `<span class="t">${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条</span>`;
-      item.onclick = () => resume(s.id);
+      item.dataset.sid = s.id;
+      item.onclick = (e) => {
+        if (e.target.classList.contains("menu-btn")) return; // 点 ⋯ 不切换会话
+        resume(s.id);
+      };
+      // ⋯ 菜单钮
+      const btn = document.createElement("button");
+      btn.className = "menu-btn";
+      btn.textContent = "⋯";
+      btn.title = "更多操作";
+      btn.onclick = (e) => { e.stopPropagation(); openSessionMenu(e, s); };
+      item.appendChild(btn);
       box.appendChild(item);
     });
   }
+
+  // ── 会话右键菜单（重命名 / 删除）──
+  let menuSession = null;
+  function openSessionMenu(e, s) {
+    menuSession = s;
+    const menu = $("session-menu");
+    menu.classList.remove("hidden");
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mw = 150, mh = 80;
+    let x = rect.right + 4, y = rect.top;
+    if (x + mw > window.innerWidth) x = rect.left - mw - 4;
+    if (y + mh > window.innerHeight) y = window.innerHeight - mh - 8;
+    menu.style.left = x + "px";
+    menu.style.top = y + "px";
+  }
+  function closeSessionMenu() {
+    $("session-menu").classList.add("hidden");
+    menuSession = null;
+  }
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#session-menu") && !e.target.classList.contains("menu-btn")) closeSessionMenu();
+  });
+
+  $("session-menu").addEventListener("click", async (e) => {
+    const act = e.target.dataset.act;
+    if (!act || !menuSession) return;
+    const s = menuSession;
+    closeSessionMenu();
+    if (act === "rename") {
+      const t = prompt("重命名会话：", s.title || s.id);
+      if (t === null) return;
+      const title = t.trim();
+      if (!title) return;
+      try {
+        await rpc("session.rename", { sessionId: s.id, title });
+        if (s.id === state.sid) $("session-title").textContent = title;
+        await loadSessions();
+      } catch (err) { line("error", "重命名失败: " + err.message); }
+    } else if (act === "delete") {
+      const title = String(s.title || s.id).slice(0, 40);
+      confirmDialog("删除会话「" + title + "」？此操作不可恢复。", async () => {
+        try {
+          await rpc("session.delete", { sessionId: s.id });
+          if (s.id === state.sid) {
+            state.sid = null;
+            localStorage.removeItem("newbee.sid");
+            await newSession();
+          }
+          await loadSessions();
+        } catch (err) { line("error", "删除失败: " + err.message); }
+      });
+    }
+  });
+
+  // ── 确认弹窗 ──
+  let confirmCb = null;
+  function confirmDialog(text, cb) {
+    $("confirm-body").textContent = text;
+    $("confirm-modal").classList.remove("hidden");
+    confirmCb = cb;
+  }
+  $("confirm-ok").onclick = () => {
+    $("confirm-modal").classList.add("hidden");
+    if (confirmCb) { const cb = confirmCb; confirmCb = null; cb(); }
+  };
+  $("confirm-cancel").onclick = () => {
+    $("confirm-modal").classList.add("hidden");
+    confirmCb = null;
+  };
+
+  // ── 顶栏标题双击重命名 ──
+  function attachTitleRename(el) {
+    el.addEventListener("dblclick", () => {
+      if (!state.sid) return;
+      const cur = el.textContent;
+      const inp = document.createElement("input");
+      inp.className = "session-title-input";
+      inp.value = cur;
+      inp.maxLength = 60;
+      const finish = async (commit) => {
+        const v = inp.value.trim();
+        const span = document.createElement("span");
+        span.id = "session-title";
+        span.className = "session-title";
+        span.title = "双击重命名";
+        span.textContent = commit && v ? v : cur;
+        inp.replaceWith(span);
+        attachTitleRename(span);
+        if (commit && v && v !== cur) {
+          try {
+            await rpc("session.rename", { sessionId: state.sid, title: v });
+            await loadSessions();
+          } catch (err) { line("error", "重命名失败: " + err.message); }
+        }
+      };
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); finish(true); }
+        else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+      });
+      inp.addEventListener("blur", () => finish(true));
+      el.replaceWith(inp);
+      inp.focus();
+      inp.select();
+    });
+  }
+  attachTitleRename($("session-title"));
+
+  // ── 侧栏折叠 ──
+  function applySidebar(collapsed, persist) {
+    document.getElementById("app").classList.toggle("sidebar-collapsed", collapsed);
+    $("sidebar-expand").classList.toggle("hidden", !collapsed);
+    const tog = $("sidebar-toggle");
+    if (tog) tog.textContent = collapsed ? "⟩" : "⟨";
+    if (persist) localStorage.setItem("newbee.sidebar", collapsed ? "1" : "0");
+  }
+  function initSidebar() {
+    applySidebar(localStorage.getItem("newbee.sidebar") === "1", false);
+  }
+  const sidebarToggleBtn = $("sidebar-toggle");
+  if (sidebarToggleBtn) sidebarToggleBtn.onclick = () => applySidebar(true, true);
+  const sidebarExpandBtn = $("sidebar-expand");
+  if (sidebarExpandBtn) sidebarExpandBtn.onclick = () => applySidebar(false, true);
+
+  // ── 会话搜索 ──
+  const searchInput = $("session-search");
+  if (searchInput) searchInput.addEventListener("input", (e) => {
+    sessionFilter = e.target.value || "";
+    renderSessionList();
+  });
 
   async function resume(sid) {
     state.sid = sid;
@@ -673,6 +836,7 @@ case "goal_round": break;
   // ── 启动 ──
   (async () => {
     initTheme();
+    initSidebar();
     const host = await rpc("host.describe", {});
     $("model-label").textContent = host.model || "(no model)";
     if (!state.sid) {

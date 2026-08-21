@@ -47,6 +47,20 @@ defmodule Newbee.Web.Session do
         end
     end
   end
+  @doc "销毁会话：停 web 会话进程（如活着）+ 删除底层存储（transcript/artifacts/索引）。"
+  def destroy(sid) when is_binary(sid) do
+    case lookup(sid) do
+      {:ok, pid} ->
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal, 3_000)
+        :ok
+
+      _ ->
+        :ok
+    end
+
+    Newbee.Session.delete(sid)
+  end
+
 
   @doc false
   def gen_session_id do
