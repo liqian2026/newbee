@@ -659,6 +659,11 @@ defmodule Newbee.TUI do
           {:submit, text} ->
             run_submit(state, text)
 
+          :new ->
+            GenServer.stop(state.kernel)
+            {:ok, kernel2} = new_kernel(state.client)
+            %{state | kernel: kernel2, busy: false, lines: [], expanded: %{}, tool_blocks: %{}, pending_inputs: [], picker: nil, page: 0}
+
           {:resume, id} ->
             {:ok, kernel2} = resume_kernel(state.client, id)
             lines = load_session_lines(id)
@@ -755,6 +760,20 @@ defmodule Newbee.TUI do
 
     meta = Newbee.Session.meta(id)
     send(self(), {:newbee_event, :tui_say, {:tui_say, "已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}"}})
+    {:ok, kernel}
+  end
+
+  # /new：停掉旧 kernel，以 session_id: nil 起全新会话（全新消息历史与绑定）。
+  defp new_kernel(client) do
+    {:ok, kernel} =
+      Newbee.Agent.Loop.start_link(
+        client: client,
+        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(),
+        auto_antibodies: true,
+        render: fn _ -> :ok end
+      )
+
+    send(self(), {:newbee_event, :tui_say, {:tui_say, "已开启新会话 #{session_id(kernel)}"}})
     {:ok, kernel}
   end
 

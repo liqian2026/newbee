@@ -181,6 +181,11 @@ defmodule Newbee.CLI do
             :handled ->
               loop(kernel, client)
 
+            :new ->
+              GenServer.stop(kernel)
+              {:ok, kernel2} = new_kernel(client)
+              loop(kernel2, client)
+
             {:resume, id} ->
               {:ok, kernel2} = resume_kernel(client, id)
               loop(kernel2, client)
@@ -247,6 +252,15 @@ defmodule Newbee.CLI do
 
     meta = Newbee.Session.meta(id)
     IO.puts("\e[2m已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}\e[0m")
+    {:ok, kernel}
+  end
+
+  # /new：停掉旧 kernel，以 session_id: nil 起全新会话（全新消息历史与绑定）。
+  defp new_kernel(client) do
+    {:ok, kernel} =
+      Newbee.Agent.Loop.start_link(client: client, evaluator: Newbee.Environment.Boot.evaluator_or_fallback(), auto_antibodies: true, render: fn _ -> :ok end)
+
+    IO.puts("\e[2m已开启新会话\e[0m")
     {:ok, kernel}
   end
 

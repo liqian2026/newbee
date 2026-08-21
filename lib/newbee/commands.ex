@@ -6,15 +6,16 @@ defmodule Newbee.Commands do
 
   @commands ~w(/model /bindings /tokens /rules /status /dump /resume /reset /approve
     /reject /log /environment /evolve /autonomy /bundles /goal /diff
-    /undo /session /init /tools /permissions /compact /attach /quit)
+    /undo /session /init /tools /permissions /compact /attach /new /quit)
 
   def commands, do: @commands
 
-  @doc "处理输入。返回 :ok | :handled | :quit | {:submit, text} | {:resume, id} | {:resume_picker, metas} | {:shell, cmd}。"
+  @doc "处理输入。返回 :ok | :handled | :quit | :new | {:submit, text} | {:resume, id} | {:resume_picker, metas} | {:shell, cmd}。"
   @spec handle(String.t(), map()) ::
           :ok
           | :handled
           | :quit
+          | :new
           | {:submit, String.t()}
           | {:resume, String.t()}
           | {:resume_picker, list(map())}
@@ -239,6 +240,12 @@ defmodule Newbee.Commands do
       # 无匹配：原样透传（kernel 会报错提示）
       [] -> {:resume, id}
     end
+  end
+
+  # /new（codex 式）：开启全新会话。由调用方（CLI/TUI）停掉当前 kernel、
+  # 以 session_id: nil 重建——消息历史与绑定都不带入新会话。
+  defp run("new", _arg, _ctx) do
+    :new
   end
 
   defp run("approve", arg, ctx) do

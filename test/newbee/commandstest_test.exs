@@ -19,6 +19,12 @@ defmodule Newbee.CommandsTest do
     assert :quit = Commands.handle("/quit", %{say: fn _ -> :ok end})
   end
 
+  test "/new 返回 :new（由调用方重建 kernel）" do
+    assert :new = Commands.handle("/new", %{say: fn _ -> :ok end})
+    assert :new = Commands.handle("/new  ", %{say: fn _ -> :ok end})
+    assert "/new" in Commands.commands()
+  end
+
   defp unique_session_id do
     # crypto 随机定长：跨 VM 不重复，且不互为前缀（前缀匹配测试需要唯一性）
     "test_resume_" <> (:crypto.strong_rand_bytes(6) |> Base.encode16(case: :lower))
