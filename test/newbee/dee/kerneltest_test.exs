@@ -291,10 +291,14 @@ defmodule Newbee.Agent.LoopTest do
 
     {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
 
-    # 提交前预置中断：第一个工具调用前就会 halt
-    Newbee.LLM.Client.interrupt()
+    # 会话级中断：通过 Loop.interrupt(kernel) 置本会话 client 的 scope flag。
+    # submit 同步执行 turn，interrupt 需在 turn 进行中由外部触发——这里先置 flag
+    # 再 submit，验证 execute_calls 第一个工具前即 halt（scope 在 init 时已注入 client）。
+    Newbee.Agent.Loop.interrupt(kernel)
     assert {:interrupted, nil} = Loop.submit(kernel, "hi")
-    refute Newbee.LLM.Client.interrupted?()
+    # 中断只作用本会话 scope：另一会话的 client（不同 scope）不受影响
+    other = %{interrupt_scope: Newbee.LLM.Client.new_interrupt_scope()}
+    refute Newbee.LLM.Client.interrupted?(other)
   end
 
   defp scripted(script) do

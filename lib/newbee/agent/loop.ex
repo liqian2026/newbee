@@ -57,20 +57,22 @@ defmodule Newbee.Agent.Loop do
     GenServer.call(kernel, {:switch_model, client}, 5_000)
   end
 
-  @doc "从任意 TUI 焦点中断当前模型请求或代码求值。"
+  @doc "中断本会话的模型请求或代码求值（会话级隔离，不影响其它会话）。"
   def interrupt(kernel) do
-    # 这是非阻塞控制面：不能向正在 handle_call/2 中运行的 Loop 发 call。
-    Newbee.LLM.Client.interrupt()
-    if is_pid(kernel) and Process.alive?(kernel), do: send(kernel, :interrupt)
+    # 非阻塞控制面：不能向正在 handle_call/2 中运行的 Loop 发 call。
+    # 直接查 SessionEvaluators 拿本会话的 {evaluator, scope}：
+    # ① LLM 中断：置位本会话 scope 的 persistent_term flag（其它会话无此 scope）；
+    # ② Eval 中断：杀本会话 evaluator 的当前 cell。
+    case Newbee.SessionEvaluators.lookup(kernel) do
+      {:ok, {evaluator, scope}} ->
+        if scope, do: :persistent_term.put({Newbee.LLM.Client, {:interrupt, scope}}, true)
+        if is_pid(evaluator), do: Newbee.DEE.Evaluator.interrupt(evaluator)
 
-    # 求值路由：优先 EvaluatorPool（generation 路由），否则具名 Evaluator
+      {:ok, evaluator} when is_pid(evaluator) ->
+        Newbee.DEE.Evaluator.interrupt(evaluator)
 
-    case Newbee.Environment.EvaluatorPool.current() do
-      nil ->
-        if Process.whereis(Newbee.DEE.Evaluator), do: Newbee.DEE.Evaluator.interrupt()
-
-      pool ->
-        Newbee.Environment.EvaluatorPool.interrupt(pool)
+      :error ->
+        :ok
     end
 
     :ok
@@ -84,6 +86,11 @@ defmodule Newbee.Agent.Loop do
     client = Keyword.fetch!(opts, :client)
     render = Keyword.get(opts, :render, fn _ -> :ok end)
     evaluator = Keyword.get(opts, :evaluator, Newbee.DEE.Evaluator)
+
+    # 会话级隔离：每个会话一个中断 scope（注入 client），evaluator 注册到
+    # SessionEvaluators（key = 本 Loop pid），interrupt 只作用本会话。
+    client = if Map.get(client, :interrupt_scope), do: client, else: Map.put(client, :interrupt_scope, Newbee.LLM.Client.new_interrupt_scope())
+    if is_pid(evaluator), do: Newbee.SessionEvaluators.register(self(), {evaluator, Map.get(client, :interrupt_scope)})
 
     client_fun =
       Keyword.get(opts, :client_fun, fn messages, on_text, on_reasoning ->
@@ -209,9 +216,11 @@ defmodule Newbee.Agent.Loop do
     t0 = :erlang.monotonic_time(:millisecond)
     state = %{state | messages: drop_empty_assistant_messages(state.messages)}
     state = push_msg(state, message)
+    # 回合开始清本会话中断标志（per-session scope，无跨会话竞态）。
+    # 标志语义 = "本回合内是否收到 Esc"；execute_calls 阶段的中断检查依赖它。
+    Newbee.LLM.Client.clear_interrupt(state.client)
     {reply, state} = run_turn(state, 1)
     {reply, state} = after_turn(reply, state)
-    Newbee.LLM.Client.clear_interrupt()
     persist_bindings(state)
     ms = :erlang.monotonic_time(:millisecond) - t0
     Newbee.DebugLog.log(:submit, "done in #{ms}ms reply=#{elem(reply, 0)}")
@@ -268,8 +277,10 @@ defmodule Newbee.Agent.Loop do
   def handle_call(:goal, _from, state), do: {:reply, state.goal, state}
 
   def handle_call({:switch_model, client}, _from, state) do
-    # 不丢会话/绑定/消息，仅替换后续 turn 所用的 client 与 client_fun。
+    # 不丢会话/绑定/消息/中断 scope，仅替换后续 turn 所用的 client 与 client_fun。
     # 求值器节点不动，当前 turn 仍用旧 client 完成，下次 submit 即生效。
+    client = Map.put(client, :interrupt_scope, Map.get(state.client, :interrupt_scope))
+
     client_fun = fn messages, on_text, on_reasoning ->
       Newbee.LLM.Client.stream_chat(client, messages, on_text, on_reasoning)
     end
@@ -281,9 +292,9 @@ defmodule Newbee.Agent.Loop do
   end
 
   # 自主目标循环：异步驱动（每轮之间可处理 mailbox，/goal clear 可插入取消）。
-  @impl true
   def handle_info(:goal_next, state) do
     if state.goal do
+      Newbee.LLM.Client.clear_interrupt(state.client)
       {reply, state} = run_turn(state, 1)
       {_reply, state} = after_turn(reply, state)
       {:noreply, state}
@@ -501,7 +512,7 @@ defmodule Newbee.Agent.Loop do
   defp execute_fallback(blocks, cleaned, state, step) do
     result =
       Enum.reduce_while(blocks, {:cont, state, []}, fn code, {:cont, st, acc} ->
-        if Newbee.LLM.Client.interrupted?() do
+        if Newbee.LLM.Client.interrupted?(st.client) do
           emit(st, {:interrupted, nil})
           {:halt, {:halt, {:interrupted, nil}, st}}
         else
@@ -509,7 +520,7 @@ defmodule Newbee.Agent.Loop do
           tool_started_at = System.monotonic_time(:millisecond)
           eval_result = Newbee.DEE.Evaluator.eval(st.evaluator, code)
 
-          if Newbee.LLM.Client.interrupted?() or eval_interrupted?(eval_result) do
+          if Newbee.LLM.Client.interrupted?(st.client) or eval_interrupted?(eval_result) do
             emit(st, {:interrupted, nil})
             {:halt, {:halt, {:interrupted, nil}, st}}
           else
@@ -577,7 +588,7 @@ defmodule Newbee.Agent.Loop do
 
   defp execute_calls(calls, state) do
     Enum.reduce_while(calls, {:cont, state}, fn call, {:cont, state} ->
-      if Newbee.LLM.Client.interrupted?() do
+      if Newbee.LLM.Client.interrupted?(state.client) do
         # Esc 中断发生在工具执行阶段：不再发起下一个工具调用
         {:halt, {:halt, {:interrupted, nil}, state}}
       else
@@ -883,7 +894,7 @@ defmodule Newbee.Agent.Loop do
           %{status: :error, error: inspect(e), output: ""}
       end
 
-    if Newbee.LLM.Client.interrupted?() or eval_interrupted?(eval_result) do
+    if Newbee.LLM.Client.interrupted?(state.client) or eval_interrupted?(eval_result) do
       Newbee.DebugLog.log(:tool, "eval interrupted title=#{title}")
       emit(state, {:interrupted, nil})
       {:halt, {:halt, {:interrupted, nil}, state}}

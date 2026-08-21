@@ -18,7 +18,8 @@ defmodule Newbee.LLM.Client do
             base_url: @default_base_url,
             reasoning_effort: nil,
             vision: true,
-            context_window: nil
+            context_window: nil,
+            interrupt_scope: nil
 
   def new(opts \\ []) do
     %__MODULE__{
@@ -27,7 +28,8 @@ defmodule Newbee.LLM.Client do
       base_url: Keyword.get(opts, :base_url, @default_base_url),
       reasoning_effort: Keyword.get(opts, :reasoning_effort),
       vision: Keyword.get(opts, :vision, true),
-      context_window: nil
+      context_window: nil,
+      interrupt_scope: Keyword.get(opts, :interrupt_scope)
     }
   end
 
@@ -78,7 +80,7 @@ defmodule Newbee.LLM.Client do
   message 含 "content" 与 "tool_calls"（可能为空列表）。
   """
   def stream_chat(%__MODULE__{} = client, messages, on_text \\ fn _ -> :ok end, on_reasoning \\ fn _ -> :ok end) do
-    if interrupted?() do
+    if interrupted?(client) do
       {:interrupted, ""}
     else
       parent = self()
@@ -90,7 +92,7 @@ defmodule Newbee.LLM.Client do
           send(parent, {:stream_chat_result, ref, result})
         end)
 
-      await_stream_chat(worker, monitor, ref)
+      await_stream_chat(worker, monitor, ref, client)
     end
   end
 
@@ -133,12 +135,12 @@ defmodule Newbee.LLM.Client do
     end
 
     result =
-      case do_request(build_req.(body), on_text, on_reasoning, @overload_retries) do
+      case do_request(build_req.(body), on_text, on_reasoning, @overload_retries, client) do
         {:error, %Req.TransportError{reason: reason}} when reason in [:timeout, :closed] ->
           # 冷连接/池连接被服务端关闭：只重拨一次，避免重复整轮重试造成长时间等待
           Newbee.DebugLog.log(:llm, "transport #{reason}, prewarming+single retry")
           prewarm(client)
-          do_request(build_req.(body), on_text, on_reasoning, 0)
+          do_request(build_req.(body), on_text, on_reasoning, 0, client)
 
         other ->
           other
@@ -156,7 +158,8 @@ defmodule Newbee.LLM.Client do
               build_req.(Map.delete(body, :reasoning_effort)),
               on_text,
               on_reasoning,
-              @overload_retries
+              @overload_retries,
+              client
             )
           else
             err
@@ -170,7 +173,7 @@ defmodule Newbee.LLM.Client do
     result
   end
 
-  defp await_stream_chat(worker, monitor, ref) do
+  defp await_stream_chat(worker, monitor, ref, client) do
     receive do
       {:stream_chat_result, ^ref, result} ->
         Process.demonitor(monitor, [:flush])
@@ -180,12 +183,12 @@ defmodule Newbee.LLM.Client do
         {:error, :stream_worker_stopped}
     after
       50 ->
-        if interrupted?() do
+        if interrupted?(client) do
           Process.exit(worker, :kill)
           Process.demonitor(monitor, [:flush])
           {:interrupted, ""}
         else
-          await_stream_chat(worker, monitor, ref)
+          await_stream_chat(worker, monitor, ref, client)
         end
     end
   end
@@ -281,13 +284,13 @@ defmodule Newbee.LLM.Client do
   # 429/5xx 过载类错误是瞬态的：1 秒后重试，最多 5 次。
   # 重试前必须 drain 掉错误响应体——into: :self 的异步消息残留会污染
   # 下一次请求的 SSE 消费。Esc 中断时立即放弃重试。
-  defp do_request(req, on_text, on_reasoning, overload_left) do
+  defp do_request(req, on_text, on_reasoning, overload_left, client) do
     case Req.request(req) do
       {:ok, %{status: status} = resp}
       when status in @overload_statuses and overload_left > 0 ->
         _ = drain(resp)
 
-        if interrupted?() do
+        if interrupted?(client) do
           {:interrupted, ""}
         else
           Newbee.DebugLog.log(
@@ -296,11 +299,11 @@ defmodule Newbee.LLM.Client do
           )
 
           Process.sleep(@overload_delay)
-          do_request(req, on_text, on_reasoning, overload_left - 1)
+          do_request(req, on_text, on_reasoning, overload_left - 1, client)
         end
 
       {:ok, %{status: 200} = resp} ->
-        consume_sse(resp, on_text, on_reasoning)
+        consume_sse(resp, on_text, on_reasoning, client)
 
       {:ok, resp} ->
         {:error, {:http_error, resp.status, drain(resp)}}
@@ -330,10 +333,10 @@ defmodule Newbee.LLM.Client do
 
   # ── SSE 消费 ──
 
-  defp consume_sse(resp, on_text, on_reasoning) do
+  defp consume_sse(resp, on_text, on_reasoning, client) do
     acc = %{content: "", reasoning: "", tool_calls: %{}, usage: %{}, error: nil}
 
-    case loop(resp, acc, on_text, on_reasoning, "", System.monotonic_time(:millisecond)) do
+    case loop(resp, acc, on_text, on_reasoning, "", System.monotonic_time(:millisecond), client) do
       %{error: :interrupted} = a ->
         Newbee.DebugLog.log(:sse, "interrupted content=#{byte_size(a.content)}")
         {:interrupted, a.content}
@@ -362,23 +365,109 @@ defmodule Newbee.LLM.Client do
   defp maybe_put(msg, _key, ""), do: msg
   defp maybe_put(msg, key, val), do: Map.put(msg, key, val)
 
-  # 中断标志：TUI 按 Esc 置位，流式循环 ≤100ms 内响应并取消连接。
-  # 用 persistent_term（读写都是原子操作，回合级频率可忽略其全局 GC 成本）。
-  @interrupt_key {__MODULE__, :interrupt}
+  # 中断标志（会话作用域）：Esc 置位的是"当前会话 scope"的标志，
+  # 流式循环 ≤100ms 内响应并取消连接。
+  #
+  # scope = 每个会话（Loop 进程）一个 id，存进 client struct；stream_chat
+  # 的请求 worker / 重试 / SSE 消费都拿着同一份 client，天然同 scope。
+  # 每个会话一个 scope，中断互不影响。client 无 scope（旧调用方/测试）
+  # 时回退"当前调用树"：本进程 pdict，再沿 $callers 向上找。
+  @interrupt_scope_key {__MODULE__, :interrupt_scope}
+  @interrupt_legacy_key {__MODULE__, :interrupt_legacy}
 
-  @doc "请求中断当前流式调用（Esc）。"
-  def interrupt, do: :persistent_term.put(@interrupt_key, true)
+  @doc "生成一个新的中断 scope id（Loop 每个回合持有一个）。"
+  def new_interrupt_scope, do: make_ref()
 
-  @doc "清除中断标志（新一轮提交前）。"
-  def clear_interrupt, do: :persistent_term.erase(@interrupt_key)
+  @doc "在当前进程注册中断 scope（Loop submit 前调用，供无 client 的旧路径回退）。返回 scope id。"
+  def register_interrupt_scope do
+    scope = new_interrupt_scope()
+    Process.put(@interrupt_scope_key, scope)
+    scope
+  end
 
-  @doc "中断标志是否已置位。"
-  def interrupted?, do: :persistent_term.get(@interrupt_key, false)
+  @doc "请求中断（Esc）。给 client 时只置位该会话的 scope；不给时置位当前调用树。"
+  def interrupt(client \\ nil)
 
-  defp loop(resp, acc, on_text, on_reasoning, buf, t0) do
+  def interrupt(%__MODULE__{interrupt_scope: scope}) when not is_nil(scope) do
+    :persistent_term.put(scope_key(scope), true)
+  end
+
+  def interrupt(_) do
+    case find_interrupt_scope() do
+      {:ok, scope} -> :persistent_term.put(scope_key(scope), true)
+      :error -> :persistent_term.put(@interrupt_legacy_key, true)
+    end
+  end
+
+  @doc "清除中断标志（回合开始时）。给 client 清该会话 scope，不给清当前调用树。"
+  def clear_interrupt(client \\ nil)
+
+  def clear_interrupt(%__MODULE__{interrupt_scope: scope}) when not is_nil(scope) do
+    :persistent_term.erase(scope_key(scope))
+  end
+
+  def clear_interrupt(_) do
+    case find_interrupt_scope() do
+      {:ok, scope} -> :persistent_term.erase(scope_key(scope))
+      :error -> :persistent_term.erase(@interrupt_legacy_key)
+    end
+  end
+
+  @doc "中断标志是否已置位。给 client 查该会话 scope，不给查当前调用树。"
+  def interrupted?(client \\ nil)
+
+  def interrupted?(%{interrupt_scope: scope}) when not is_nil(scope) do
+    :persistent_term.get(scope_key(scope), false)
+  end
+
+  def interrupted?(_) do
+    case find_interrupt_scope() do
+      {:ok, scope} -> :persistent_term.get(scope_key(scope), false)
+      :error -> :persistent_term.get(@interrupt_legacy_key, false)
+    end
+  end
+
+  defp scope_key(scope), do: {__MODULE__, {:interrupt, scope}}
+
+  # 先查本进程 pdict；否则沿 $callers 链向上（spawn_monitor/Task 的调用树
+  # 会记录 $callers），找到最近的 scope 注册者。整条链找不到视为无 scope。
+  defp find_interrupt_scope do
+    case Process.get(@interrupt_scope_key) do
+      nil -> find_scope_in_callers(callers())
+      scope -> {:ok, scope}
+    end
+  end
+
+  defp callers do
+    case Process.info(self(), :dictionary) do
+      {:dictionary, dict} when is_list(dict) -> :proplists.get_value(:"$callers", dict, [])
+      _ -> []
+    end
+  end
+
+  defp find_scope_in_callers([pid | rest]) when is_pid(pid) do
+    if Process.alive?(pid) do
+      case Process.info(pid, :dictionary) do
+        {:dictionary, dict} when is_list(dict) ->
+          case :proplists.get_value(@interrupt_scope_key, dict) do
+            nil -> find_scope_in_callers(rest)
+            scope -> {:ok, scope}
+          end
+
+        _ ->
+          find_scope_in_callers(rest)
+      end
+    else
+      find_scope_in_callers(rest)
+    end
+  end
+
+  defp find_scope_in_callers(_), do: :error
+
+  defp loop(resp, acc, on_text, on_reasoning, buf, t0, client) do
     receive do
       message ->
-        if interrupted?() do
+        if interrupted?(client) do
           Req.cancel_async_response(resp)
           %{acc | error: :interrupted}
         else
@@ -386,25 +475,25 @@ defmodule Newbee.LLM.Client do
             {:ok, [data: data]} ->
               {events, rest} = split_sse(buf <> data)
               acc = Enum.reduce(events, acc, &apply_event(&1, &2, on_text, on_reasoning))
-              loop(resp, acc, on_text, on_reasoning, rest, t0)
+              loop(resp, acc, on_text, on_reasoning, rest, t0, client)
 
             {:ok, [:done]} ->
               acc
 
             {:ok, [trailers: _]} ->
-              loop(resp, acc, on_text, on_reasoning, buf, t0)
+              loop(resp, acc, on_text, on_reasoning, buf, t0, client)
 
             {:error, e} ->
               %{acc | error: inspect(e)}
 
             :unknown ->
-              loop(resp, acc, on_text, on_reasoning, buf, t0)
+              loop(resp, acc, on_text, on_reasoning, buf, t0, client)
           end
         end
     after
       100 ->
         cond do
-          interrupted?() ->
+          interrupted?(client) ->
             Req.cancel_async_response(resp)
             %{acc | error: :interrupted}
 
@@ -414,7 +503,7 @@ defmodule Newbee.LLM.Client do
             %{acc | error: "stream timeout"}
 
           true ->
-            loop(resp, acc, on_text, on_reasoning, buf, t0)
+            loop(resp, acc, on_text, on_reasoning, buf, t0, client)
         end
     end
   end

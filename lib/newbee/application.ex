@@ -13,6 +13,7 @@ defmodule Newbee.Application do
         Newbee.DEE.Rules,
         Newbee.Staging,
         Newbee.Environment.PluginSupervisor,
+        Newbee.SessionEvaluators,
         {Registry, keys: :unique, name: Newbee.Web.SessionRegistry},
         {DynamicSupervisor, strategy: :one_for_one, name: Newbee.Web.SessionSup}
       ] ++

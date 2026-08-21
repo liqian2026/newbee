@@ -74,7 +74,7 @@ defmodule Newbee.TUI do
   @scrollback 5_000
 
   def start do
-    client = Newbee.LLM.Config.client_for()
+    client = Newbee.LLM.Config.client_for() |> Map.put(:interrupt_scope, Newbee.LLM.Client.new_interrupt_scope())
 
     unless client.api_key do
       IO.puts("\e[31m缺少 API key：检查 ~/.newbee/model.json\e[0m")
@@ -306,7 +306,7 @@ defmodule Newbee.TUI do
 
       {:newbee_event, topic, payload} ->
         # 单个事件的渲染异常不能杀掉主 TUI 进程；保留回合状态并显示诊断。
-        if Newbee.LLM.Client.interrupted?() and topic in [:text, :reasoning, :tool_start] do
+        if Newbee.LLM.Client.interrupted?(state.client) and topic in [:text, :reasoning, :tool_start] do
           loop(state, reader)
         else
           state = safe_render_event(state, topic, payload) |> schedule_paint()

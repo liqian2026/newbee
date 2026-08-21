@@ -40,17 +40,23 @@ defmodule Newbee.Environment.Boot do
   end
 
   @doc """
-  CLI/TUI 入口：Boot 成功返回 pool；失败降级为独立具名求值器
-  （前端永远可用，环境功能降级）。`log` 控制是否输出降级提示。
+  CLI/TUI/Web 入口：**每个会话一个独立求值器**（会话级隔离）。
+
+  不再共享全局 EvaluatorPool——绑定/中断/节点崩溃都是会话私有的：
+  Esc 只杀本会话的求值 cell；某会话节点崩溃只重建该会话的，不波及其它。
+  绑定快照按会话目录落盘，恢复时灌回本会话求值器。
+
+  起独立 DEE.Evaluator（:node 自带 primary+standby 冗余与自动重建），
+  调用方（Loop）持有 pid 并注册到 SessionEvaluators。
   """
   def evaluator_or_fallback(opts \\ []) do
-    case start(opts) do
-      {:ok, %{pool: pool}} ->
-        pool
+    case Newbee.DEE.Evaluator.start(mode: :node) do
+      {:ok, ev} ->
+        ev
 
-      {:error, reason} ->
+      {:error, _reason} ->
         if Keyword.get(opts, :log, true) do
-          IO.puts("\e[33m⚠ 环境启动降级: #{inspect(reason)}（standalone evaluator）\e[0m")
+          IO.puts("\e[33m⚠ 求值器启动失败，降级复用具名求值器\e[0m")
         end
 
         case Process.whereis(Newbee.DEE.Evaluator) do

@@ -5,7 +5,7 @@ defmodule Newbee.CLI do
   """
 
   def start do
-    client = Newbee.LLM.Config.client_for()
+    client = Newbee.LLM.Config.client_for() |> Map.put(:interrupt_scope, Newbee.LLM.Client.new_interrupt_scope())
 
     unless client.api_key do
       IO.puts("\e[31m缺少 API key：检查 ~/.newbee/model.json\e[0m")
@@ -253,7 +253,7 @@ defmodule Newbee.CLI do
 
   @doc "恢复会话并进入交互循环（mix newbee -r <id>）。"
   def resume(id) do
-    client = Newbee.LLM.Config.client_for()
+    client = Newbee.LLM.Config.client_for() |> Map.put(:interrupt_scope, Newbee.LLM.Client.new_interrupt_scope())
     Newbee.Bus.subscribe()
     spawn_link(fn -> printer(<<>>) end)
     {:ok, kernel} = resume_kernel(client, id)

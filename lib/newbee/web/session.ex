@@ -129,10 +129,14 @@ defmodule Newbee.Web.Session do
         Newbee.LLM.Config.client_for()
       end
 
-    case model do
-      nil -> base
-      model -> %{base | model: model}
-    end
+    client =
+      case model do
+        nil -> base
+        model -> %{base | model: model}
+      end
+
+    # 会话级中断 scope：每个 Web 会话一个，Esc/中断只作用本会话
+    %{client | interrupt_scope: Newbee.LLM.Client.new_interrupt_scope()}
   end
 
 
@@ -294,7 +298,7 @@ defmodule Newbee.Web.Session do
     usage = st.usage_snap
     steps = st.steps_snap
     goal = nil
-    bindings = bindings_count()
+    bindings = bindings_count(st)
 
     {:reply,
      %{
@@ -381,20 +385,16 @@ defmodule Newbee.Web.Session do
     %{st | busy: true}
   end
 
-  # DEE 绑定数：优先 EvaluatorPool（generation 路由），否则具名 Evaluator
-  defp bindings_count do
+  # DEE 绑定数：查本会话 kernel 注册的独立 evaluator（会话级隔离）
+  defp bindings_count(st) do
     task =
       Task.async(fn ->
-        case Newbee.Environment.EvaluatorPool.current() do
-          nil ->
-            if Process.whereis(Newbee.DEE.Evaluator) do
-              length(Newbee.DEE.Evaluator.bindings_summary(Newbee.DEE.Evaluator, 300))
-            else
-              0
-            end
+        case st.kernel && Newbee.SessionEvaluators.lookup(st.kernel) do
+          {:ok, evaluator} when is_pid(evaluator) ->
+            length(Newbee.DEE.Evaluator.bindings_summary(evaluator, 300))
 
-          pool ->
-            length(Newbee.Environment.EvaluatorPool.bindings_summary(pool))
+          _ ->
+            0
         end
       end)
 
