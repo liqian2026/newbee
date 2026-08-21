@@ -1439,8 +1439,9 @@ defmodule Newbee.TUI do
     # —— 缓存 ——
     cache_str =
       if state.prompt_tokens > 0 do
-        pct = trunc(state.cached_tokens * 100.0 / state.prompt_tokens)
-        "缓存 #{pct}%"
+        pct = state.cached_tokens * 100.0 / state.prompt_tokens
+        formatted = :io_lib.format("~.2f", [pct]) |> IO.iodata_to_binary()
+        "缓存 #{formatted}%"
       end
 
     # —— 输入/输出 ——
