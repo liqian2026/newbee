@@ -10,7 +10,14 @@ defmodule Newbee.TuiMetricsTest do
   test "usage 事件累计步数/token 并关闭 llm 计时" do
     s = fresh_state()
     s = %{s | llm_step_start: System.monotonic_time(:millisecond) - 500}
-    s = Newbee.TUI.render_event(s, :usage, {:usage, %{"prompt_tokens" => 1000, "completion_tokens" => 50, "cache_read_tokens" => 900}})
+
+    s =
+      Newbee.TUI.render_event(
+        s,
+        :usage,
+        {:usage, %{"prompt_tokens" => 1000, "completion_tokens" => 50, "cache_read_tokens" => 900}}
+      )
+
     assert s.steps == 1
     assert s.llm_ms >= 400
     assert s.llm_step_start == nil
@@ -31,8 +38,20 @@ defmodule Newbee.TuiMetricsTest do
     assert s.awaiting_first_token == true
   end
 
+  test "tool_warnings 事件更新最近工具块且不崩溃" do
+    s = Newbee.TUI.render_event(fresh_state(), :tool_start, {:tool_start, "run_elixir", "t", ":ok"})
+    s = Newbee.TUI.render_event(s, :tool_warnings, {:tool_warnings, "warning: deprecated\nwarning: unused"})
+
+    block = Map.fetch!(s.tool_blocks, s.last_block_id)
+    assert block.warnings =~ "deprecated"
+    assert List.last(s.lines) =~ "警告 2 条"
+  end
+
   test "首 token 时延被累计一次" do
-    s = fresh_state() |> Map.merge(%{llm_step_start: System.monotonic_time(:millisecond) - 300, awaiting_first_token: true})
+    s =
+      fresh_state()
+      |> Map.merge(%{llm_step_start: System.monotonic_time(:millisecond) - 300, awaiting_first_token: true})
+
     s = Newbee.TUI.render_event(s, :text, {:text, "hello"})
     assert s.ft_count == 1
     assert s.ft_sum_ms >= 250
@@ -44,17 +63,20 @@ defmodule Newbee.TuiMetricsTest do
 
   test "status_line 输出包含轮·步与缓存字段（宽屏模式）" do
     s = fresh_state()
-    s = %{s |
-      turns: 6,
-      steps: 279,
-      llm_ms: 5_922_000,
-      tool_ms: 4_563_000,
-      ft_sum_ms: 49_200,
-      ft_count: 6,
-      prompt_tokens: 43_700_000,
-      completion_tokens: 17_200,
-      cached_tokens: 43_263_000
+
+    s = %{
+      s
+      | turns: 6,
+        steps: 279,
+        llm_ms: 5_922_000,
+        tool_ms: 4_563_000,
+        ft_sum_ms: 49_200,
+        ft_count: 6,
+        prompt_tokens: 43_700_000,
+        completion_tokens: 17_200,
+        cached_tokens: 43_263_000
     }
+
     # 模拟宽屏
     System.put_env("NEWBEE_COLS", "200")
     line = Newbee.TUI.__info__(:functions) |> Keyword.get(:status_line)

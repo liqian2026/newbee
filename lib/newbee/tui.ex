@@ -907,6 +907,7 @@ defmodule Newbee.TUI do
       title: title,
       code: code,
       result: nil,
+      warnings: nil,
       started_at: System.monotonic_time(:millisecond)
     }
 
