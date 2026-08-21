@@ -662,7 +662,18 @@ defmodule Newbee.TUI do
           :new ->
             GenServer.stop(state.kernel)
             {:ok, kernel2} = new_kernel(state.client)
-            %{state | kernel: kernel2, busy: false, lines: [], expanded: %{}, tool_blocks: %{}, pending_inputs: [], picker: nil, page: 0}
+
+            %{
+              state
+              | kernel: kernel2,
+                busy: false,
+                lines: [],
+                expanded: %{},
+                tool_blocks: %{},
+                pending_inputs: [],
+                picker: nil,
+                page: 0
+            }
 
           {:resume, id} ->
             {:ok, kernel2} = resume_kernel(state.client, id)
@@ -1382,10 +1393,13 @@ defmodule Newbee.TUI do
       "      Ctrl-U/K cut | Ctrl-Y paste | Ctrl-W/Alt-D delete word | PgUp/Dn scroll | Ctrl-T pane | /reasoning 思考流 | Ctrl-R 历史搜索"
   end
 
-  # 强制刷新一次 bindings（tool_result/turn_done 后调用：求值器此刻空闲，查询不会排队超时）
+  # 强制刷新一次 bindings（tool_result/turn_end 后调用：求值器此刻空闲，查询不会排队超时）。
+  # 查询期间临时放开 busy 只是为了允许 bindings_summary；不能把该临时状态泄回 TUI，
+  # 否则自主目标每次工具返回后都会被显示成“空闲”，用户会误以为驱动停止。
   defp refresh_bindings(state) do
-    {bs, state} = cached_bindings(%{state | bindings_cache_at: 0, busy: false})
-    %{state | bindings_cache: bs, bindings_cache_at: System.monotonic_time(:millisecond)}
+    was_busy = state.busy
+    {bs, _query_state} = cached_bindings(%{state | bindings_cache_at: 0, busy: false})
+    %{state | bindings_cache: bs, bindings_cache_at: System.monotonic_time(:millisecond), busy: was_busy}
   end
 
   # 缓存 bindings（500ms TTL + busy 时跳过查询，避免每帧 GenServer.call 卡 paint）

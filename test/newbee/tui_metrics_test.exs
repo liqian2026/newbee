@@ -89,4 +89,10 @@ defmodule Newbee.TuiMetricsTest do
     System.delete_env("NEWBEE_COLS")
     _ = line
   end
+
+  test "工具结果刷新绑定后仍保持运行状态" do
+    state = %{fresh_state() | busy: true}
+    state = Newbee.TUI.render_event(state, :tool_result, {:tool_result, "run_elixir", "ok"})
+    assert state.busy
+  end
 end
