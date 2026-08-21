@@ -75,6 +75,21 @@ defmodule Newbee.Agent.Loop do
         :ok
     end
 
+    # 兜底：查表失败（evaluator 非 pid / 未注册）时，从 kernel state 拿 client scope
+    # 直接置 LLM flag。:sys.get_state 在 Loop 忙时会排队，用短超时保护不阻塞控制面。
+    if is_pid(kernel) and Process.alive?(kernel) do
+      try do
+        state = :sys.get_state(kernel, 200)
+        scope = Map.get(state.client, :interrupt_scope)
+        if scope, do: :persistent_term.put({Newbee.LLM.Client, {:interrupt, scope}}, true)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    # 双保险：同时给 kernel 发消息，Loop 处理 mailbox 时用自己的 client 自置 flag。
+    if is_pid(kernel) and Process.alive?(kernel), do: send(kernel, :interrupt_llm)
+
     :ok
   end
 
@@ -292,6 +307,13 @@ defmodule Newbee.Agent.Loop do
   end
 
   # 自主目标循环：异步驱动（每轮之间可处理 mailbox，/goal clear 可插入取消）。
+  @impl true
+  def handle_info(:interrupt_llm, state) do
+    scope = Map.get(state.client, :interrupt_scope)
+    if scope, do: :persistent_term.put({Newbee.LLM.Client, {:interrupt, scope}}, true)
+    {:noreply, state}
+  end
+
   def handle_info(:goal_next, state) do
     if state.goal do
       Newbee.LLM.Client.clear_interrupt(state.client)
