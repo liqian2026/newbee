@@ -6,7 +6,8 @@ defmodule Newbee.LLM.Client do
 
   @default_base_url "https://openrouter.ai/api/v1"
   @default_model "deepseek/deepseek-v4-flash-0731"
-
+  @default_context_window 256_000
+  @context_cache_key {__MODULE__, :context_windows}
   @overload_statuses [429, 500, 502, 503, 529]
   @overload_retries 5
   @overload_delay 1_000
@@ -16,7 +17,8 @@ defmodule Newbee.LLM.Client do
             api_key: nil,
             base_url: @default_base_url,
             reasoning_effort: nil,
-            vision: true
+            vision: true,
+            context_window: nil
 
   def new(opts \\ []) do
     %__MODULE__{
@@ -24,8 +26,50 @@ defmodule Newbee.LLM.Client do
       api_key: Keyword.get(opts, :api_key, System.get_env("OPENROUTER_API_KEY")),
       base_url: Keyword.get(opts, :base_url, @default_base_url),
       reasoning_effort: Keyword.get(opts, :reasoning_effort),
-      vision: Keyword.get(opts, :vision, true)
+      vision: Keyword.get(opts, :vision, true),
+      context_window: nil
     }
+  end
+
+  @doc "获取模型上下文窗口；显式配置优先，否则查询 provider 元数据，失败回退 256K。"
+  def context_window(%__MODULE__{context_window: n}) when is_integer(n) and n > 0, do: n
+
+  def context_window(%__MODULE__{} = client) do
+    cache = :persistent_term.get(@context_cache_key, %{})
+    key = {client.base_url, client.model}
+
+    case Map.fetch(cache, key) do
+      {:ok, n} ->
+        n
+
+      :error ->
+        n = fetch_context_window(client)
+        :persistent_term.put(@context_cache_key, Map.put(cache, key, n))
+        n
+    end
+  end
+
+  def context_window(client) when is_map(client), do: Map.get(client, :context_window) || @default_context_window
+
+  defp fetch_context_window(client) do
+    with {:ok, %{status: 200, body: body}} <-
+           Req.get(client.base_url <> "/models",
+             headers: [
+               {"authorization", "Bearer #{client.api_key}"},
+               {"user-agent", "newbee"}
+             ],
+             receive_timeout: 15_000,
+             retry: false
+           ),
+         models when is_list(models) <- body["data"] || body[:data],
+         model when is_map(model) <- Enum.find(models, &((&1["id"] || &1[:id]) == client.model)),
+         n when is_integer(n) and n > 0 <- model["context_length"] || model[:context_length] do
+      n
+    else
+      _ -> @default_context_window
+    end
+  rescue
+    _ -> @default_context_window
   end
 
   @doc """
@@ -77,7 +121,8 @@ defmodule Newbee.LLM.Client do
         method: :post,
         headers: [
           {"authorization", "Bearer #{client.api_key}"},
-          {"content-type", "application/json"}
+          {"content-type", "application/json"},
+          {"user-agent", "newbee"}
         ],
         json: body,
         receive_timeout: 120_000,
@@ -176,7 +221,8 @@ defmodule Newbee.LLM.Client do
         method: :post,
         headers: [
           {"authorization", "Bearer #{client.api_key}"},
-          {"content-type", "application/json"}
+          {"content-type", "application/json"},
+          {"user-agent", "newbee"}
         ],
         json: body,
         receive_timeout: 120_000,
@@ -268,7 +314,10 @@ defmodule Newbee.LLM.Client do
   def prewarm(%__MODULE__{} = client) do
     # 假 IP 代理 TLS 握手 ~5.2s，预热必须容忍慢拨号；连接入池后请求级 5s 才有意义
     Req.get(client.base_url <> "/models",
-      headers: [{"authorization", "Bearer #{client.api_key}"}],
+      headers: [
+        {"authorization", "Bearer #{client.api_key}"},
+        {"user-agent", "newbee"}
+      ],
       receive_timeout: 30_000,
       finch: [pool_timeout: 30_000, conn_max_idle_time: 300_000, conn_opts: [transport_opts: [timeout: 30_000]]],
       retry: false

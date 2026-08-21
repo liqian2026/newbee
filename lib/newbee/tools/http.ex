@@ -22,7 +22,11 @@ defmodule Newbee.Tools.Http do
       Req.new(
         url: url,
         method: method,
-        headers: Enum.map(headers, fn {k, v} -> {to_string(k), to_string(v)} end),
+        headers:
+          (headers
+           |> Enum.reject(fn {k, _} -> String.downcase(to_string(k)) == "user-agent" end)
+           |> Enum.map(fn {k, v} -> {to_string(k), to_string(v)} end)) ++
+            [{"user-agent", "newbee"}],
         json: json,
         receive_timeout: @default_timeout,
         retry: false

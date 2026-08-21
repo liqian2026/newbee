@@ -46,9 +46,10 @@ defmodule Newbee.Host.Shell do
       headers =
         (plan[:headers] || plan["headers"] || [])
         |> Enum.map(fn {k, v} -> {to_string(k), to_string(v)} end)
-        # 插件不得自带 authorization——凭证注入是 Host 的事
-        |> Enum.reject(fn {k, _} -> String.downcase(k) == "authorization" end)
+        # 插件不得自带 authorization/user-agent——凭证与来源注入都是 Host 的事
+        |> Enum.reject(fn {k, _} -> String.downcase(k) in ["authorization", "user-agent"] end)
         |> Kernel.++(credential_headers(uri))
+        |> Kernel.++([{"user-agent", "newbee"}])
 
       req =
         Req.new(
