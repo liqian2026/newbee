@@ -152,8 +152,20 @@ get "/health" do
 
   # 模型目录
   defp dispatch_rpc("llm.models", p) do
-    cat = Newbee.LLM.Config.model_catalog()
+    opts = if p["refresh"] == true, do: [refresh: true], else: []
+    cat = Newbee.LLM.Config.model_catalog(opts)
     {:ok, %{providers: cat.providers, current: current_model_info(p["sessionId"])}}
+  end
+
+  # 按厂商刷新模型列表（只拉指定 provider）
+  defp dispatch_rpc("llm.providerModels", p) do
+    name = p["provider"] || ""
+    opts = if p["refresh"] == true, do: [refresh: true], else: []
+
+    case Newbee.LLM.Config.provider_models_by_name(name, opts) do
+      nil -> {:error, "unknown_provider", name}
+      models -> {:ok, %{provider: name, models: models}}
+    end
   end
 
 

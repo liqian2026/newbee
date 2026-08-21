@@ -823,6 +823,8 @@ case "goal_round": break;
 
     // 待确认的选择（确定按钮点击时生效）
     let pending = { provider: curProvider, model: curModel };
+    let currentProvider = curProvider;
+    let providerData = new Map(); // name -> provider 数据
 
     providers.forEach((p) => {
       if (!p || !p.name || !(p.models || []).length) return;
@@ -832,6 +834,8 @@ case "goal_round": break;
       po.onclick = () => {
         pbox.querySelectorAll(".model-provider").forEach((x) => x.classList.remove("current"));
         po.classList.add("current");
+        currentProvider = p.name;
+        providerData.set(p.name, p);
         renderModels(p);
       };
       pbox.appendChild(po);
@@ -867,6 +871,31 @@ case "goal_round": break;
         line("error", "切模型失败: " + e.message);
       }
     };
+
+    // 刷新：只对当前选中的厂商重新拉取模型列表
+    const refreshBtn = $("model-refresh");
+    if (refreshBtn) {
+      refreshBtn.onclick = async () => {
+        if (!currentProvider) return;
+        refreshBtn.textContent = "↻ 刷新中…";
+        refreshBtn.disabled = true;
+        try {
+          const r = await rpc("llm.providerModels", { sessionId: state.sid, provider: currentProvider, refresh: true });
+          const updated = providerData.get(currentProvider) || { name: currentProvider };
+          updated.models = r.models || [];
+          providerData.set(currentProvider, updated);
+          const p = providerData.get(currentProvider);
+          renderModels(p);
+          if (!(r.models || []).length) line("warn", currentProvider + " 暂无可用模型");
+        } catch (e) {
+          line("error", "刷新模型失败: " + e.message);
+        } finally {
+          refreshBtn.textContent = "🔄 刷新";
+          refreshBtn.disabled = false;
+        }
+      };
+    }
+
 
     $("model-modal").classList.remove("hidden");
   }

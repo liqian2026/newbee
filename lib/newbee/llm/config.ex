@@ -45,16 +45,24 @@ defmodule Newbee.LLM.Config do
   end
 
   @doc "WebUI 模型目录：按厂家分组的完整列表 + 当前默认（provider/model）。"
-  def model_catalog do
+  def model_catalog(opts \\ []) do
     cfg = load()
+    providers_cfg = for {name, p} <- cfg["providers"] || %{}, is_map(p), do: {name, p}
 
     providers =
-      for {name, p} <- cfg["providers"] || %{}, is_map(p) do
-        %{
-          name: name,
-          models: provider_models(name, p)
-        }
-      end
+      providers_cfg
+      |> Task.async_stream(
+        fn {name, p} ->
+          %{name: name, models: provider_models(name, p, opts)}
+        end,
+        max_concurrency: 8,
+        timeout: 10_000,
+        on_timeout: :kill_task
+      )
+      |> Enum.map(fn
+        {:ok, result} -> result
+        {:exit, _} -> %{name: "unknown", models: []}
+      end)
 
     default = get_in(cfg, ["roles", "default"]) || %{}
     %{providers: providers, current: %{provider: default["provider"], model: default["model"]}}
@@ -125,18 +133,43 @@ defmodule Newbee.LLM.Config do
   取某 provider 的模型列表：优先缓存（5 分钟），其次 GET {baseUrl}/models
   （OpenAI 兼容 data[].id），失败回退配置里的静态 models 列表。
   """
-  def provider_models(name, provider) do
+  def provider_models(name, provider, opts \\ []) do
     ensure_cache_table()
     key = {name, provider["baseUrl"]}
+    force = Keyword.get(opts, :refresh, false)
 
     case :ets.lookup(@models_cache, key) do
-      [{^key, ids, ts}] when :erlang.monotonic_time(:millisecond) - ts < @models_ttl ->
+      [{^key, ids, _ts}] when not force ->
+        # 有缓存且非强制：直接返回缓存
         ids
 
+      _ when force ->
+        # 强制刷新：同步拉取
+        do_fetch_and_cache(name, provider, key)
+
       _ ->
-        ids = fetch_models(provider) || static_models(provider)
-        :ets.insert(@models_cache, {key, ids, :erlang.monotonic_time(:millisecond)})
-        ids
+        # 无缓存非强制：返回静态列表（不自动拉取）
+        static_models(provider)
+    end
+  end
+
+  defp do_fetch_and_cache(name, provider, key) do
+    ids = fetch_models(provider) || static_models(provider)
+    :ets.insert(@models_cache, {key, ids, :erlang.monotonic_time(:millisecond)})
+    ids
+  end
+
+  @doc """
+  按名字取某 provider 的模型列表（供按厂商刷新）。provider 名不存在时返回 nil。
+  """
+  def provider_models_by_name(name, opts \\ []) do
+    cfg = load()
+    provider = get_in(cfg, ["providers", name])
+
+    if is_map(provider) do
+      provider_models(name, provider, opts)
+    else
+      nil
     end
   end
 
@@ -148,8 +181,7 @@ defmodule Newbee.LLM.Config do
     if is_binary(base) and String.trim(base) != "" do
       url = String.trim_trailing(base, "/") <> "/models"
 
-      with {:ok, body} <- http_get(url, key),
-           {:ok, %{"data" => data}} when is_list(data) <- Jason.decode(body) do
+      with {:ok, %{"data" => data}} when is_list(data) <- http_get(url, key) do
         data
         |> Enum.map(fn m -> m["id"] end)
         |> Enum.filter(&is_binary/1)
@@ -182,28 +214,20 @@ defmodule Newbee.LLM.Config do
       _ ->
         :ok
     end
-      :ets.new(@models_cache, [:named_table, :public, :set, read_concurrency: true])
-    end
 
     :ok
   end
 
   defp http_get(url, api_key) do
-    _ = Application.ensure_all_started(:inets)
-    _ = Application.ensure_all_started(:ssl)
-
     headers =
       if is_binary(api_key) and api_key != "" do
-        [{~c"authorization", ~c"Bearer " <> String.to_charlist(api_key)}]
+        [{"authorization", "Bearer " <> api_key}]
       else
         []
       end
 
-    request = {String.to_charlist(url), headers}
-    http_opts = [timeout: 8_000, connect_timeout: 5_000, ssl: [verify: :verify_none]]
-
-    case :httpc.request(:get, request, http_opts, []) do
-      {:ok, {{_, status, _}, _headers, body}} when status in 200..299 ->
+    case Req.get(url, headers: headers, receive_timeout: 8_000) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
 
       _ ->
