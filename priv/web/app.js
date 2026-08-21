@@ -1033,9 +1033,13 @@ case "goal_round": break;
     const u = st.usage || {};
     const cacheRead = u.cache_read_tokens || u.cached_tokens
       || (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
-    const inTok = (u.uncached_prompt_tokens || u.prompt_tokens || 0) + (u.cache_write_tokens || 0);
+    const uncachedIn = u.uncached_prompt_tokens != null ? u.uncached_prompt_tokens
+      : ((u.prompt_tokens || 0) - cacheRead > 0 ? (u.prompt_tokens || 0) - cacheRead : 0);
     const outTok = u.completion_tokens || u.output_tokens || 0;
-    const cacheHit = inTok > 0 ? Math.round(cacheRead / inTok * 100) : null;
+    const inTok = cacheRead + uncachedIn + (u.cache_write_tokens || 0);
+    // 缓存命中率：累计 cache_read ÷ 累计 prompt_tokens（与 TUI 口径一致；服务端 usage 按 key 累加，prompt 含 cached）
+    const promptTok = u.prompt_tokens || 0;
+    const cacheHit = promptTok > 0 ? Math.min(100, cacheRead * 100 / promptTok) : null;
     const left = ["newbee"];
     const turns = st.turns || 0, steps = st.steps || 0;
     if (turns > 0 || steps > 0) left.push(`${turns} 轮 · ${steps} 步`);
@@ -1049,7 +1053,7 @@ case "goal_round": break;
     if (tm.ftCount > 0) spd.push(`首 token ${fmtDur(tm.ftSum / tm.ftCount)}`);
     if (llmMs > 0 && tm.outTok > 0) spd.push(`${(tm.outTok / (llmMs / 1000)).toFixed(1)} tok/s`);
     if (spd.length) left.push(spd.join(" · "));
-    if (cacheHit !== null) left.push(`缓存 ${cacheHit}%`);
+    if (cacheHit !== null) left.push(`缓存 ${cacheHit.toFixed(1).replace(/\.0$/, "")}%`);
     if (inTok > 0 || outTok > 0) left.push(`入 ${fmtTok(inTok)} · 出 ${fmtTok(outTok)}`);
     $("stats-left").innerHTML = left.join(" | ");
     const stTxt = st.busy ? '<span class="st-busy">● 运行中</span>' : '<span class="st-ok">● 空闲</span>';
