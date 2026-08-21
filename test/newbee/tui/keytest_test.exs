@@ -101,6 +101,11 @@ defmodule Newbee.TUI.KeyTest do
     end
   end
 
+  test "连续两个孤立 ESC 都只产生 Esc 事件，不产生退出字符" do
+    assert {[{:key, :esc}], ""} = Key.flush("\e")
+    assert {[{:key, :esc}], ""} = Key.flush("\e")
+  end
+
   describe "括号粘贴" do
     test "起止边界识别" do
       assert {[:paste_start], ""} = Key.feed("\e[200~")

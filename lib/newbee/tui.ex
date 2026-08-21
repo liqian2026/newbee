@@ -254,6 +254,10 @@ defmodule Newbee.TUI do
 
         loop(paint(state, true), reader)
 
+      # 中断后紧随的第二个 Esc 只消费，不得落入普通按键/退出路径。
+      {:key, key} when key in [:esc, :escape] and not state.busy and is_nil(state.picker) ->
+        loop(state, reader)
+
       {:key, key} ->
         if state.picker do
           case handle_picker_key(state, key) do
