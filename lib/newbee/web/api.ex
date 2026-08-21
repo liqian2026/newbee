@@ -693,6 +693,37 @@ defmodule Newbee.Web.Api do
     _ -> {:ok, %{files: []}}
   end
 
+  # ── 文件搜索（@ 引用自动补全）──
+
+  defp dispatch_rpc("files.search", %{"q" => q}) do
+    q = String.trim(q || "")
+
+    if String.length(q) < 1 do
+      {:ok, %{files: []}}
+    else
+      # 用 fd 或 find 搜索项目文件
+      case System.cmd("find", [".", "-type", "f", "-name", "*#{q}*", "-not", "-path", "*/deps/*", "-not", "-path", "*/.git/*", "-not", "-path", "*/_build/*", "-not", "-path", "*/node_modules/*"], stderr_to_stdout: true) do
+        {out, 0} ->
+          files =
+            out
+            |> String.split("\n", trim: true)
+            |> Enum.map(&String.trim_leading(&1, "./"))
+            |> Enum.take(20)
+            |> Enum.map(fn path ->
+              ext = Path.extname(path) |> String.trim_leading(".")
+              %{path: path, ext: ext}
+            end)
+
+          {:ok, %{files: files}}
+
+        _ ->
+          {:ok, %{files: []}}
+      end
+    end
+  rescue
+    _ -> {:ok, %{files: []}}
+  end
+
   # ── 变更影响分析 ──
 
   defp dispatch_rpc("git.impact", _p) do
