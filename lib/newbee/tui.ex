@@ -303,11 +303,11 @@ defmodule Newbee.TUI do
         loop(state, reader)
 
       {:newbee_event, topic, payload} ->
-        # 已中断：丢弃滞后文本/推理，避免取消后仍吐字
+        # 单个事件的渲染异常不能杀掉主 TUI 进程；保留回合状态并显示诊断。
         if Newbee.LLM.Client.interrupted?() and topic in [:text, :reasoning, :tool_start] do
           loop(state, reader)
         else
-          state = state |> render_event(topic, payload) |> schedule_paint()
+          state = safe_render_event(state, topic, payload) |> schedule_paint()
           state = if topic == :turn_end, do: maybe_start_next(state), else: state
           loop(state, reader)
         end
@@ -1114,6 +1114,18 @@ defmodule Newbee.TUI do
 
   def render_event(%__MODULE__{} = state, _topic, _payload) do
     state
+  end
+
+  defp safe_render_event(state, topic, payload) do
+    render_event(state, topic, payload)
+  rescue
+    e ->
+      Newbee.DebugLog.log(:event, "tui render failed topic=#{topic} error=#{Exception.message(e)}")
+      push_line(state, "\e[31m事件渲染失败: #{topic}\e[0m")
+  catch
+    kind, reason ->
+      Newbee.DebugLog.log(:event, "tui render failed topic=#{topic} #{kind}=#{inspect(reason)}")
+      push_line(state, "\e[31m事件渲染失败: #{topic}\e[0m")
   end
 
   # ── 流式追加 ──
