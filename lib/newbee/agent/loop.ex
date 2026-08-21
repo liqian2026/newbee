@@ -905,14 +905,32 @@ defmodule Newbee.Agent.Loop do
   # ── 事件与持久化 ──
 
   defp emit(state, event) do
-    state.render.(event)
+    # TUI/Web/指标等观察者不属于回合核心；观察者异常只能丢事件，不能杀掉 Loop。
+    safe_render(state.render, event)
 
     if Process.whereis(Newbee.Bus) do
       # §4.6：durable topic（turn/*、tool/*、usage、progress、rule_hit …）经
       # Events.emit 先落 EventStore 再广播；text/reasoning delta 等 live 事件
       # 只发 Bus。standalone（无项目 store 注册）时 Events.emit 优雅降级只发 Bus。
-      Newbee.Events.emit(elem(event, 0), event)
+      safe_event_emit(elem(event, 0), event)
     end
+  end
+
+  defp safe_render(render, event) do
+    render.(event)
+  rescue
+    e -> Newbee.DebugLog.log(:event, "observer failed event=#{inspect(event, limit: 3)} error=#{Exception.message(e)}")
+  catch
+    kind, reason ->
+      Newbee.DebugLog.log(:event, "observer failed event=#{inspect(event, limit: 3)} #{kind}=#{inspect(reason)}")
+  end
+
+  defp safe_event_emit(topic, event) do
+    Newbee.Events.emit(topic, event)
+  rescue
+    e -> Newbee.DebugLog.log(:event, "bus emit failed topic=#{topic} error=#{Exception.message(e)}")
+  catch
+    kind, reason -> Newbee.DebugLog.log(:event, "bus emit failed topic=#{topic} #{kind}=#{inspect(reason)}")
   end
 
   # 同步屏障：对 Bus 发起一次同步调用，令其按 FIFO 处理完本进程先前投递的

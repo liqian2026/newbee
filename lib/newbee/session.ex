@@ -262,14 +262,17 @@ defmodule Newbee.Session do
         {:ok, body} ->
           case Jason.decode(body) do
             {:ok, entries} when is_list(entries) ->
-              entries |> Enum.sort_by(& &1["mtime"], :desc) |> Enum.take(n)
+              entries
+              |> Enum.filter(&File.regular?(Path.join(@root, "#{&1["id"]}.jsonl")))
+              |> Enum.sort_by(& &1["mtime"], :desc)
+              |> Enum.take(n)
 
             _ ->
-              build_index()
+              build_index() |> Enum.take(n)
           end
 
         _ ->
-          build_index()
+          build_index() |> Enum.take(n)
       end
 
     recent

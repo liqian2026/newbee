@@ -262,6 +262,24 @@ defmodule Newbee.Agent.LoopTest do
     refute Newbee.LLM.Client.interrupted?()
   end
 
+  test "观察者异常不杀死回合 Loop" do
+    {:ok, ev} = Evaluator.start(mode: :local)
+
+    script = [fn _messages, _on_text -> {:ok, %{"role" => "assistant", "content" => "ok", "tool_calls" => []}, %{}} end]
+
+    {:ok, kernel} =
+      Loop.start_link(
+        client: %{},
+        evaluator: ev,
+        session: false,
+        render: fn _event -> raise "render failed" end,
+        client_fun: scripted(script)
+      )
+
+    assert {:text, "ok"} = Loop.submit(kernel, "hi")
+    assert Process.alive?(kernel)
+  end
+
   test "中断标志在 execute_calls 阶段生效：不发起下一个工具调用" do
     {:ok, ev} = Evaluator.start(mode: :local)
 
