@@ -1,1 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="0.9em" font-size="90">🐝</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="nbBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5d8cff"/>
+      <stop offset="1" stop-color="#3b60e0"/>
+    </linearGradient>
+  </defs>
+  <!-- 六边形徽章 -->
+  <path d="M50 10 85.5 30 85.5 70 50 90 14.5 70 14.5 30Z" fill="url(#nbBg)"/>
+  <!-- 蜜蜂身体: 横向椭圆 -->
+  <ellipse cx="52" cy="56" rx="18" ry="15" fill="#ffc838" stroke="#1b2130" stroke-width="2.5"/>
+  <clipPath id="body"><ellipse cx="52" cy="56" rx="18" ry="15"/></clipPath>
+  <!-- 横向条纹两条 -->
+  <g clip-path="url(#body)">
+    <rect x="30" y="43" width="46" height="5" fill="#1b2130"/>
+    <rect x="30" y="64" width="46" height="5" fill="#1b2130"/>
+  </g>
+  <!-- 两只眼睛: 在身体左侧头部,上下排列 -->
+  <circle cx="63" cy="50" r="3.2" fill="#1b2130"/>
+  <circle cx="63" cy="62" r="3.2" fill="#1b2130"/>
+  <!-- 一片简洁翅膀: 身体右上方伸展 -->
+  <ellipse cx="66" cy="34" rx="9" ry="14" fill="#e8f0ff" opacity=".9" transform="rotate(-28 66 34)"/>
+</svg>
