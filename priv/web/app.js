@@ -396,7 +396,6 @@ case "goal_round": break;
   }
 
   function finishTurn() {
-    clearCurrentOp();
     state.busy = false;
     if (state.currentAssistant) {
       state.currentAssistant.innerHTML = renderMarkdown(streamAcc);
@@ -559,7 +558,6 @@ case "goal_round": break;
     // 工具开始时归档当前 reasoning 块（去 running，下次 reasoning 开新块）
     archiveReasoning();
     mcToolStart(p);
-    showCurrentOp(p.title || "run_elixir");
     const card = document.createElement("div");
     card.className = "msg msg-tool";
     const head = document.createElement("div");
@@ -1920,15 +1918,6 @@ case "goal_round": break;
   }
 
 
-  // 当前操作指示器
-  function showCurrentOp(title) {
-    const el = $("current-op");
-    if (el) { el.textContent = "⟳ " + title; el.classList.remove("hidden"); }
-  }
-  function clearCurrentOp() {
-    const el = $("current-op");
-    if (el) { el.textContent = ""; el.classList.add("hidden"); }
-  }
 
 
   // ── @ 文件引用自动补全 ──

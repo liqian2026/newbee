@@ -757,13 +757,6 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 15px; }
 }
 .file-ref:hover { background: var(--accent); color: #fff; border-radius: 3px; padding: 0 2px; }
 
-/* 当前操作指示器 */
-.current-op {
-  font-size: 11px; color: var(--accent); max-width: 300px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  animation: pulse 2s infinite;
-}
-.current-op.hidden { display: none; }
 
 
 /* @ 文件引用自动补全 */
