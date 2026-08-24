@@ -228,11 +228,18 @@ defmodule Newbee.Environment.Projection do
         do: "\n## 沉睡规则（#{rules_count} 条已挂载，平时零成本，触发才注入）\n",
         else: ""
 
+    # 缓存友好拼接（§4.6 前缀缓存最大化）：稳定成分在前（base/project_memory/
+    # repomap/tools），易变成分在后（memory/fragments/bindings/notices）。
+    # 小变化不再打碎其后的大块稳定前缀，跨 session 复用 provider 前缀缓存。
     view.base <>
       view.project_memory <>
+      view.repomap <>
+      view.tools <>
       view.memory <>
       view.fragments <>
-      view.repomap <> view.tools <> bindings <> notices <> rules_note
+      bindings <>
+      notices <>
+      rules_note
   end
 
   # 通知行：module_ready（版本/契约/usage/评测摘要）与 generation 迁移摘要两种形态
