@@ -956,6 +956,8 @@ case "goal_round": break;
     const curProvider = sessionState.provider || "";
     $("model-label").textContent = (curProvider && curModel) ? curProvider + "/" + curModel : (curModel || "(no model)");
     if (typeof window.__restoreEffort === "function") window.__restoreEffort(sessionState.effort);
+    // 同步会话忙碌状态：切到正在跑任务的会话时，UI 立即反映（中断/转向按钮、busy 圆点）
+    setBusy(sessionState.busy === true);
     connect();
     loadSessions();
     const firstUser = (hist.messages || []).find(m => m && m.role === "user");
