@@ -60,6 +60,14 @@ defmodule Newbee.DEE.EvalWorker do
     {:reply, state.binding, state}
   end
 
+  def handle_call({:set_cwd, cwd}, _from, state) when is_binary(cwd) do
+    reply = case File.cd(cwd) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+    {:reply, reply, state}
+  end
+  def handle_call({:set_cwd, nil}, _from, state), do: {:reply, :ok, state}
   def handle_call({:restore_bindings, binding}, _from, state) do
     {:reply, :ok, %{state | binding: binding}}
   end

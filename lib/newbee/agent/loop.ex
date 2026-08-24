@@ -72,7 +72,7 @@ defmodule Newbee.Agent.Loop do
     case Newbee.SessionEvaluators.lookup(kernel) do
       {:ok, {evaluator, scope}} ->
         if scope, do: :persistent_term.put({Newbee.LLM.Client, {:interrupt, scope}}, true)
-        if is_pid(evaluator), do: Newbee.DEE.Evaluator.interrupt(evaluator)
+        Newbee.DEE.Evaluator.interrupt(evaluator)
 
       {:ok, evaluator} when is_pid(evaluator) ->
         Newbee.DEE.Evaluator.interrupt(evaluator)
@@ -83,7 +83,7 @@ defmodule Newbee.Agent.Loop do
 
     # 兜底：查表失败（evaluator 非 pid / 未注册）时，从 kernel state 拿 client scope
     # 直接置 LLM flag。:sys.get_state 在 Loop 忙时会排队，用短超时保护不阻塞控制面。
-    if is_pid(kernel) and Process.alive?(kernel) do
+    if Process.alive?(kernel) do
       try do
         state = :sys.get_state(kernel, 200)
         scope = Map.get(state.client, :interrupt_scope)
@@ -94,7 +94,7 @@ defmodule Newbee.Agent.Loop do
     end
 
     # 双保险：同时给 kernel 发消息，Loop 处理 mailbox 时用自己的 client 自置 flag。
-    if is_pid(kernel) and Process.alive?(kernel), do: send(kernel, :interrupt_llm)
+    if Process.alive?(kernel), do: send(kernel, :interrupt_llm)
 
     :ok
   end
@@ -229,7 +229,7 @@ defmodule Newbee.Agent.Loop do
     end
   end
 
-  def handle_call({:submit_images, data_urls, _text}, _from, %{client: %{vision: false}} = state) do
+  def handle_call({:submit_images, _data_urls, _text}, _from, %{client: %{vision: false}} = state) do
     {:reply, {:error, {:image, :vision_not_supported}}, state}
   end
 
@@ -246,33 +246,11 @@ defmodule Newbee.Agent.Loop do
   def handle_call({:submit, text}, _from, state) do
     submit_message(state, %{"role" => "user", "content" => text})
   end
-
-  defp submit_message(state, message) do
-    # 注意：不能在回合开始清中断标志——execute_calls 阶段的中断检查依赖它。
-    # 热加载中的 Loop 可能已持有启动前写入的空 assistant；提交前清掉，避免再次触发上游 400。
-    t0 = :erlang.monotonic_time(:millisecond)
-    state = %{state | messages: drop_empty_assistant_messages(state.messages)}
-    state = push_msg(state, message)
-    # 回合开始清本会话中断标志（per-session scope，无跨会话竞态）。
-    # 标志语义 = "本回合内是否收到 Esc"；execute_calls 阶段的中断检查依赖它。
-    Newbee.LLM.Client.clear_interrupt(state.client)
-    {reply, state} = run_turn(state, 1)
-    {reply, state} = after_turn(reply, state)
-    persist_bindings(state)
-    ms = :erlang.monotonic_time(:millisecond) - t0
-    Newbee.DebugLog.log(:submit, "done in #{ms}ms reply=#{elem(reply, 0)}")
-    emit(state, {:turn_end, elem(reply, 0), ms})
-    flush_bus()
-    {:reply, reply, state}
-  end
-
   def handle_call(:usage, _from, state), do: {:reply, state.usage, state}
-
   def handle_call(:compact, _from, state) do
     {state, count} = compact_state(state, 8)
     {:reply, {:ok, count}, state}
   end
-
   def handle_call({:set_goal, text, opts}, _from, state) do
     text = String.trim(text)
     max_rounds = Keyword.get(opts, :max_rounds, 50)
@@ -310,9 +288,7 @@ defmodule Newbee.Agent.Loop do
     if state.goal, do: emit(state, {:goal_cancelled, :user})
     {:reply, :ok, %{state | goal: nil}}
   end
-
   def handle_call(:goal, _from, state), do: {:reply, state.goal, state}
-
   def handle_call({:switch_model, client}, _from, state) do
     # 不丢会话/绑定/消息/中断 scope，仅替换后续 turn 所用的 client 与 client_fun。
     # 求值器节点不动，当前 turn 仍用旧 client 完成，下次 submit 即生效。
@@ -327,6 +303,26 @@ defmodule Newbee.Agent.Loop do
     {:reply, :ok,
      %{state | client: client, client_fun: client_fun, context_window: Newbee.LLM.Client.context_window(client)}}
   end
+
+  defp submit_message(state, message) do
+    # 注意：不能在回合开始清中断标志——execute_calls 阶段的中断检查依赖它。
+    # 热加载中的 Loop 可能已持有启动前写入的空 assistant；提交前清掉，避免再次触发上游 400。
+    t0 = :erlang.monotonic_time(:millisecond)
+    state = %{state | messages: repair_history(drop_empty_assistant_messages(state.messages))}
+    state = push_msg(state, message)
+    # 回合开始清本会话中断标志（per-session scope，无跨会话竞态）。
+    # 标志语义 = "本回合内是否收到 Esc"；execute_calls 阶段的中断检查依赖它。
+    Newbee.LLM.Client.clear_interrupt(state.client)
+    {reply, state} = run_turn(state, 1)
+    {reply, state} = after_turn(reply, state)
+    persist_bindings(state)
+    ms = :erlang.monotonic_time(:millisecond) - t0
+    Newbee.DebugLog.log(:submit, "done in #{ms}ms reply=#{elem(reply, 0)}")
+    emit(state, {:turn_end, elem(reply, 0), ms})
+    flush_bus()
+    {:reply, reply, state}
+  end
+
 
   # 自主目标循环：异步驱动（每轮之间可处理 mailbox，/goal clear 可插入取消）。
   @impl true
@@ -471,6 +467,7 @@ defmodule Newbee.Agent.Loop do
     end
 
     state = maybe_auto_compact(state)
+    state = %{state | messages: repair_history(state.messages)}
     Newbee.DebugLog.log(:turn, "step #{step} messages=#{length(state.messages)}")
     on_text = fn delta -> emit(state, {:text, delta}) end
     on_reasoning = fn delta -> emit(state, {:reasoning, delta}) end
@@ -1182,6 +1179,8 @@ defmodule Newbee.Agent.Loop do
       summary_msg = %{"role" => "system", "content" => "（以下为较早对话的压缩摘要，细节已丢失）\n" <> summary}
       messages = [hd(state.messages), summary_msg | recent]
 
+      messages = repair_history(messages)
+
       messages =
         if state.session && Newbee.Tools.JSpace.exists?(state.session.id) do
           [hd(messages), %{"role" => "system", "content" => jspace_recovery_reminder()} | tl(messages)]
@@ -1467,7 +1466,7 @@ defmodule Newbee.Agent.Loop do
   # 唯一视图构建器是 Environment.Projection：system 基底 + 项目记忆 +
   # RepoMap + 工具价签 + 记忆 Guidance + 绑定摘要 + module_ready/迁移
   # 摘要通知 + 沉睡规则挂载表。Coordinator 未运行时通知/绑定自动跳过。
-  defp system_prompt(root \\ nil) do
+  defp system_prompt(root) do
     Newbee.Environment.Projection.build(%{root: root || File.cwd!()}).prompt
   end
 end

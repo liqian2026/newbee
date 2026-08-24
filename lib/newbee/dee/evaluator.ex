@@ -231,6 +231,16 @@ defmodule Newbee.DEE.Evaluator do
     end
   end
 
+  def handle_call({:set_cwd, cwd}, _from, state) when is_binary(cwd) do
+    targets = [primary_target(state), state.standby] |> Enum.reject(&is_nil/1)
+    results = Enum.map(targets, &remote_call(&1, {:set_cwd, cwd}))
+    if Enum.all?(results, &match?({:ok, :ok}, &1)) do
+      {:reply, :ok, %{state | cwd: cwd}}
+    else
+      {:reply, {:error, :node_down}, state}
+    end
+  end
+
   def handle_call({:restore_bindings, binding}, _from, state) do
     case remote_call(primary_target(state), {:restore_bindings, binding}) do
       {:ok, res} -> {:reply, res, state}
@@ -659,4 +669,5 @@ defmodule Newbee.DEE.Evaluator do
     end)
     |> Enum.each(&:os.unsetenv(String.to_charlist(&1)))
   end
+  def set_cwd(server \\ __MODULE__, cwd), do: GenServer.call(server, {:set_cwd, cwd}, @rpc_boot_timeout)
 end

@@ -27,10 +27,22 @@ defmodule Newbee.History do
     ["\e[32m›\e[0m " <> text <> " \e[2m[图片]\e[0m"]
   end
 
+  # 超大工具输出（大源码读取等）整块折叠为一行，避免回放刷屏错乱。
+  defp msg_lines(%{"role" => "tool", "content" => c}) when is_binary(c) and byte_size(c) > 2000 do
+    first = c |> String.split("\n") |> List.first() |> Kernel.||("") |> String.slice(0, 60)
+    lines = c |> String.split("\n") |> length()
+    ["\e[36m  ⎿\e[0m \e[2m… (#{lines} 行, #{byte_size(c)} 字节) #{first}\e[0m"]
+  end
+
   defp msg_lines(%{"role" => "user", "content" => c}) when is_binary(c) do
-    case String.split(c, "\n") do
+
+    all = String.split(c, "\n")
+    lines = Enum.take(all, 20)
+    more = if length(all) > 20, do: ["  \e[2m… (#{length(all) - 20} 行更多)\e[0m"], else: []
+
+    case lines do
       [one] -> ["\e[32m›\e[0m " <> one]
-      [first | rest] -> ["\e[32m›\e[0m " <> first | Enum.map(rest, fn l -> "  " <> l end)]
+      [first | rest] -> ["\e[32m›\e[0m " <> first | Enum.map(rest, fn l -> "  " <> l end)] ++ more
     end
   end
 
@@ -68,8 +80,8 @@ defmodule Newbee.History do
     Enum.flat_map(calls, fn
       %{"function" => %{"name" => name, "arguments" => args}} ->
         {title, code} = decode_args(args)
-        preview = code |> String.split("\n") |> Enum.take(3) |> Enum.join("\n")
-        ellipsis = if String.contains?(code, "\n"), do: " …", else: ""
+        preview = code |> String.split("\n") |> Enum.take(3) |> Enum.map(&String.slice(&1, 0, 120)) |> Enum.join("\n")
+        ellipsis = if String.contains?(code, "\n") or String.length(code) > 360, do: " …", else: ""
         ["\e[36m⏺\e[0m \e[1m" <> name <> "\e[0m \e[2m" <> title <> "\e[0m", preview <> ellipsis]
 
       _ ->

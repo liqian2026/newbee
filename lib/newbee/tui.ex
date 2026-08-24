@@ -816,24 +816,15 @@ defmodule Newbee.TUI do
     {:ok, kernel}
   end
 
+  # 历史回放统一走 Newbee.History（与 CLI /resume 同一渲染，对齐实时输出样式）。
   defp load_session_lines(id) do
-    session = Newbee.Session.open(id)
-    session |> Newbee.Session.messages() |> Enum.flat_map(&message_to_lines/1) |> Enum.take(-@scrollback)
+    Newbee.Session.open(id)
+    |> Newbee.Session.messages()
+    |> Newbee.History.render_lines()
+    |> Enum.take(-@scrollback)
   rescue
     _ -> []
   end
-
-  defp message_to_lines(%{"role" => "user", "content" => c}), do: ["\e[32m›\e[0m " <> String.slice(c, 0, 2000)]
-
-  defp message_to_lines(%{"role" => "assistant", "content" => c}) when is_binary(c) and c != "",
-    do: String.split(c, "\n") |> Enum.map(&Newbee.Markdown.render/1)
-
-  defp message_to_lines(%{"role" => "assistant", "tool_calls" => calls}) when is_list(calls),
-    do: Enum.map(calls, &"\e[36m⏺ #{&1["function"]["name"]}\e[0m")
-
-  defp message_to_lines(%{"role" => "tool", "content" => c}), do: ["\e[2m⎿ #{String.slice(c, 0, 400)}\e[0m"]
-  defp message_to_lines(%{"role" => "system", "content" => c}), do: ["\e[2m#{String.slice(c, 0, 300)}\e[0m"]
-  defp message_to_lines(_), do: []
 
   @doc "追加一行到 transcript；重置 streaming 状态。"
   def push_line(%__MODULE__{} = state, line) do

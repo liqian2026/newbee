@@ -54,9 +54,18 @@ defmodule Newbee.CommandsMoreTest do
     assert Enum.any?(msgs, &(&1 =~ "用法" or &1 =~ "model" or String.contains?(&1, "autonomy")))
   end
 
-  test "/model 非法 id 不写配置" do
+  test "/model 非法 id 不写配置（未知 provider 前缀被拒）" do
+    tmp = Path.join(System.tmp_dir!(), "newbee-cmdtest-#{System.unique_integer([:positive])}.json")
+    File.write!(tmp, Jason.encode!(%{"providers" => %{}, "roles" => %{"default" => %{"provider" => "opencode", "model" => "ox-alpha-free"}}}))
+    System.put_env("NEWBEE_MODEL_JSON", tmp)
+
+    on_exit(fn ->
+      System.delete_env("NEWBEE_MODEL_JSON")
+      File.rm(tmp)
+    end)
+
     {say, _parent} = say_collector()
-    assert :handled = Commands.handle("/model not-a-model-id", %{say: say})
+    assert :handled = Commands.handle("/model nosuchprovider/m1", %{say: say})
     assert_received {:said, msg}
     assert msg =~ "切换失败"
   end

@@ -49,4 +49,70 @@ defmodule Newbee.LLM.ConfigTest do
     c2 = Newbee.LLM.Config.client_for("default")
     assert c1.model == c2.model
   end
+
+  describe "set_default_model" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "newbee-configtest-#{System.unique_integer([:positive])}/model.json")
+      File.mkdir_p!(Path.dirname(tmp))
+      File.write!(
+        tmp,
+        Jason.encode!(%{
+          "providers" => %{
+             "opencode" => %{"baseUrl" => "https://opencode.ai/zen/go/v1", "apiKey" => "k", "models" => ["ox-alpha-free"]},
+             "openrouter" => %{"baseUrl" => "https://openrouter.ai/api/v1", "apiKey" => "k", "models" => []}
+           },
+          "roles" => %{"default" => %{"provider" => "openrouter", "model" => "deepseek/deepseek-v4-flash-0731"}}
+        })
+      )
+
+      System.put_env("NEWBEE_MODEL_JSON", tmp)
+
+      on_exit(fn ->
+        System.delete_env("NEWBEE_MODEL_JSON")
+        File.rm_rf!(Path.dirname(tmp))
+      end)
+
+      :ok
+    end
+
+    test "provider 前缀被解析为 provider 名 + 裸模型 id" do
+      assert :ok = Newbee.LLM.Config.set_default_model("opencode/ox-alpha-free")
+      cfg = Newbee.LLM.Config.load()
+
+      assert cfg["roles"]["default"] == %{
+               "provider" => "opencode",
+               "model" => "ox-alpha-free"
+             }
+
+      client = Newbee.LLM.Config.client_for("default")
+      assert client.model == "ox-alpha-free"
+      assert client.base_url == "https://opencode.ai/zen/go/v1"
+    end
+
+    test "多段 id：首段是 provider，其余整体保留为模型 id" do
+      assert :ok = Newbee.LLM.Config.set_default_model("openrouter/deepseek/deepseek-v4-flash-0731")
+      cfg = Newbee.LLM.Config.load()
+      assert cfg["roles"]["default"]["provider"] == "openrouter"
+      assert cfg["roles"]["default"]["model"] == "deepseek/deepseek-v4-flash-0731"
+    end
+
+    test "无斜杠：只改模型 id，provider 保持不变" do
+      assert :ok = Newbee.LLM.Config.set_default_model("ox-alpha-free")
+      cfg = Newbee.LLM.Config.load()
+      assert cfg["roles"]["default"]["provider"] == "openrouter"
+      assert cfg["roles"]["default"]["model"] == "ox-alpha-free"
+    end
+
+    test "未知 provider 前缀被拒绝且不落盘" do
+      before = File.read!(System.get_env("NEWBEE_MODEL_JSON"))
+      assert {:error, {:unknown_provider, "nosuch"}} = Newbee.LLM.Config.set_default_model("nosuch/m1")
+      assert File.read!(System.get_env("NEWBEE_MODEL_JSON")) == before
+    end
+
+    test "空串与非字符串拒绝" do
+      assert {:error, :bad_model_id} = Newbee.LLM.Config.set_default_model("")
+      assert {:error, :bad_model_id} = Newbee.LLM.Config.set_default_model(nil)
+      assert {:error, :bad_model_id} = Newbee.LLM.Config.set_default_model("   ")
+    end
+  end
 end

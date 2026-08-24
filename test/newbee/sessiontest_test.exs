@@ -25,6 +25,16 @@ defmodule Newbee.SessionTest do
     end
   end
 
+  test "mark_created 让空会话立即出现在列表" do
+    id = "test_#{:erlang.unique_integer([:positive])}"
+    assert :ok = Session.mark_created(id)
+
+    meta = Enum.find(Session.list_with_meta(10), &(&1.id == id))
+    assert meta
+    assert meta.messages == 0
+    assert meta.title == ""
+  end
+
   test "transcript 追加与读取" do
     s = Session.open("test_#{:erlang.unique_integer([:positive])}")
     Session.append(s, %{"role" => "user", "content" => "hi"})

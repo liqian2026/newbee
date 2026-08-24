@@ -27,6 +27,19 @@ defmodule Newbee.Session do
     |> tap(fn _ -> File.mkdir_p!(@root) end)
   end
 
+  @doc "让新会话立即出现在列表：创建空 transcript 并更新索引（幂等）。"
+  def mark_created(id) when is_binary(id) do
+    s = open(id)
+
+    if File.regular?(s.transcript) do
+      :ok
+    else
+      File.write!(s.transcript, "")
+      touch_index(id)
+      :ok
+    end
+  end
+
   @doc "追加一条消息到 transcript。"
   def append(%__MODULE__{transcript: t, id: id}, %{"role" => _} = msg) do
     File.write!(t, [Jason.encode_to_iodata!(msg), "\n"], [:append])
@@ -308,6 +321,7 @@ defmodule Newbee.Session do
       _ -> nil
     end
   end
+
   @doc "保存该会话选用的厂家（provider）；不会修改全局模型配置。"
   def set_provider(id, provider) when is_binary(id) and is_binary(provider) do
     update_metadata(id, &Map.put(&1, "provider", provider))
@@ -320,7 +334,6 @@ defmodule Newbee.Session do
       _ -> nil
     end
   end
-
 
   @doc "读取该会话绑定的项目工作目录（工作区）；未绑定时返回 nil（沿用全局默认）。"
   def cwd(id) when is_binary(id) do

@@ -12,7 +12,7 @@ defmodule Newbee.HotReloader do
 
   @default_interval 1_000
 
-  defstruct dirs: [], fingerprints: %{}, interval: @default_interval, timer: nil
+  defstruct dirs: [], fingerprints: %{}, deferred: %{}, interval: @default_interval, timer: nil
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -67,23 +67,32 @@ defmodule Newbee.HotReloader do
       |> Enum.filter(fn {path, fingerprint} -> state.fingerprints[path] != fingerprint end)
       |> Enum.sort_by(&elem(&1, 0))
 
-    {fingerprints, results} =
-      Enum.reduce(changed, {state.fingerprints, []}, fn {path, fingerprint}, {known, results} ->
+    {fingerprints, deferred, results} =
+      Enum.reduce(changed, {state.fingerprints, state.deferred, []}, fn {path, fingerprint},
+                                                                        {known, deferred, results} ->
         case reload_file(path) do
           {:ok, module} = result ->
             Logger.info("hot reloaded #{inspect(module)} from #{path}")
             Newbee.Events.emit(:hot_reload, {:hot_reload, module, path})
-            {Map.put(known, path, fingerprint), [result | results]}
+            {Map.put(known, path, fingerprint), Map.delete(deferred, path), [result | results]}
+
+          {:error, :old_code_in_use} = result ->
+            if Map.get(deferred, path) != fingerprint do
+              Logger.warning("hot reload deferred #{path}: :old_code_in_use")
+            end
+
+            {known, Map.put(deferred, path, fingerprint), [result | results]}
 
           {:error, reason} = result ->
             Logger.warning("hot reload deferred #{path}: #{inspect(reason)}")
-            {known, [result | results]}
+            {known, Map.delete(deferred, path), [result | results]}
         end
       end)
 
     # 删除的 BEAM 不主动 purge：运行中的模块可能仍被会话使用。
     fingerprints = Map.take(fingerprints, Map.keys(current))
-    {%{state | fingerprints: fingerprints}, Enum.reverse(results)}
+    deferred = Map.take(deferred, Map.keys(current))
+    {%{state | fingerprints: fingerprints, deferred: deferred}, Enum.reverse(results)}
   end
 
   defp fingerprints(dirs) do

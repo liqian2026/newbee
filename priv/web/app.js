@@ -112,6 +112,69 @@
     return t;
   }
 
+  const elixirKeywords = new Set([
+    "after", "and", "case", "catch", "cond", "def", "defdelegate", "defexception",
+    "defguard", "defguardp", "defimpl", "defmacro", "defmacrop", "defmodule", "defp",
+    "defprotocol", "defstruct", "do", "else", "end", "fn", "for", "if", "import",
+    "in", "not", "or", "quote", "raise", "receive", "require", "rescue", "super",
+    "throw", "try", "unless", "unquote", "use", "when", "with"
+  ]);
+  const elixirLiterals = new Set(["false", "nil", "true"]);
+  const elixirDefinitionKeywords = new Set([
+    "def", "defdelegate", "defguard", "defguardp", "defmacro", "defmacrop", "defmodule",
+    "defp", "defprotocol"
+  ]);
+
+  // 小型 Elixir 词法高亮器。逐 token 转义，避免工具代码被当作 HTML 执行。
+  function highlightElixir(code) {
+    let rest = String(code || "");
+    let html = "";
+    let previousWord = "";
+    const token = (cls, value) => {
+      html += cls ? `<span class="ex-${cls}">${escapeHtml(value)}</span>` : escapeHtml(value);
+      rest = rest.slice(value.length);
+    };
+
+    while (rest) {
+      let match;
+      if ((match = rest.match(/^\s+/))) { token("", match[0]); continue; }
+      if ((match = rest.match(/^#[^\n]*/))) { token("comment", match[0]); previousWord = ""; continue; }
+      if ((match = rest.match(/^(?:"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$))/))) {
+        token("string", match[0]); previousWord = ""; continue;
+      }
+      if ((match = rest.match(/^~[A-Za-z](?:\/(?:\\.|[^\/\\])*\/|\|(?:\\.|[^|\\])*\||"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[A-Za-z]*/))) {
+        token("sigil", match[0]); previousWord = ""; continue;
+      }
+      if ((match = rest.match(/^(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')/))) {
+        token("string", match[0]); previousWord = ""; continue;
+      }
+      if ((match = rest.match(/^:(?:"(?:\\.|[^"\\])*"|[A-Za-z_][\w@!?]*)/))) {
+        token("atom", match[0]); previousWord = ""; continue;
+      }
+      if ((match = rest.match(/^@[A-Za-z_][\w!?]*/))) { token("attribute", match[0]); previousWord = ""; continue; }
+      if ((match = rest.match(/^(?:0[xob][0-9A-Fa-f_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:e[+-]?\d+)?)/i))) {
+        token("number", match[0]); previousWord = ""; continue;
+      }
+      if ((match = rest.match(/^[A-Za-z_][\w!?]*(?:\.[A-Za-z_][\w!?]*)*/))) {
+        const word = match[0];
+        let cls = "";
+        if (elixirKeywords.has(word)) cls = "keyword";
+        else if (elixirLiterals.has(word)) cls = "literal";
+        else if (/^[A-Z]/.test(word) || word.includes(".")) cls = "module";
+        else if (elixirDefinitionKeywords.has(previousWord) || /^\s*\(/.test(rest.slice(word.length))) cls = "function";
+        token(cls, word);
+        previousWord = word;
+        continue;
+      }
+      if ((match = rest.match(/^(?:===|!==|==|!=|<=|>=|->|<-|=>|\|>|<>|\+\+|--|&&|\|\||\\\\|[+\-*\/=<>|&!^~:.%])/))) {
+        token("operator", match[0]); previousWord = ""; continue;
+      }
+      token("", rest[0]);
+      previousWord = "";
+    }
+    return html;
+  }
+
   const $ = (id) => document.getElementById(id);
 const transcript = $("transcript");
 const flow = $("flow");
@@ -133,6 +196,9 @@ const flow = $("flow");
     sid: localStorage.getItem("newbee.sid") || null,
     ws: null,
     busy: false,
+    creatingSession: false,  // 新建会话防重入：点击后立即切换 UI，后台完成 RPC
+    hasPrompted: false,      // 当前会话是否已有用户消息（用于首条消息自动标题）
+    titleDirty: false,       // 本轮结束后刷新侧栏标题（首条消息自动命名）
     currentAssistant: null,   // 流式 assistant 行
     currentReasoning: null,   // 流式 reasoning disclosure 元素
     currentTool: null,        // 进行中的 tool 卡片
@@ -172,10 +238,25 @@ const flow = $("flow");
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ rpcId, method, payload }),
     });
-    const body = await res.json();
+    const text = await res.text();
+    if (!text) throw new Error(`服务返回空响应 (HTTP ${res.status})`);
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`服务返回非 JSON (HTTP ${res.status}): ${text.slice(0, 120)}`);
+    }
     if (body.result && "ok" in body.result) return body.result.ok;
     const err = body.result && body.result.error;
-    throw new Error(err ? err.message : `rpc ${method} failed`);
+    throw new Error(err ? err.message : `rpc ${method} failed (HTTP ${res.status})`);
+  }
+
+  function genSessionId() {
+    const d = new Date();
+    const p2 = (n) => String(n).padStart(2, "0");
+    const ts = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+    const rand = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
+    return `${ts}-${rand}`;
   }
 
   // ── WebSocket ──
@@ -327,6 +408,11 @@ case "goal_round": break;
     hidePermission();
     clearTurnStatus();
     streamAcc = "";
+    if (state.titleDirty) {
+      state.titleDirty = false;
+      // 首条用户消息后同步侧栏标题（服务端 list 用首条 user 消息自动取题）
+      loadSessions().catch(() => {});
+    }
   }
 
   function el(cls, text, md) {
@@ -416,9 +502,12 @@ case "goal_round": break;
     const text = el.dataset.thinkText || "";
     const open = el.dataset.open === "1";
     const running = el.classList.contains("running");
+    const previousBody = el.querySelector(".think-body");
+    const previousScrollTop = previousBody ? previousBody.scrollTop : 0;
     el.innerHTML = "";
     const head = document.createElement("div");
     head.className = "think-head";
+    head.title = open ? "收起 Think" : "展开 Think";
     const trimmed = text.replace(/\s+$/, "");
     const summary = trimmed === "" ? "…" : (running ? latestLine(trimmed) : firstLine(trimmed));
     head.innerHTML = `<span class="think-chev">${open ? "▾" : "▸"}</span><span class="think-title">Think</span><span class="think-sep"></span><span class="think-summary">${escapeHtml(summary)}</span>`;
@@ -430,11 +519,11 @@ case "goal_round": break;
     el.appendChild(head);
     if (open && trimmed !== "") {
       const body = document.createElement("div");
-      const prev = el.querySelector(".think-body");
-      if (prev && prev.scrollTop > 0) { body.scrollTop = prev.scrollTop; }
       body.className = "think-body";
-      body.textContent = text;
+      body.innerHTML = renderMarkdown(text);
       el.appendChild(body);
+      bindCopyButtons(body);
+      if (previousScrollTop > 0) body.scrollTop = previousScrollTop;
     }
   }
   let reasoningRaf = 0;
@@ -475,9 +564,16 @@ case "goal_round": break;
     const head = document.createElement("div");
     head.className = "tool-head";
     head.innerHTML = `<b>${escapeHtml(p.name || "tool")}</b> <span class="diffstat">${escapeHtml(p.title || "")}</span><span class="tool-dur"></span>`;
-    const code = document.createElement("div");
-    code.className = "tool-code hidden";
-    code.textContent = (p.code || "").split("\n").slice(0, 12).join("\n");
+    const code = document.createElement("pre");
+    const source = (p.code || "").split("\n").slice(0, 12).join("\n");
+    const isElixir = p.name === "run_elixir";
+    code.className = `tool-code${isElixir ? " tool-code-elixir" : ""} hidden`;
+    if (isElixir) {
+      code.dataset.language = "elixir";
+      code.innerHTML = highlightElixir(source);
+    } else {
+      code.textContent = source;
+    }
     const result = document.createElement("div");
     result.className = "tool-result hidden";
     card.append(head, code, result);
@@ -633,13 +729,15 @@ case "goal_round": break;
     items.forEach((s) => {
       const item = document.createElement("div");
       item.className = "session-item" + (s.id === state.sid ? " active" : "");
-      const title = String(s.title || s.id).replace(/\s+/g, " ").trim().slice(0, 40) || "(未命名)";
+      const fallback = (s.messages || 0) === 0 ? "新会话" : s.id;
+      const title = String(s.title || fallback).replace(/\s+/g, " ").trim().slice(0, 40) || "(未命名)";
       const stCls = s.busy ? "busy" : (s.running ? "online" : "offline");
       const cwdShort = s.cwd ? (() => { const p = String(s.cwd).replace(/\\$/, ""); return p.split("/").filter(Boolean).pop() || p; })() : null;
       item.innerHTML = `<span class="t"><span class="sess-dot ${stCls}"></span>${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条${cwdShort ? " · 📂" + escapeHtml(cwdShort) : ""}</span>`;
       item.dataset.sid = s.id;
       item.onclick = (e) => {
         if (e.target.classList.contains("menu-btn")) return; // 点 ⋯ 不切换会话
+        if (state.creatingSession) return; // 新会话创建中，避免并发切换覆盖
         resume(s.id);
       };
       // ⋯ 菜单钮
@@ -781,7 +879,7 @@ case "goal_round": break;
   attachTitleRename($("session-title"));
   // ── 项目工作目录选择（学习 dsh harness 左侧栏 workspace 语义）──
   // 打开目录浏览器（Miller 式一层目录 + 面包屑 + 路径编辑 + 新建子目录 + 隐藏开关），
-  // 确认后以该目录新建会话：session.create 传 cwd，服务端绑定并让求值器 cd 过去。
+  // 确认后修改当前会话的工作目录：保留该会话的历史、绑定和统计。
   const DIR_ICO = {
     dir: "<svg class=\"ico\" viewBox=\"0 0 24 24\" width=\"15\" height=\"15\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z\"/></svg>",
     file: "<svg class=\"ico\" viewBox=\"0 0 24 24\" width=\"13\" height=\"13\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z\"/><polyline points=\"3.27 6.96 12 12.01 20.73 6.96\"/><line x1=\"12\" y1=\"22.08\" x2=\"12\" y2=\"12\"/></svg>"
@@ -896,11 +994,13 @@ case "goal_round": break;
     if (!picked) return;
     closeDirPicker();
     try {
-      const created = await rpc("session.create", { cwd: picked });
-      updateCwdLabel(created.cwd || picked);
-      await resume(created.sessionId);
+      const updated = await rpc("session.cwd", { sessionId: state.sid, cwd: picked });
+      state.cwd = updated.cwd || picked;
+      updateCwdLabel(state.cwd);
+      await loadSessions();
+      line("notice", "当前会话工作目录已切换为 " + state.cwd);
     } catch (err) {
-      line("error", "创建工作目录会话失败: " + err.message);
+      line("error", "切换工作目录失败: " + err.message);
     }
   });
   $("dir-hidden-toggle").addEventListener("change", () => dirGo(dirState.cur));
@@ -971,6 +1071,10 @@ case "goal_round": break;
       rpc("session.state", { sessionId: sid }),
     ]);
     renderHistory(hist.messages || []);
+    const hasUserMessage = (hist.messages || []).some(m => m && m.role === "user");
+    state.hasPrompted = hasUserMessage;
+    state.titleDirty = false;
+    if (!hasUserMessage && flow.children.length === 0) renderWelcome();
     const curModel = sessionState.model || "";
     const curProvider = sessionState.provider || "";
     $("model-label").textContent = (curProvider && curModel) ? curProvider + "/" + curModel : (curModel || "(no model)");
@@ -983,8 +1087,8 @@ case "goal_round": break;
     connect();
     loadSessions();
     const firstUser = (hist.messages || []).find(m => m && m.role === "user");
-    const title = firstUser ? String(firstUser.content || "").replace(/\s+/g, " ").trim().slice(0, 48) : sid;
-    $("session-title").textContent = title || sid;
+    const title = firstUser ? String(firstUser.content || "").replace(/\s+/g, " ").trim().slice(0, 48) : "";
+    $("session-title").textContent = title || (hasUserMessage ? sid : "新会话");
   }
 
   function renderWelcome() {
@@ -1006,11 +1110,87 @@ case "goal_round": break;
     flowEl.appendChild(card);
   }
 
-  async function newSession() {
-    // 清空对话后显示欢迎卡片
-    setTimeout(() => { if ($("flow").children.length === 0) renderWelcome(); }, 500);
-    const created = await rpc("session.create", {});
-    await resume(created.sessionId);
+  // 点击“新会话”先把 UI 切到空白会话（断掉旧 ws、清屏、显示欢迎卡），
+  // RPC/求值器 boot 在后台完成；不再让用户点完干等 1-3s。
+  function prepareNewSessionUI(cwd, sid) {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = 0; }
+    if (state.ws) {
+      state.ws.onclose = null;
+      try { state.ws.close(); } catch (e) {}
+      state.ws = null;
+    }
+    state.sid = sid;
+    localStorage.setItem("newbee.sid", sid);
+    state.busy = false;
+    state.hasPrompted = false;
+    state.titleDirty = false;
+    state.currentAssistant = null;
+    state.currentReasoning = null;
+    state.currentTool = null;
+    flow.innerHTML = "";
+    renderWelcome();
+    $("session-title").textContent = "新会话";
+    // 侧栏也立即出现新会话条目（服务端 init 已写空 transcript + index，随后 loadSessions 会校正）。
+    if (sid && !(state.allSessions || []).some(x => x.id === sid)) {
+      state.allSessions = [{ id: sid, title: "", messages: 0, when_str: "刚刚", running: true, busy: false, cwd: cwd || null }].concat(state.allSessions || []);
+      renderSessionList();
+    }
+    hidePermission();
+    clearAttachments();
+    updateCwdLabel(cwd || null);
+    setBusy(false);
+    input.focus();
+  }
+
+  async function newSession(cwd) {
+    if (state.creatingSession) return;
+    const btn = $("new-session");
+    const prevSid = state.sid;
+    state.creatingSession = true;
+    btn.disabled = true;
+    btn.textContent = "⏳ 创建中…";
+
+    // 前端先生成 sessionId 并立即落本地 + 连 ws（socket init 会在后端幂等 ensure）。
+    // 即使 HTTP 应答被热加载/网络打断，重试同一个 id 也不会造出重复会话。
+    const sid = genSessionId();
+    prepareNewSessionUI(cwd || null, sid);
+    // 指定 cwd 时让带 cwd 的 session.create 先行，避免 ws ensure 抢先建出无 cwd 会话。
+    if (!cwd) connect();
+
+    const payload = cwd ? { sessionId: sid, cwd } : { sessionId: sid };
+    try {
+      let created;
+      try {
+        created = await rpc("session.create", payload);
+      } catch (firstErr) {
+        await new Promise((r) => setTimeout(r, 250));
+        created = await rpc("session.create", payload);
+      }
+      state.cwd = created.cwd || cwd || null;
+      updateCwdLabel(state.cwd);
+      try {
+        await resume(created.sessionId || sid);
+      } catch (firstResumeErr) {
+        await new Promise((r) => setTimeout(r, 250));
+        await resume(created.sessionId || sid);
+      }
+    } catch (err) {
+      if (prevSid) {
+        try {
+          await resume(prevSid);
+          line("error", "新建会话失败: " + err.message);
+        } catch (restoreErr) {
+          line("error", "新建会话失败: " + err.message);
+          line("error", "恢复原会话失败: " + restoreErr.message);
+        }
+      } else {
+        line("error", "新建会话失败: " + err.message);
+      }
+    } finally {
+      state.creatingSession = false;
+      btn.disabled = false;
+      btn.textContent = "+ 新会话";
+    }
   }
 
   // 分页加载常量
@@ -1174,6 +1354,22 @@ case "goal_round": break;
   }
 
 
+  // 首条提示词即时顶栏取题；服务端 session.list 也会用首条 user 消息自动取题。
+  function applyPromptTitle(text, images) {
+    const raw = String(text || "") || (images && images.length ? "[图片]" : "");
+    const title = raw.replace(/\s+/g, " ").trim().slice(0, 48);
+    const el = $("session-title");
+    if (!title || !state.sid) return;
+    if (el.textContent === "新会话" || el.textContent === state.sid) el.textContent = title;
+
+    // 侧栏若已加载该会话，也立即换成首条提示词标题；否则等 turn 结束 loadSessions 兜底
+    const sess = (state.allSessions || []).find(x => x.id === state.sid);
+    if (sess && (!sess.title || sess.title === sess.id || sess.title === "新会话")) {
+      sess.title = title;
+      renderSessionList();
+    }
+  }
+
   // ── 发送 ──
   async function send() {
     const text = input.value.trim();
@@ -1191,6 +1387,11 @@ case "goal_round": break;
     // 回显：文本 + 图片
     scrollBottom(true);
     renderUserLine(text, images);
+    if (!state.hasPrompted) {
+      state.hasPrompted = true;
+      state.titleDirty = true;
+      applyPromptTitle(text, images);
+    }
     state.busy = true; setBusy(true);
     clearAttachments();
     try {
@@ -1492,7 +1693,11 @@ case "goal_round": break;
     // 缓存命中率：累计 cache_read ÷ 累计 prompt_tokens（与 TUI 口径一致；服务端 usage 按 key 累加，prompt 含 cached）
     const promptTok = u.prompt_tokens || 0;
     const cacheHit = promptTok > 0 ? Math.min(100, cacheRead * 100 / promptTok) : null;
-    const cwd0 = (state.cwd || st.cwd || "");
+    if (st && st.cwd !== undefined) {
+      state.cwd = st.cwd || null;
+      updateCwdLabel(state.cwd);
+    }
+    const cwd0 = state.cwd || "";
     const left = [cwd0 ? ("📂 " + cwd0) : "newbee"];
     const turns = st.turns || 0, steps = st.steps || 0;
     if (turns > 0 || steps > 0) left.push(`${turns} 轮 · ${steps} 步`);

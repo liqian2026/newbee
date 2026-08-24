@@ -272,6 +272,14 @@ defmodule Newbee.CLI do
 
     meta = Newbee.Session.meta(id)
     IO.puts("\e[2m已恢复会话 #{id} · #{meta.messages} 条消息 · #{meta.title}\e[0m")
+    IO.puts("\e[2m──── 历史回放 ────\e[0m")
+
+    Newbee.Session.open(id)
+    |> Newbee.Session.messages()
+    |> Newbee.History.render_lines()
+    |> Enum.each(&IO.puts/1)
+
+    IO.puts("\e[2m──── 继续对话 ────\e[0m")
     {:ok, kernel}
   end
 

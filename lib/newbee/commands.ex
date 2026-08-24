@@ -180,7 +180,10 @@ defmodule Newbee.Commands do
         end
 
       {:error, reason} ->
-        ctx.say.("切换失败: #{inspect(reason)}（格式应为 provider/model-id，如 openrouter/deepseek/deepseek-chat）")
+        ctx.say.(
+          "切换失败: #{inspect(reason)}（格式：/model <provider>/<model-id> 或 /model <model-id> 保留当前 provider）"
+        )
+
         :handled
     end
   end

@@ -70,32 +70,56 @@ defmodule Newbee.LLM.Config do
 
 
   @doc """
-  切换默认模型（/model <id>）：改写 roles.default.model，落盘到
-  当前生效的配置文件（找不到配置文件则创建 ~/.newbee/model.json）。
+  切换默认模型（/model <id>）：
+    * "provider/model-id" —— 首段须是已配置 provider 名，其余整体为模型 id
+      （如 openrouter/deepseek/deepseek-v4-flash-0731 → provider=openrouter，
+      model=deepseek/deepseek-v4-flash-0731）
+    * "model-id"（不含斜杠）—— 保留当前 provider，只改型号
+  首段不是已知 provider 时报错拒绝，绝不把带前缀的 id 写进 roles.default.model。
+  落盘到当前生效的配置文件（找不到则创建 ~/.newbee/model.json）。
   """
   def set_default_model(model_id) do
-    if is_binary(model_id) and String.trim(model_id) != "" and String.contains?(model_id, "/") do
-      cfg = load()
-      default = get_in(cfg, ["roles", "default"]) || %{"provider" => "openrouter"}
-      default = Map.put(default, "model", String.trim(model_id))
-      cfg = put_in(cfg, ["roles", "default"], default)
+    id = if is_binary(model_id), do: String.trim(model_id), else: ""
+    cfg = load()
 
-      target =
-        Enum.find(
-          [
-            System.get_env("NEWBEE_MODEL_JSON"),
-            "model.json",
-            "model.local.json",
-            Path.join([System.user_home!(), ".newbee", "model.json"])
-          ],
-          &(&1 && File.exists?(&1))
-        ) || Path.join(System.user_home!(), ".newbee/model.json")
+    case split_model_id(id, cfg) do
+      {:error, _reason} = err ->
+        err
 
-      File.mkdir_p!(Path.dirname(target))
-      File.write!(target, Jason.encode_to_iodata!(cfg, pretty: true))
-      :ok
-    else
-      {:error, :bad_model_id}
+      {provider_name, model} ->
+        default = get_in(cfg, ["roles", "default"]) || %{"provider" => provider_name}
+        default = default |> Map.put("provider", provider_name) |> Map.put("model", model)
+        cfg = put_in(cfg, ["roles", "default"], default)
+
+        target =
+          Enum.find(
+            [
+              System.get_env("NEWBEE_MODEL_JSON"),
+              "model.json",
+              "model.local.json",
+              Path.join([System.user_home!(), ".newbee", "model.json"])
+            ],
+            &(&1 && File.exists?(&1))
+          ) || Path.join(System.user_home!(), ".newbee/model.json")
+
+        File.mkdir_p!(Path.dirname(target))
+        File.write!(target, Jason.encode_to_iodata!(cfg, pretty: true))
+        :ok
+    end
+  end
+
+  # "a/b/c" → {"a", "b/c"}（a 是已知 provider）；"c" → {当前 provider, "c"}
+  defp split_model_id("", _cfg), do: {:error, :bad_model_id}
+
+  defp split_model_id(id, cfg) do
+    case String.split(id, "/", parts: 2) do
+      [model] ->
+        {get_in(cfg, ["roles", "default", "provider"]) || "openrouter", model}
+
+      [head, rest] ->
+        if Map.has_key?(cfg["providers"] || %{}, head),
+          do: {head, rest},
+          else: {:error, {:unknown_provider, head}}
     end
   end
 
@@ -139,21 +163,24 @@ defmodule Newbee.LLM.Config do
     force = Keyword.get(opts, :refresh, false)
 
     case :ets.lookup(@models_cache, key) do
-      [{^key, ids, _ts}] when not force ->
-        # 有缓存且非强制：直接返回缓存
-        ids
+      [{^key, ids, ts}] when not force ->
+        # 有缓存、未过期且非强制：直接返回缓存
+        if :erlang.monotonic_time(:millisecond) - ts < @models_ttl do
+          ids
+        else
+          do_fetch_and_cache(name, provider, key)
+        end
 
       _ when force ->
         # 强制刷新：同步拉取
         do_fetch_and_cache(name, provider, key)
-
       _ ->
         # 无缓存非强制：返回静态列表（不自动拉取）
         static_models(provider)
     end
   end
 
-  defp do_fetch_and_cache(name, provider, key) do
+  defp do_fetch_and_cache(_name, provider, key) do
     ids = fetch_models(provider) || static_models(provider)
     :ets.insert(@models_cache, {key, ids, :erlang.monotonic_time(:millisecond)})
     ids

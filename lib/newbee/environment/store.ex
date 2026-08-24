@@ -36,8 +36,14 @@ defmodule Newbee.Environment.Store do
   def root(project_root), do: Path.join(project_root, @dir)
 
   def path(sub) when sub in [:environment, :messages, :events, :profile] do
-    file = %{environment: "environment.json", messages: "messages.jsonl",
-             events: "events.jsonl", profile: "profile.md"}[sub]
+    file =
+      %{
+        environment: "environment.json",
+        messages: "messages.jsonl",
+        events: "events.jsonl",
+        profile: "profile.md"
+      }[sub]
+
     Path.join(root(), file)
   end
 
@@ -46,7 +52,10 @@ defmodule Newbee.Environment.Store do
   end
 
   def plugin_dir(plugin_id), do: Path.join(dir(:plugins), safe(plugin_id))
-  def release_dir(plugin_id, release_id), do: Path.join(plugin_dir(plugin_id), "releases/#{safe(release_id)}")
+
+  def release_dir(plugin_id, release_id),
+    do: Path.join(plugin_dir(plugin_id), "releases/#{safe(release_id)}")
+
   def change_dir(change_id), do: Path.join(dir(:changes), safe(change_id))
   def evaluation_dir(evaluation_id), do: Path.join(dir(:evaluations), safe(evaluation_id))
 
@@ -60,7 +69,10 @@ defmodule Newbee.Environment.Store do
     for sub <- @subdirs, do: File.mkdir_p!(dir(sub))
 
     unless File.exists?(path(:environment)) do
-      write_atomic!(path(:environment), Jason.encode_to_iodata!(fresh_environment(), pretty: true))
+      write_atomic!(
+        path(:environment),
+        Jason.encode_to_iodata!(fresh_environment(), pretty: true)
+      )
     else
       # 已有快照但 active 空（旧文件或被清空）→ 原地热补内置基线，不丢 revision/checkpoint
       case File.read(path(:environment)) do
@@ -70,21 +82,46 @@ defmodule Newbee.Environment.Store do
               if map_size(active) == 0 do
                 builtin = Newbee.Plugins.builtin_active_map()
                 patched = Map.put(env, "active", Map.merge(builtin, active))
+
                 patched =
                   case env["manifest"] do
                     %{"active" => mactive, "revision" => rev} when is_map(mactive) and rev == 0 ->
-                      if map_size(mactive) == 0, do: Map.put(patched, "manifest", Map.put(env["manifest"], "active", builtin)), else: patched
+                      if map_size(mactive) == 0,
+                        do:
+                          Map.put(
+                            patched,
+                            "manifest",
+                            Map.put(env["manifest"], "active", builtin)
+                          ),
+                        else: patched
+
                     %{"active" => mactive} when is_map(mactive) ->
-                      if map_size(mactive) == 0, do: Map.put(patched, "manifest", Map.put(env["manifest"], "active", builtin)), else: patched
-                    _ -> patched
+                      if map_size(mactive) == 0,
+                        do:
+                          Map.put(
+                            patched,
+                            "manifest",
+                            Map.put(env["manifest"], "active", builtin)
+                          ),
+                        else: patched
+
+                    _ ->
+                      patched
                   end
+
                 write_atomic!(path(:environment), Jason.encode_to_iodata!(patched, pretty: true))
               end
-            _ -> :ok
+
+            _ ->
+              :ok
           end
-        _ -> :ok
+
+        _ ->
+          :ok
       end
     end
+
+    reconcile_missing_builtin_releases!()
 
     cleanup_temp_files(root())
     :ok
@@ -228,6 +265,56 @@ defmodule Newbee.Environment.Store do
   end
 
   def migrate(env), do: {:ok, env}
+
+  # 旧快照可能引用已被重新编译的 builtin release。项目 release 不可变，
+  # 但 builtin 由当前 BEAM 的 module md5 内容寻址，因此只迁移缺失的 builtin 指针。
+  defp reconcile_missing_builtin_releases! do
+    case File.read(path(:environment)) do
+      {:ok, body} ->
+        with {:ok, env} <- Jason.decode(body),
+             active when is_map(active) <- env["active"] do
+          builtin = Newbee.Plugins.builtins() |> Map.new(&{&1.plugin_id, &1.release_id})
+
+          migrated =
+            Enum.reduce(active, active, fn {plugin_id, release_id}, acc ->
+              current = Map.get(builtin, plugin_id)
+              release_path = Path.join(release_dir(plugin_id, release_id), "release.json")
+
+              if current && release_id != current && not File.exists?(release_path) do
+                Map.put(acc, plugin_id, current)
+              else
+                acc
+              end
+            end)
+
+          if migrated != active do
+            patched =
+              env
+              |> Map.put("active", migrated)
+              |> update_manifest_active(migrated)
+
+            write_atomic!(path(:environment), Jason.encode_to_iodata!(patched, pretty: true))
+          end
+        else
+          _ -> :ok
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp update_manifest_active(env, active) do
+    case env["manifest"] do
+      manifest when is_map(manifest) ->
+        Map.put(env, "manifest", Map.put(manifest, "active", active))
+
+      _ ->
+        env
+    end
+  end
 
   # ── internal ──
 

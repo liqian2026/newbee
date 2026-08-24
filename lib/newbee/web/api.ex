@@ -24,7 +24,7 @@ defmodule Newbee.Web.Api do
 
   # ── RPC envelope ──
 
-post "/:method" do
+  post "/:method" do
     rpc_id = get_in(conn.body_params, ["rpcId"]) || "-"
     payload = get_in(conn.body_params, ["payload"]) || %{}
 
@@ -38,12 +38,12 @@ post "/:method" do
   end
 
   # 便捷 GET：会话列表 / 健康检查（不进 RPC 信封，等价 dsh downloads 的 GET 面）
-get "/sessions" do
+  get "/sessions" do
     metas = Newbee.Session.list_with_meta(50)
     reply(conn, 200, Enum.map(metas, &json_safe/1))
   end
 
-get "/health" do
+  get "/health" do
     reply(conn, 200, %{ok: true, model: current_model()})
   end
 
@@ -83,6 +83,16 @@ get "/health" do
     {:ok, %{sessionId: sid, cwd: Newbee.Session.cwd(sid)}}
   end
 
+  defp dispatch_rpc("session.cwd", %{"sessionId" => sid, "cwd" => cwd}) do
+    with {:ok, pid} <- find_session(sid),
+         {:ok, expanded} <- Newbee.Web.Session.set_cwd(pid, cwd) do
+      {:ok, %{sessionId: sid, cwd: expanded}}
+    else
+      {:error, code, message} -> {:error, code, message}
+      {:error, reason} -> {:error, "cwd_error", inspect(reason)}
+    end
+  end
+
   defp dispatch_rpc("session.resume", %{"sessionId" => sid}) do
     case Newbee.Web.Session.ensure(sid) do
       {:ok, _pid, sid} -> {:ok, %{sessionId: sid}}
@@ -111,7 +121,11 @@ get "/health" do
     end
   end
 
-  defp dispatch_rpc("session.promptImage", %{"sessionId" => sid, "images" => images, "text" => text}) do
+  defp dispatch_rpc("session.promptImage", %{
+         "sessionId" => sid,
+         "images" => images,
+         "text" => text
+       }) do
     with {:ok, pid} <- find_session(sid) do
       if images == nil or images == [] do
         Newbee.Web.Session.prompt(pid, text || "")
@@ -136,12 +150,108 @@ get "/health" do
     end
   end
 
-  defp dispatch_rpc("session.selectModel", %{"sessionId" => sid, "provider" => provider, "model" => model}) do
+  defp dispatch_rpc("project.test", _p) do
+    # 检测项目类型并运行对应测试
+    {cmd, args} =
+      cond do
+        File.exists?("mix.exs") ->
+          {"mix", ["test", "--color", "false"]}
+
+        File.exists?("Cargo.toml") ->
+          {"cargo", ["test"]}
+
+        File.exists?("package.json") ->
+          {"npm", ["test"]}
+
+        File.exists?("pytest.ini") or File.exists?("setup.py") ->
+          {"python", ["-m", "pytest", "-x", "--tb=short"]}
+
+        true ->
+          {"echo", ["未检测到项目类型"]}
+      end
+
+    case System.cmd(cmd, args, stderr_to_stdout: true) do
+      {out, 0} ->
+        {:ok, %{output: tail(out, 3000), passed: true, cmd: cmd <> " " <> Enum.join(args, " ")}}
+
+      {out, code} ->
+        {:ok,
+         %{
+           output: tail(out, 3000),
+           passed: false,
+           exit: code,
+           cmd: cmd <> " " <> Enum.join(args, " ")
+         }}
+    end
+  rescue
+    e -> {:error, "test_error", Exception.message(e)}
+  end
+
+  defp dispatch_rpc("git.checkpoint.create", %{"description" => desc}) do
+    desc = String.trim(desc || "")
+    label = if desc == "", do: "checkpoint", else: String.slice(desc, 0, 60)
+
+    case dispatch_rpc("git.diffStat", %{}) do
+      {:ok, %{files: files}} when files != [] ->
+        case git_cmd(["add", "-A"]) do
+          {:ok, _} ->
+            msg = "[checkpoint] " <> label
+            commit_result = git_cmd(["commit", "-m", msg, "--allow-empty"])
+
+            case commit_result do
+              {:ok, out} -> {:ok, %{committed: true, message: msg, output: tail(out, 500)}}
+              {:error, e} -> {:error, {:git_error, to_string(e)}}
+            end
+
+          {:error, e} ->
+            {:error, {:git_error, to_string(e)}}
+        end
+
+      {:ok, _} ->
+        {:error, :nothing_to_checkpoint}
+
+      err ->
+        err
+    end
+  end
+
+  defp dispatch_rpc("session.selectModel", %{
+         "sessionId" => sid,
+         "provider" => provider,
+         "model" => model
+       }) do
     with {:ok, pid} <- find_session(sid) do
       case Newbee.Web.Session.switch_model(pid, provider, model) do
         :ok -> {:ok, %{provider: provider, model: model}}
         {:error, r} -> {:error, "model_error", inspect(r)}
       end
+    end
+  end
+
+  defp dispatch_rpc("session.bindings", %{"sessionId" => sid}) do
+    with {:ok, pid} <- find_session(sid) do
+      bindings =
+        try do
+          kernel = Newbee.Web.Session.kernel_pid(pid)
+
+          if kernel && Process.alive?(kernel) do
+            case Newbee.SessionEvaluators.lookup(kernel) do
+              {:ok, evaluator} when is_pid(evaluator) ->
+                Newbee.DEE.Evaluator.bindings_summary(evaluator, 3_000)
+
+              _ ->
+                []
+            end
+          else
+            []
+          end
+        rescue
+          _ -> []
+        catch
+          :exit, _ -> []
+        end
+
+      {:ok, %{bindings: json_safe(bindings)}}
     end
   end
 
@@ -155,14 +265,125 @@ get "/health" do
     end
   end
 
+  defp dispatch_rpc("git.checkpoint.list", _p) do
+    case git_cmd(["log", "--oneline", "--all", "--grep=[checkpoint]", "-20"]) do
+      {:ok, out} ->
+        checkpoints =
+          out
+          |> String.split("\n", trim: true)
+          |> Enum.map(fn line ->
+            [sha | rest] = String.split(line, " ", parts: 2)
+            msg = Enum.join(rest, " ")
+            desc = msg |> String.replace_prefix("[checkpoint] ", "") |> String.slice(0, 80)
+            %{sha: sha, description: desc}
+          end)
+
+        {:ok, %{checkpoints: checkpoints}}
+
+      {:error, _e} ->
+        # 无 commits 的 repo 也算正常
+        {:ok, %{checkpoints: []}}
+    end
+  end
+
   defp dispatch_rpc("session.setEffort", %{"sessionId" => sid, "effort" => effort}) do
     with {:ok, pid} <- find_session(sid) do
       case Newbee.Web.Session.set_effort(pid, blank_to_nil(effort)) do
         {:ok, res} -> {:ok, Map.put(res, :effort, blank_to_nil(effort))}
+        {:error, r} -> {:error, "effort_error", inspect(r)}
       end
     end
   end
 
+  defp dispatch_rpc("env.health", _p) do
+    # 沉睡规则
+    rules =
+      try do
+        Newbee.DEE.Rules.list()
+        |> Enum.map(fn r ->
+          %{
+            id: r[:id] || Map.get(r, :id) || "?",
+            kind: to_string(r[:kind] || Map.get(r, :kind) || ""),
+            pattern: String.slice(to_string(r[:pattern] || Map.get(r, :pattern) || ""), 0, 80),
+            hits: r[:hits] || Map.get(r, :hits) || 0
+          }
+        end)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    rule_hits =
+      try do
+        Newbee.DEE.Rules.hits()
+      rescue
+        _ -> %{}
+      catch
+        :exit, _ -> %{}
+      end
+
+    # 失败抗体
+    antibodies =
+      try do
+        project = File.cwd!()
+
+        Newbee.Environment.Antibodies.all(project)
+        |> Enum.map(fn a ->
+          %{
+            id: a["id"] || a[:id] || "?",
+            error: String.slice(to_string(a["error"] || a[:error] || ""), 0, 100),
+            verified: a["verified"] || a[:verified] || false
+          }
+        end)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    verified =
+      try do
+        Newbee.Environment.Antibodies.verified_count(File.cwd!())
+      rescue
+        _ -> 0
+      catch
+        :exit, _ -> 0
+      end
+
+    {:ok,
+     %{
+       rules: %{count: length(rules), items: rules, hits: json_safe(rule_hits)},
+       antibodies: %{count: length(antibodies), verified: verified, items: antibodies}
+     }}
+  end
+
+  defp dispatch_rpc("git.commit", %{"message" => msg}) do
+    msg = String.trim(msg || "")
+
+    if msg == "" do
+      {:error, "empty_message", "提交信息不能为空"}
+    else
+      with {:ok, add_out} <- git_cmd(["add", "-A"]),
+           {:ok, commit_out} <- git_cmd(["commit", "-m", msg]) do
+        {:ok, %{output: tail(to_string(add_out) <> to_string(commit_out), 2000), message: msg}}
+      else
+        {:error, err} -> {:error, "git_error", err}
+      end
+    end
+  end
+
+  # ── 环境健康（沉睡规则 / 抗体 / JIT）──
+  # 主机域
+  defp dispatch_rpc("host.describe", _p) do
+    {:ok,
+     %{
+       cwd: File.cwd!(),
+       model: current_model_label(),
+       policy: Newbee.Environment.Autonomy.get(),
+       version: "0.1.0"
+     }}
+  end
 
   # ── 工作目录域（学 dsh harness：服务端目录浏览 + 新建子目录）──
 
@@ -209,8 +430,6 @@ get "/health" do
       models -> {:ok, %{provider: name, models: models}}
     end
   end
-
-
 
   # 进化域（左侧进化面板数据）
   defp dispatch_rpc("evolution.feed", p) do
@@ -272,14 +491,15 @@ get "/health" do
             changes = Newbee.Environment.Coordinator.changes(Newbee.Environment.Coordinator)
 
             releases =
-              (current && current.active && Enum.map(current.active, fn {plugin_id, release_id} ->
-                %{
-                  "plugin" => plugin_id,
-                  "release" => release_id,
-                  "kind" => plugin_id |> String.split(".") |> List.first(),
-                  "name" => plugin_id |> String.split(".") |> Enum.drop(1) |> Enum.join(".")
-                }
-              end)) || []
+              (current && current.active &&
+                 Enum.map(current.active, fn {plugin_id, release_id} ->
+                   %{
+                     "plugin" => plugin_id,
+                     "release" => release_id,
+                     "kind" => plugin_id |> String.split(".") |> List.first(),
+                     "name" => plugin_id |> String.split(".") |> Enum.drop(1) |> Enum.join(".")
+                   }
+                 end)) || []
 
             {%{
                active_revision: current && current.rev,
@@ -384,7 +604,9 @@ get "/health" do
             case git_cmd(["ls-files", "--others", "--exclude-standard", "--", path]) do
               {:ok, out} ->
                 if String.trim(out) != "", do: new_file_diff(path), else: ""
-              _ -> ""
+
+              _ ->
+                ""
             end
           else
             case git_cmd(["ls-files", "--others", "--exclude-standard"]) do
@@ -393,7 +615,9 @@ get "/health" do
                 |> String.split("\n", trim: true)
                 |> Enum.map(&new_file_diff/1)
                 |> Enum.join("\n")
-              _ -> ""
+
+              _ ->
+                ""
             end
           end
 
@@ -405,7 +629,6 @@ get "/health" do
     end
   end
 
-
   # ── 文件搜索（@ 引用自动补全）──
 
   defp dispatch_rpc("files.search", %{"q" => q}) do
@@ -415,7 +638,27 @@ get "/health" do
       {:ok, %{files: []}}
     else
       # 用 fd 或 find 搜索项目文件
-      case System.cmd("find", [".", "-type", "f", "-name", "*#{q}*", "-not", "-path", "*/deps/*", "-not", "-path", "*/.git/*", "-not", "-path", "*/_build/*", "-not", "-path", "*/node_modules/*"], stderr_to_stdout: true) do
+      case System.cmd(
+             "find",
+             [
+               ".",
+               "-type",
+               "f",
+               "-name",
+               "*#{q}*",
+               "-not",
+               "-path",
+               "*/deps/*",
+               "-not",
+               "-path",
+               "*/.git/*",
+               "-not",
+               "-path",
+               "*/_build/*",
+               "-not",
+               "-path",
+               "*/node_modules/*"
+             ], stderr_to_stdout: true) do
         {out, 0} ->
           files =
             out
@@ -444,7 +687,7 @@ get "/health" do
     case git_cmd(["diff", "--numstat", "HEAD", "--"]) do
       {:ok, numstat_out} ->
         changed = parse_numstat(numstat_out)
-        
+
         untracked =
           case git_cmd(["ls-files", "--others", "--exclude-standard"]) do
             {:ok, out} -> String.split(out, "\n", trim: true)
@@ -474,7 +717,9 @@ get "/health" do
               is_config: String.contains?(path, ["config/", "mix.exs", "mix.lock"])
             }
           end)
-          |> Enum.sort_by(fn f -> {-risk_score(f.risk), -f.dependents, -(f.added + f.deleted)} end)
+          |> Enum.sort_by(fn f ->
+            {-risk_score(f.risk), -f.dependents, -(f.added + f.deleted)}
+          end)
 
         # 4. 汇总
         total_files = length(files)
@@ -492,7 +737,11 @@ get "/health" do
              total_deleted: total_deleted,
              high_risk: high_risk,
              has_tests: has_tests,
-             overall_risk: if(high_risk > 0, do: "high", else: if(total_files > 10, do: "medium", else: "low"))
+             overall_risk:
+               if(high_risk > 0,
+                 do: "high",
+                 else: if(total_files > 10, do: "medium", else: "low")
+               )
            }
          }}
 
@@ -502,6 +751,7 @@ get "/health" do
   end
 
   # ── Impact Analysis helpers ──
+  defp dispatch_rpc(method, _p), do: {:error, "unknown_method", "未知 RPC 方法: #{method}"}
 
   # 构建模块依赖图：{文件路径 => [依赖它的文件列表]}
   defp build_dep_map do
@@ -548,7 +798,9 @@ get "/health" do
       |> Enum.reduce(%{}, fn {file, modules}, acc ->
         Enum.reduce(modules, acc, fn mod, acc2 ->
           case Map.get(module_to_file, mod) do
-            nil -> acc2
+            nil ->
+              acc2
+
             target_file ->
               if target_file != file do
                 Map.update(acc2, target_file, [file], &[file | &1])
@@ -586,42 +838,6 @@ get "/health" do
   defp risk_score("medium"), do: 2
   defp risk_score("low"), do: 1
   defp risk_score(_), do: 0
-
-  # ── 工作流闭环：测试 + 提交 ──
-
-  defp dispatch_rpc("project.test", _p) do
-    # 检测项目类型并运行对应测试
-    {cmd, args} =
-      cond do
-        File.exists?("mix.exs") -> {"mix", ["test", "--color", "false"]}
-        File.exists?("Cargo.toml") -> {"cargo", ["test"]}
-        File.exists?("package.json") -> {"npm", ["test"]}
-        File.exists?("pytest.ini") or File.exists?("setup.py") -> {"python", ["-m", "pytest", "-x", "--tb=short"]}
-        true -> {"echo", ["未检测到项目类型"]}
-      end
-
-    case System.cmd(cmd, args, stderr_to_stdout: true) do
-      {out, 0} -> {:ok, %{output: tail(out, 3000), passed: true, cmd: cmd <> " " <> Enum.join(args, " ")}}
-      {out, code} -> {:ok, %{output: tail(out, 3000), passed: false, exit: code, cmd: cmd <> " " <> Enum.join(args, " ")}}
-    end
-  rescue
-    e -> {:error, "test_error", Exception.message(e)}
-  end
-
-  defp dispatch_rpc("git.commit", %{"message" => msg}) do
-    msg = String.trim(msg || "")
-    if msg == "" do
-      {:error, "empty_message", "提交信息不能为空"}
-    else
-      with {:ok, add_out} <- git_cmd(["add", "-A"]),
-           {:ok, commit_out} <- git_cmd(["commit", "-m", msg]) do
-        {:ok, %{output: tail(to_string(add_out) <> to_string(commit_out), 2000), message: msg}}
-      else
-        {:error, err} -> {:error, "git_error", err}
-      end
-    end
-  end
-
   # ── Git helpers ──
 
   defp tail(str, n) when is_binary(str) do
@@ -635,57 +851,6 @@ get "/health" do
   end
 
   defp tail(v, n), do: v |> to_string() |> tail(n)
-
-  # ── Checkpoint (vibe coding safety net) ──
-
-  defp dispatch_rpc("git.checkpoint.create", %{"description" => desc}) do
-    desc = String.trim(desc || "")
-    label = if desc == "", do: "checkpoint", else: String.slice(desc, 0, 60)
-
-    case dispatch_rpc("git.diffStat", %{}) do
-      {:ok, %{files: files}} when files != [] ->
-        case git_cmd(["add", "-A"]) do
-          {:ok, _} ->
-            msg = "[checkpoint] " <> label
-            commit_result = git_cmd(["commit", "-m", msg, "--allow-empty"])
-
-            case commit_result do
-              {:ok, out} -> {:ok, %{committed: true, message: msg, output: tail(out, 500)}}
-              {:error, e} -> {:error, {:git_error, to_string(e)}}
-            end
-
-          {:error, e} ->
-            {:error, {:git_error, to_string(e)}}
-        end
-
-      {:ok, _} ->
-        {:error, :nothing_to_checkpoint}
-
-      err ->
-        err
-    end
-  end
-
-  defp dispatch_rpc("git.checkpoint.list", _p) do
-    case git_cmd(["log", "--oneline", "--all", "--grep=[checkpoint]", "-20"]) do
-      {:ok, out} ->
-        checkpoints =
-          out
-          |> String.split("\n", trim: true)
-          |> Enum.map(fn line ->
-            [sha | rest] = String.split(line, " ", parts: 2)
-            msg = Enum.join(rest, " ")
-            desc = msg |> String.replace_prefix("[checkpoint] ", "") |> String.slice(0, 80)
-            %{sha: sha, description: desc}
-          end)
-
-        {:ok, %{checkpoints: checkpoints}}
-
-      {:error, e} ->
-        # 无 commits 的 repo 也算正常
-        {:ok, %{checkpoints: []}}
-    end
-  end
 
   defp git_cmd(args) do
     case System.cmd("git", args, stderr_to_stdout: true) do
@@ -727,120 +892,17 @@ get "/health" do
     case File.read(path) do
       {:ok, content} ->
         lines = String.split(content, "\n")
-        header = "diff --git a/#{path} b/#{path}\nnew file mode 100644\n--- /dev/null\n+++ b/#{path}\n@@ -0,0 +1,#{length(lines)} @@"
+
+        header =
+          "diff --git a/#{path} b/#{path}\nnew file mode 100644\n--- /dev/null\n+++ b/#{path}\n@@ -0,0 +1,#{length(lines)} @@"
+
         body = lines |> Enum.map(&("+" <> &1)) |> Enum.join("\n")
         header <> "\n" <> body
-      _ -> ""
+
+      _ ->
+        ""
     end
   end
-
-    # ── Bindings 可视化 ──
-
-  defp dispatch_rpc("session.bindings", %{"sessionId" => sid}) do
-    with {:ok, pid} <- find_session(sid) do
-      bindings =
-        try do
-          kernel = Newbee.Web.Session.kernel_pid(pid)
-
-          if kernel && Process.alive?(kernel) do
-            case Newbee.SessionEvaluators.lookup(kernel) do
-              {:ok, evaluator} when is_pid(evaluator) ->
-                Newbee.DEE.Evaluator.bindings_summary(evaluator, 3_000)
-
-              _ ->
-                []
-            end
-          else
-            []
-          end
-        rescue
-          _ -> []
-        catch
-          :exit, _ -> []
-        end
-
-      {:ok, %{bindings: json_safe(bindings)}}
-    end
-  end
-
-
-  # ── 环境健康（沉睡规则 / 抗体 / JIT）──
-
-  defp dispatch_rpc("env.health", _p) do
-    # 沉睡规则
-    rules =
-      try do
-        Newbee.DEE.Rules.list()
-        |> Enum.map(fn r ->
-          %{
-            id: r[:id] || Map.get(r, :id) || "?",
-            kind: to_string(r[:kind] || Map.get(r, :kind) || ""),
-            pattern: String.slice(to_string(r[:pattern] || Map.get(r, :pattern) || ""), 0, 80),
-            hits: r[:hits] || Map.get(r, :hits) || 0
-          }
-        end)
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-
-    rule_hits =
-      try do
-        Newbee.DEE.Rules.hits()
-      rescue
-        _ -> %{}
-      catch
-        :exit, _ -> %{}
-      end
-
-    # 失败抗体
-    antibodies =
-      try do
-        project = File.cwd!()
-        Newbee.Environment.Antibodies.all(project)
-        |> Enum.map(fn a ->
-          %{
-            id: a["id"] || a[:id] || "?",
-            error: String.slice(to_string(a["error"] || a[:error] || ""), 0, 100),
-            verified: a["verified"] || a[:verified] || false
-          }
-        end)
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-
-    verified =
-      try do
-        Newbee.Environment.Antibodies.verified_count(File.cwd!())
-      rescue
-        _ -> 0
-      catch
-        :exit, _ -> 0
-      end
-
-    {:ok,
-     %{
-       rules: %{count: length(rules), items: rules, hits: json_safe(rule_hits)},
-       antibodies: %{count: length(antibodies), verified: verified, items: antibodies}
-     }}
-  end
-
-  # 主机域
-  defp dispatch_rpc("host.describe", _p) do
-
-    {:ok,
-     %{
-       cwd: File.cwd!(),
-       model: current_model_label(),
-       policy: Newbee.Environment.Autonomy.get(),
-       version: "0.1.0"
-     }}
-  end
-
-  defp dispatch_rpc(method, _p), do: {:error, "unknown_method", "未知 RPC 方法: #{method}"}
 
   # ── helpers ──
 
@@ -888,8 +950,6 @@ get "/health" do
     if info.model, do: "#{info.provider}/#{info.model}", else: nil
   end
 
-
-
   # transcript 消息 → 前端可渲染结构
   defp history_msg(%{"role" => "user", "content" => c}) when is_binary(c),
     do: %{role: "user", content: c}
@@ -903,7 +963,9 @@ get "/health" do
     images =
       content
       |> Enum.filter(&is_map/1)
-      |> Enum.map(fn part -> if part["type"] == "image_url", do: get_in(part, ["image_url", "url"]) end)
+      |> Enum.map(fn part ->
+        if part["type"] == "image_url", do: get_in(part, ["image_url", "url"])
+      end)
       |> Enum.reject(&is_nil/1)
 
     %{role: "user", content: text, images: images}
@@ -918,7 +980,12 @@ get "/health" do
             code: args_field(c, "code")
           }
 
-    %{role: "assistant", content: m["content"] || "", reasoning: m["reasoning"] || "", toolCalls: calls}
+    %{
+      role: "assistant",
+      content: m["content"] || "",
+      reasoning: m["reasoning"] || "",
+      toolCalls: calls
+    }
   end
 
   defp history_msg(%{"role" => "tool", "content" => c}) when is_binary(c),
