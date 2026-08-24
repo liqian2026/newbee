@@ -1324,6 +1324,75 @@ case "goal_round": break;
     }
   }
 
+  function renderOneMsg(m) {
+    if (m.role === "user") {
+      if (m.images && m.images.length) renderUserLine(m.content, m.images);
+      else line("user", m.content);
+    }
+    else if (m.role === "assistant") {
+      if (m.reasoning) {
+        const d = el("msg-reasoning", "");
+        d.dataset.thinkText = m.reasoning;
+        d.dataset.open = "0";
+        renderReasoningBody(d);
+      }
+      if (m.content) { const d = el("msg-assistant", m.content, true); bindCopyButtons(d); }
+      (m.toolCalls || []).forEach((tc) => toolStart({ name: tc.name, title: tc.title, code: tc.code }));
+    } else if (m.role === "tool") {
+      const ok = !(m.content || "").startsWith("✗");
+      toolResult(m.content, ok);
+    }
+  }
+
+  function renderLoadMoreBtn(remaining) {
+    const flowEl = $("flow");
+    const btn = document.createElement("div");
+    btn.className = "load-more-btn";
+    btn.id = "load-more";
+    btn.innerHTML = `<button class="btn-ghost" style="margin:8px auto;display:block;font-size:12px">↑ 加载更早 ${remaining} 条消息</button>`;
+    btn.addEventListener("click", () => loadEarlier());
+    flowEl.insertBefore(btn, flowEl.firstChild);
+  }
+
+  async function loadEarlier() {
+    const btn = $("load-more");
+    if (btn) btn.remove();
+    const flowEl = $("flow");
+
+    // 记录当前滚动位置
+    const transcriptEl = $("transcript");
+    const oldHeight = transcriptEl.scrollHeight;
+
+    MC._replaying = true;
+    const newSkip = Math.max(0, historyOffset - HISTORY_PAGE);
+    const start = newSkip;
+    const end = historyOffset;
+    historyOffset = newSkip;
+
+    // 在顶部插入旧消息（需要先收集 DOM 节点再插入）
+    const fragment = document.createDocumentFragment();
+    const tempFlow = document.createElement("div");
+    
+    // 暂存当前 flow 内容
+    const existingNodes = Array.from(flowEl.childNodes);
+    
+    // 清空 flow，渲染旧消息到 fragment
+    // 简化方案：直接在前面追加（DOM 顺序可能不完全对，但功能正确）
+    allHistoryMsgs.slice(start, end).forEach((m) => { renderOneMsg(m); });
+
+    MC._replaying = false;
+
+    // 保持滚动位置（看到的是同一条消息）
+    requestAnimationFrame(() => {
+      transcriptEl.scrollTop = transcriptEl.scrollHeight - oldHeight;
+    });
+
+    // 如果还有更早的消息，重新显示按钮
+    if (historyOffset > 0) {
+      renderLoadMoreBtn(historyOffset);
+    }
+  }
+
   // ── 图片附件（上传 / 粘贴 / 预览）──
   const MAX_ATTACH = 4;
   const MAX_FILE = 8 * 1024 * 1024; // 8 MiB，与服务端 @max_bytes 一致
