@@ -457,6 +457,7 @@ defmodule Newbee.Web.Api do
     {:ok, %{events: project_evolution_events(n)}}
   end
 
+<<<<<<< HEAD
   defp dispatch_rpc("evolution.approve", %{"changeId" => change_id}) when is_binary(change_id) do
     case Process.whereis(Newbee.Environment.Coordinator) do
       nil ->
@@ -473,6 +474,65 @@ defmodule Newbee.Web.Api do
         end
     end
   end
+=======
+  defp dispatch_rpc("evolution.trigger", _p) do
+    case Newbee.Host.on_main?() do
+      true ->
+        :ok = Newbee.Daemon.evolve_now()
+        {:ok, %{triggered: true}}
+
+      false ->
+        main = Newbee.Host.main_node()
+
+        if main && Node.ping(main) == :pong do
+          r = :rpc.call(main, Newbee.Daemon, :evolve_now, [])
+          {:ok, %{triggered: r == :ok, node: main}}
+        else
+          {:error, :main_node_unreachable}
+        end
+    end
+  end
+
+  defp dispatch_rpc("evolution.status", _p) do
+    autonomy = Newbee.Environment.Autonomy.get()
+
+    {coord_state, active_releases} =
+      case Process.whereis(Newbee.Environment.Coordinator) do
+        nil ->
+          {:down, []}
+
+        _pid ->
+          try do
+            current = Newbee.Environment.Coordinator.current(Newbee.Environment.Coordinator)
+            changes = Newbee.Environment.Coordinator.changes(Newbee.Environment.Coordinator)
+
+            releases =
+              (current && current.active && Enum.map(current.active, fn {plugin_id, release_id} ->
+                %{
+                  "plugin" => plugin_id,
+                  "release" => release_id,
+                  "kind" => plugin_id |> String.split(".") |> List.first(),
+                  "name" => plugin_id |> String.split(".") |> Enum.drop(1) |> Enum.join(".")
+                }
+              end)) || []
+
+            {%{
+               active_revision: current && current.rev,
+               changes: length(changes),
+               active_count: length(releases)
+             }, releases}
+          rescue
+            _ -> {:error, []}
+          catch
+            :exit, _ -> {:error, []}
+          end
+      end
+
+    # 最近一轮 adapter 运行痕迹：从 EventLog 找最近的 evolution_* 事件
+    recent_evo =
+      Newbee.EventLog.read(50, ["evolution_published", "evolution_rejected"])
+      |> List.first()
+>>>>>>> feat(web): manual evolution trigger + offline indicator
 
   defp dispatch_rpc("evolution.approve", _p),
     do: {:error, "invalid_change", "缺少 changeId"}
