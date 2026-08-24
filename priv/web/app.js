@@ -1299,6 +1299,22 @@ case "goal_round": break;
   function initEvolution() {
     const refreshBtn = $("evo-refresh");
     if (refreshBtn) refreshBtn.onclick = () => refreshEvolution();
+    const triggerBtn = $("evo-trigger");
+    if (triggerBtn)
+      triggerBtn.onclick = async () => {
+        const orig = triggerBtn.textContent;
+        triggerBtn.classList.add("running");
+        try {
+          const r = await rpc("evolution.trigger", {});
+          triggerBtn.textContent = r && r.triggered ? "✓ 已触发" : "✗ 不可达";
+          setTimeout(refreshEvolution, 2000);
+        } catch (e) {
+          triggerBtn.textContent = "✗ 失败";
+        } finally {
+          triggerBtn.classList.remove("running");
+          setTimeout(() => { triggerBtn.textContent = orig; }, 2500);
+        }
+      };
     // poll status every 10s; events stream in via WS (evo_* branches in onEvent)
     setInterval(refreshEvoStatus, 10_000);
   }
@@ -1318,8 +1334,8 @@ case "goal_round": break;
         setV("evo-revision", cs.active_revision != null ? "r" + cs.active_revision : "-");
         setV("evo-changes", cs.changes != null ? cs.changes : "-");
       } else {
-        setV("evo-revision", "-");
-        setV("evo-changes", "-");
+        setV("evo-revision", "引擎离线");
+        setV("evo-changes", "引擎离线");
       }
       // 最近进化事件（时间 + 类型）
       const le = st.last_evolution;
