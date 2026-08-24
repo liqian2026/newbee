@@ -131,6 +131,9 @@ defmodule Newbee.Web.Session do
   def set_effort(pid, effort), do: GenServer.call(pid, {:set_effort, effort}, 10_000)
 
   @doc "当前状态快照（供 HTTP 轮询 / socket 重连对齐）。"
+  @doc "获取底层 kernel pid（供 API 层查询 evaluator）。"
+  def kernel_pid(pid), do: GenServer.call(pid, :kernel_pid, 3_000)
+
   def state(pid), do: GenServer.call(pid, :state, 5_000)
   @doc "轻量探测会话是否正在运行（非阻塞，短超时；失败视为离线）。"
   def peek_busy(sid) when is_binary(sid) do
@@ -461,6 +464,13 @@ defmodule Newbee.Web.Session do
     end
   end
 
+<<<<<<< HEAD
+=======
+
+  def handle_call(:peek_busy, _from, st), do: {:reply, st.busy, st}
+  def handle_call(:kernel_pid, _from, st), do: {:reply, st.kernel, st}
+
+>>>>>>> feat(web): bindings visualization in overview tab
   def handle_call(:state, _from, st) do
     # 只读本地快照：turn 进行中 Loop 的 GenServer.call 会排队超时（state 不该被阻塞）
     usage = st.usage_snap
