@@ -29,8 +29,11 @@ defmodule Newbee.Web.Router do
     serve_static(conn)
   end
 
-  @priv_web Path.join(:code.priv_dir(:newbee), "web")
-  @index Path.join(@priv_web, "index.html")
+  # Static assets live in source tree (lib/newbee/web/router.ex -> ../../priv/web).
+  # Using __DIR__ avoids :code.priv_dir failures when _build is missing/unsynced.
+  @priv_web Path.expand("../../../priv/web", __DIR__)
+
+    @index Path.join(@priv_web, "index.html")
 
   defp serve_static(conn) do
     path = conn.request_path |> String.trim_leading("/")
