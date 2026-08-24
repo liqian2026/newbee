@@ -200,15 +200,15 @@ defmodule Newbee.Web.Api do
 
             case commit_result do
               {:ok, out} -> {:ok, %{committed: true, message: msg, output: tail(out, 500)}}
-              {:error, e} -> {:error, {:git_error, to_string(e)}}
+              {:error, e} -> {:error, "git_error", to_string(e)}
             end
 
           {:error, e} ->
-            {:error, {:git_error, to_string(e)}}
+            {:error, "git_error", to_string(e)}
         end
 
       {:ok, _} ->
-        {:error, :nothing_to_checkpoint}
+        {:error, "nothing_to_checkpoint", "无变更可创建 checkpoint"}
 
       err ->
         err
