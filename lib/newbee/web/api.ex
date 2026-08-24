@@ -887,6 +887,40 @@ defmodule Newbee.Web.Api do
   defp tail(str, n) when is_binary(str) do
     len = String.length(str)
 
+<<<<<<< HEAD
+    if len > n do
+      String.slice(str, len - n, n)
+    else
+      str
+=======
+    case System.cmd(cmd, args, stderr_to_stdout: true) do
+      {out, 0} -> {:ok, %{output: tail(out, 3000), passed: true, cmd: cmd <> " " <> Enum.join(args, " ")}}
+      {out, code} -> {:ok, %{output: tail(out, 3000), passed: false, exit: code, cmd: cmd <> " " <> Enum.join(args, " ")}}
+    end
+  rescue
+    e -> {:error, "test_error", Exception.message(e)}
+  end
+
+  defp dispatch_rpc("git.commit", %{"message" => msg}) do
+    msg = String.trim(msg || "")
+    if msg == "" do
+      {:error, "empty_message", "提交信息不能为空"}
+    else
+      with {:ok, add_out} <- git_cmd(["add", "-A"]),
+           {:ok, commit_out} <- git_cmd(["commit", "-m", msg]) do
+        {:ok, %{output: tail(to_string(add_out) <> to_string(commit_out), 2000), message: msg}}
+      else
+        {:error, err} -> {:error, "git_error", err}
+      end
+>>>>>>> fix(core): clean up compiler warnings
+    end
+  end
+
+  defp tail(v, n), do: v |> to_string() |> tail(n)
+
+  defp tail(str, n) when is_binary(str) do
+    len = String.length(str)
+
     if len > n do
       String.slice(str, len - n, n)
     else
