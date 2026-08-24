@@ -139,6 +139,7 @@ const flow = $("flow");
     timing: { llmMs: 0, toolMs: 0, llmStart: null, toolStart: null,
               ftSum: 0, ftCount: 0, ftRecorded: false, outTok: 0 },
     attachments: [],   // [{name, type, dataUrl, size}]
+    stickBottom: true,
   };
 
   // ── 会话统计持久化（按 sessionId 存 localStorage，刷新/重连后保留）──
@@ -270,7 +271,17 @@ const flow = $("flow");
 case "done": finishTurn(); line("done", p.summary, true); break;
       case "ask": finishTurn(); line("ask", p.question); break;
       case "text_end": finishTurn(); break;
-      case "error": finishTurn(); line("error", p.message); break;
+      case "error": {
+        finishTurn();
+        const m = String(p.message || "");
+        // 模型配置类错误：给出可操作提示（点模型选择器 / 改 model.json）
+        if (/ModelError|not supported|not-a-model|未配置|无效|api.?key|401/i.test(m)) {
+          line("error", m + "\n→ 修复方式: 右上角模型选择器换一个模型，或修改 ~/.newbee/model.json 后重试");
+        } else {
+          line("error", m);
+        }
+        break;
+      }
       case "interrupted": finishTurn(); line("notice", "已中断"); break;
       case "permission_ask": showPermission(p.preview); break;
       case "usage": setUsage(p.usage); break;
@@ -419,6 +430,8 @@ case "goal_round": break;
     el.appendChild(head);
     if (open && trimmed !== "") {
       const body = document.createElement("div");
+      const prev = el.querySelector(".think-body");
+      if (prev && prev.scrollTop > 0) { body.scrollTop = prev.scrollTop; }
       body.className = "think-body";
       body.textContent = text;
       el.appendChild(body);
@@ -784,7 +797,13 @@ case "goal_round": break;
     try {
       const home = await rpc("workspace.home", {});
       dirState.cur = home.home || "/";
-      renderDirPicker();
+      try {
+        const listing = await rpc("workspace.listDir", { path: dirState.cur });
+        renderDirPicker(listing);
+      } catch (lstErr) {
+        renderDirPicker();
+        line("error", "浏览目录失败: " + lstErr.message);
+      }
     } catch (err) {
       line("error", "读取工作目录失败: " + err.message);
       closeDirPicker();
@@ -956,6 +975,9 @@ case "goal_round": break;
     const curProvider = sessionState.provider || "";
     $("model-label").textContent = (curProvider && curModel) ? curProvider + "/" + curModel : (curModel || "(no model)");
     if (typeof window.__restoreEffort === "function") window.__restoreEffort(sessionState.effort);
+    // 同步会话工作目录：切会话后立即反映到侧栏标签 + 底部状态栏
+    updateCwdLabel(sessionState.cwd || null);
+    state.cwd = sessionState.cwd || null;
     // 同步会话忙碌状态：切到正在跑任务的会话时，UI 立即反映（中断/转向按钮、busy 圆点）
     setBusy(sessionState.busy === true);
     connect();
@@ -1013,7 +1035,7 @@ case "goal_round": break;
     MC._replaying = false;
     MC.steps = [];
     renderMCSteps();
-    scrollBottom();
+    scrollBottom(true);
   }
 
   function renderOneMsg(m) {
@@ -1167,6 +1189,7 @@ case "goal_round": break;
     input.value = "";
     autoGrow();
     // 回显：文本 + 图片
+    scrollBottom(true);
     renderUserLine(text, images);
     state.busy = true; setBusy(true);
     clearAttachments();
@@ -1327,7 +1350,13 @@ case "goal_round": break;
     const t = u.total_tokens || u["total_tokens"];
     if (t) $("usage-label").textContent = `${(t / 1000).toFixed(1)}k tok`;
   }
-  function scrollBottom() {
+  function scrollBottom(force) {
+    if (force) state.stickBottom = true;
+    if (!state.stickBottom) {
+      const far = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight > 200;
+      $("to-bottom").classList.toggle("show", far);
+      return;
+    }
     transcript.scrollTop = transcript.scrollHeight;
     $("to-bottom").classList.remove("show");
   }
@@ -1417,9 +1446,10 @@ case "goal_round": break;
   // 回到底部：滚动远离底部时浮现（dsh to-bottom 悬浮钮）
   transcript.addEventListener("scroll", () => {
     const far = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight > 200;
+    state.stickBottom = !far;
     $("to-bottom").classList.toggle("show", far);
   });
-  $("to-bottom").onclick = () => scrollBottom();
+  $("to-bottom").onclick = () => scrollBottom(true);
 
   // ── 状态栏（对齐 dsh StatsLine）：轮询 session.state，拼 左统计 | 右状态 ──
   let statsTimer = null;
@@ -1462,7 +1492,8 @@ case "goal_round": break;
     // 缓存命中率：累计 cache_read ÷ 累计 prompt_tokens（与 TUI 口径一致；服务端 usage 按 key 累加，prompt 含 cached）
     const promptTok = u.prompt_tokens || 0;
     const cacheHit = promptTok > 0 ? Math.min(100, cacheRead * 100 / promptTok) : null;
-    const left = ["newbee"];
+    const cwd0 = (state.cwd || st.cwd || "");
+    const left = [cwd0 ? ("📂 " + cwd0) : "newbee"];
     const turns = st.turns || 0, steps = st.steps || 0;
     if (turns > 0 || steps > 0) left.push(`${turns} 轮 · ${steps} 步`);
     // LLM/工具耗时（dsh: LLM Xs · 工具 Ys）
