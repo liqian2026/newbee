@@ -73,6 +73,8 @@
       // 无序列表
       const ul = line.match(/^\s*[-*+]\s+(.*)$/);
       if (ul) {
+        // 空列表项（如 "- " 或 "* "）不产出 <li></li>——避免 done 摘要出现孤立空 bullet
+        if (ul[1].trim() === "") { i++; continue; }
         if (!listStack || listStack.type !== "ul") { closeList(); listStack = { type: "ul", html: [] }; }
         listStack.html.push(`<li>${inline(ul[1])}</li>`);
         i++; continue;
