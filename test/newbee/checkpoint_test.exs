@@ -27,17 +27,20 @@ defmodule Newbee.CheckpointTest do
 
     case parse(conn) do
       %{"ok" => ok} -> assert is_list(ok["checkpoints"])
-      _ -> :ok
+      _ -> flunk("unexpected response")
     end
   end
 
-  test "checkpoint.create 返回结构化结果" do
+  test "checkpoint.create 幂等：无变更返回明确错误" do
     conn = post_rpc("git.checkpoint.create", %{"description" => "test"})
+    assert conn.status == 200
 
     case parse(conn) do
+      # 有未提交变更时会创建成功
       %{"ok" => ok} -> assert is_map(ok)
+      # 干净工作区时返回 nothing_to_checkpoint
       %{"error" => err} -> assert is_map(err)
-      _ -> :ok
+      _ -> flunk("unexpected response")
     end
   end
 end
