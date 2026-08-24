@@ -930,6 +930,127 @@ defmodule Newbee.Web.Api do
 
   defp tail(v, n), do: v |> to_string() |> tail(n)
 
+  # ── Checkpoint (vibe coding safety net) ──
+
+  defp dispatch_rpc("git.checkpoint.create", %{"description" => desc}) do
+    desc = String.trim(desc || "")
+    label = if desc == "", do: "checkpoint", else: String.slice(desc, 0, 60)
+
+    case dispatch_rpc("git.diffStat", %{}) do
+      {:ok, %{files: files}} when files != [] ->
+        case git_cmd(["add", "-A"]) do
+          {:ok, _} ->
+            msg = "[checkpoint] " <> label
+            commit_result = git_cmd(["commit", "-m", msg, "--allow-empty"])
+
+            case commit_result do
+              {:ok, out} -> {:ok, %{committed: true, message: msg, output: tail(out, 500)}}
+              {:error, e} -> {:error, {:git_error, to_string(e)}}
+            end
+
+          {:error, e} ->
+            {:error, {:git_error, to_string(e)}}
+        end
+
+      {:ok, _} ->
+        {:error, :nothing_to_checkpoint}
+
+      err ->
+        err
+    end
+  end
+
+  defp dispatch_rpc("git.checkpoint.list", _p) do
+    case git_cmd(["log", "--oneline", "--all", "--grep=[checkpoint]", "-20"]) do
+      {:ok, out} ->
+        checkpoints =
+          out
+          |> String.split("\n", trim: true)
+          |> Enum.map(fn line ->
+            [sha | rest] = String.split(line, " ", parts: 2)
+            msg = Enum.join(rest, " ")
+            desc = msg |> String.replace_prefix("[checkpoint] ", "") |> String.slice(0, 80)
+            %{sha: sha, description: desc}
+          end)
+
+        {:ok, %{checkpoints: checkpoints}}
+
+      {:error, e} ->
+        # 无 commits 的 repo 也算正常
+        {:ok, %{checkpoints: []}}
+    end
+  end
+
+  defp tail(str, n) when is_binary(str) do
+    len = String.length(str)
+
+    if len > n do
+      String.slice(str, len - n, n)
+    else
+      str
+    end
+  end
+
+  defp tail(v, n), do: v |> to_string() |> tail(n)
+
+  # ── Checkpoint (vibe coding safety net) ──
+
+  defp dispatch_rpc("git.checkpoint.create", %{"description" => desc}) do
+    desc = String.trim(desc || "")
+    label = if desc == "", do: "checkpoint", else: String.slice(desc, 0, 60)
+
+    with {:ok, %{files: files}} <- dispatch_rpc("git.diffStat", %{}) do
+      has_changes? = files != []
+
+      staged =
+        if has_changes? do
+          case git_cmd(["add", "-A"]) do
+            {_, 0} -> true
+            _ -> false
+          end
+        end
+
+      cond do
+        not has_changes? ->
+          {:error, :nothing_to_checkpoint}
+
+        has_changes? and staged ->
+          msg = "[checkpoint] " <> label
+          {out, code} = git_cmd(["commit", "-m", msg, "--allow-empty"])
+
+          if code == 0 do
+            {:ok, %{committed: true, message: msg, output: tail(out, 500)}}
+          else
+            {:error, {:git_error, tail(out, 300)}}
+          end
+
+        true ->
+          {:ok, %{committed: false}}
+      end
+    end
+  end
+
+  defp dispatch_rpc("git.checkpoint.list", _p) do
+    case git_cmd(["log", "--oneline", "--all", "--grep=[checkpoint]", "-20"]) do
+      {out, 0} ->
+        checkpoints =
+          out
+          |> String.split("
+", trim: true)
+          |> Enum.map(fn line ->
+            [sha | rest] = String.split(line, " ", parts: 2)
+            msg = Enum.join(rest, " ")
+            desc = msg |> String.replace_prefix("[checkpoint] ", "") |> String.slice(0, 80)
+            %{sha: sha, description: desc}
+          end)
+
+        {:ok, %{checkpoints: checkpoints}}
+
+      {out, _} ->
+        {:error, {:git_error, tail(out, 300)}}
+    end
+  end
+
   defp git_cmd(args) do
     case System.cmd("git", args, stderr_to_stdout: true) do
       {out, 0} -> {:ok, out}
