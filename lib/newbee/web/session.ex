@@ -31,8 +31,8 @@ defmodule Newbee.Web.Session do
     end
   end
 
-  @doc "确保会话存在：resume 已有 session id 或新建。返回 {:ok, pid, sid}。"
-  def ensure(sid \\ nil) do
+  @doc "确保会话存在：resume 已有 session id 或新建。cwd 给定时绑定会话工作目录（仅对新建生效）。返回 {:ok, pid, sid}。"
+  def ensure(sid \\ nil, cwd \\ nil) do
     sid = sid || gen_session_id()
 
     case lookup(sid) do
@@ -40,6 +40,14 @@ defmodule Newbee.Web.Session do
         {:ok, pid, sid}
 
       {:error, :not_found} ->
+        cwd =
+          case cwd && Newbee.Web.Workspace.valid_dir?(cwd) do
+            {:ok, expanded} -> expanded
+            _ -> nil
+          end
+
+        if cwd, do: Newbee.Session.set_cwd(sid, cwd)
+
         case DynamicSupervisor.start_child(Newbee.Web.SessionSup, {__MODULE__, sid}) do
           {:ok, pid} -> {:ok, pid, sid}
           {:error, {:already_started, pid}} -> {:ok, pid, sid}
@@ -100,6 +108,9 @@ defmodule Newbee.Web.Session do
 
   @doc "热切切换：provider + model（WebUI 两级选择用）。"
   def switch_model(pid, provider, model), do: GenServer.call(pid, {:switch_model, provider, model}, 10_000)
+  @doc "热更新思考强度（reasoning_effort）；持久化到会话 meta，重启后保留。"
+  def set_effort(pid, effort), do: GenServer.call(pid, {:set_effort, effort}, 10_000)
+
 
   @doc "当前状态快照（供 HTTP 轮询 / socket 重连对齐）。"
   def state(pid), do: GenServer.call(pid, :state, 5_000)
@@ -138,7 +149,12 @@ defmodule Newbee.Web.Session do
         model -> %{base | model: model}
       end
 
-    # 会话级中断 scope：每个 Web 会话一个，Esc/中断只作用本会话
+    # 会话级思考强度（滑块设置，持久化在会话 meta）
+    client =
+      case Newbee.Session.effort(sid) do
+        nil -> client
+        e -> %{client | reasoning_effort: e}
+      end
     %{client | interrupt_scope: Newbee.LLM.Client.new_interrupt_scope()}
   end
 
@@ -225,7 +241,8 @@ defmodule Newbee.Web.Session do
 
   defp start_kernel(sid, client) do
     sid_opt = sid
-    evaluator = Newbee.Environment.Boot.evaluator_or_fallback(session_id: sid_opt)
+    cwd = Newbee.Session.cwd(sid)
+    evaluator = Newbee.Environment.Boot.evaluator_or_fallback(session_id: sid_opt, cwd: cwd)
 
     render = fn event ->
       kind = elem(event, 0)
@@ -238,6 +255,7 @@ defmodule Newbee.Web.Session do
         client: client,
         evaluator: evaluator,
         session_id: sid_opt,
+        root: cwd,
         auto_antibodies: true,
         render: render
       )
@@ -303,6 +321,40 @@ defmodule Newbee.Web.Session do
   end
 
 
+  @effort_levels ~w(off auto low medium high xhigh max)
+
+  defp normalize_effort(e)
+  defp normalize_effort(e) when is_binary(e) do
+    e = String.downcase(String.trim(e))
+    cond do
+      e in ["", "default", "auto"] -> nil
+      e in @effort_levels -> e
+      true -> nil
+    end
+  end
+
+  defp normalize_effort(_), do: nil
+
+  def handle_call({:set_effort, effort}, _from, st) do
+    # 7 档白名单：off/auto/low/medium/high/xhigh/max。auto(及 default)→nil =
+    # 不发送 reasoning_effort 字段，由 provider 用自身默认推理档
+    effort = normalize_effort(effort)
+    client = %{(st.client || client_for_session(st.sid)) | reasoning_effort: effort}
+    :ok = Newbee.Session.set_effort(st.sid, effort)
+    # busy 时 Loop 的 call 会排队到 turn 结束，10s 超时不视为失败——
+    # 元数据已持久化，重启/下轮都会用新值
+    applied =
+      try do
+        match?(:ok, Newbee.Agent.Loop.switch_model(st.kernel, client))
+      catch
+        :exit, _ -> false
+      end
+
+    broadcast(st.sid, :effort_changed, %{effort: effort, applied: applied})
+    {:reply, {:ok, %{applied: applied}}, %{st | client: client}}
+
+  end
+  # 轻量 busy 探测（peek_busy/1 调用）：只读本地标志，绝不阻塞 turn
   def handle_call(:peek_busy, _from, st), do: {:reply, st.busy, st}
   def handle_call(:state, _from, st) do
     # 只读本地快照：turn 进行中 Loop 的 GenServer.call 会排队超时（state 不该被阻塞）
@@ -318,6 +370,7 @@ defmodule Newbee.Web.Session do
        queued: :queue.len(st.queue),
        provider: provider_of(st),
        model: st.client && st.client.model,
+        effort: st.client && st.client.reasoning_effort,
        usage: usage,
        goal: goal,
        awaiting_permission: Newbee.Agent.Loop.awaiting_permission?(),

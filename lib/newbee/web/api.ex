@@ -64,7 +64,8 @@ get "/health" do
 
         Map.merge(s, %{
           running: running,
-          busy: busy
+          busy: busy,
+          cwd: Newbee.Session.cwd(id)
         })
       end)
 
@@ -78,8 +79,8 @@ get "/health" do
 
   defp dispatch_rpc("session.create", p) do
     sid = p["sessionId"]
-    {:ok, _pid, sid} = Newbee.Web.Session.ensure(blank_to_nil(sid))
-    {:ok, %{sessionId: sid}}
+    {:ok, _pid, sid} = Newbee.Web.Session.ensure(blank_to_nil(sid), blank_to_nil(p["cwd"]))
+    {:ok, %{sessionId: sid, cwd: Newbee.Session.cwd(sid)}}
   end
 
   defp dispatch_rpc("session.resume", %{"sessionId" => sid}) do
@@ -154,6 +155,34 @@ get "/health" do
     end
   end
 
+  defp dispatch_rpc("session.setEffort", %{"sessionId" => sid, "effort" => effort}) do
+    with {:ok, pid} <- find_session(sid) do
+      case Newbee.Web.Session.set_effort(pid, blank_to_nil(effort)) do
+        {:ok, res} -> {:ok, Map.put(res, :effort, blank_to_nil(effort))}
+      end
+    end
+  end
+
+
+  # ── 工作目录域（学 dsh harness：服务端目录浏览 + 新建子目录）──
+
+  defp dispatch_rpc("workspace.home", _p) do
+    {:ok, %{home: System.user_home!(), default: File.cwd!()}}
+  end
+
+  defp dispatch_rpc("workspace.listDir", p) do
+    case Newbee.Web.Workspace.list_dir(p["path"]) do
+      {:ok, listing} -> {:ok, listing}
+      {:error, code, msg} -> {:error, code, msg}
+    end
+  end
+
+  defp dispatch_rpc("workspace.mkdir", %{"path" => parent, "name" => name}) do
+    case Newbee.Web.Workspace.mkdir(parent, name) do
+      {:ok, path} -> {:ok, %{path: path}}
+      {:error, code, msg} -> {:error, code, msg}
+    end
+  end
 
   # 权限回复（server-request 象限的 respond 语义）
   defp dispatch_rpc("respond", %{"sessionId" => sid, "permission" => ok}) do
@@ -655,76 +684,6 @@ get "/health" do
       {:error, e} ->
         # 无 commits 的 repo 也算正常
         {:ok, %{checkpoints: []}}
-    end
-  end
-
-  defp tail(str, n) when is_binary(str) do
-    len = String.length(str)
-
-    if len > n do
-      String.slice(str, len - n, n)
-    else
-      str
-    end
-  end
-
-  defp tail(v, n), do: v |> to_string() |> tail(n)
-
-  # ── Checkpoint (vibe coding safety net) ──
-
-  defp dispatch_rpc("git.checkpoint.create", %{"description" => desc}) do
-    desc = String.trim(desc || "")
-    label = if desc == "", do: "checkpoint", else: String.slice(desc, 0, 60)
-
-    with {:ok, %{files: files}} <- dispatch_rpc("git.diffStat", %{}) do
-      has_changes? = files != []
-
-      staged =
-        if has_changes? do
-          case git_cmd(["add", "-A"]) do
-            {_, 0} -> true
-            _ -> false
-          end
-        end
-
-      cond do
-        not has_changes? ->
-          {:error, :nothing_to_checkpoint}
-
-        has_changes? and staged ->
-          msg = "[checkpoint] " <> label
-          {out, code} = git_cmd(["commit", "-m", msg, "--allow-empty"])
-
-          if code == 0 do
-            {:ok, %{committed: true, message: msg, output: tail(out, 500)}}
-          else
-            {:error, {:git_error, tail(out, 300)}}
-          end
-
-        true ->
-          {:ok, %{committed: false}}
-      end
-    end
-  end
-
-  defp dispatch_rpc("git.checkpoint.list", _p) do
-    case git_cmd(["log", "--oneline", "--all", "--grep=[checkpoint]", "-20"]) do
-      {out, 0} ->
-        checkpoints =
-          out
-          |> String.split("
-", trim: true)
-          |> Enum.map(fn line ->
-            [sha | rest] = String.split(line, " ", parts: 2)
-            msg = Enum.join(rest, " ")
-            desc = msg |> String.replace_prefix("[checkpoint] ", "") |> String.slice(0, 80)
-            %{sha: sha, description: desc}
-          end)
-
-        {:ok, %{checkpoints: checkpoints}}
-
-      {out, _} ->
-        {:error, {:git_error, tail(out, 300)}}
     end
   end
 

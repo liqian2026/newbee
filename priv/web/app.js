@@ -120,7 +120,7 @@ const flow = $("flow");
   function applyTheme(t, persist) {
     document.documentElement.setAttribute("data-theme", t);
     const btn = $("theme-toggle");
-    if (btn) { btn.textContent = t === "light" ? "☾" : "☀"; btn.title = t === "light" ? "切换到暗色" : "切换到亮色"; }
+    if (btn) { btn.innerHTML = t === "light" ? "<svg class=\"ico\" viewBox=\"0 0 24 24\" width=\"15\" height=\"15\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z\"/></svg>" : "<svg class=\"ico\" viewBox=\"0 0 24 24\" width=\"15\" height=\"15\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"4\"/><path d=\"M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4l1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4\"/></svg>"; btn.title = t === "light" ? "切换到暗色" : "切换到亮色"; }
     if (persist) localStorage.setItem("newbee.theme", t);
   }
   function initTheme() {
@@ -614,12 +614,16 @@ case "goal_round": break;
       box.appendChild(empty);
       return;
     }
+    // 同步侧栏当前工作目录标签（renderSessionList 由 loadSessions 全量刷新时调用）
+    const cur = (state.allSessions || []).find((s) => s.id === state.sid);
+    if (cur && typeof updateCwdLabel === "function") updateCwdLabel(cur.cwd || null);
     items.forEach((s) => {
       const item = document.createElement("div");
       item.className = "session-item" + (s.id === state.sid ? " active" : "");
       const title = String(s.title || s.id).replace(/\s+/g, " ").trim().slice(0, 40) || "(未命名)";
       const stCls = s.busy ? "busy" : (s.running ? "online" : "offline");
-      item.innerHTML = `<span class="t"><span class="sess-dot ${stCls}"></span>${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条</span>`;
+      const cwdShort = s.cwd ? (() => { const p = String(s.cwd).replace(/\\$/, ""); return p.split("/").filter(Boolean).pop() || p; })() : null;
+      item.innerHTML = `<span class="t"><span class="sess-dot ${stCls}"></span>${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条${cwdShort ? " · 📂" + escapeHtml(cwdShort) : ""}</span>`;
       item.dataset.sid = s.id;
       item.onclick = (e) => {
         if (e.target.classList.contains("menu-btn")) return; // 点 ⋯ 不切换会话
@@ -762,6 +766,157 @@ case "goal_round": break;
     });
   }
   attachTitleRename($("session-title"));
+  // ── 项目工作目录选择（学习 dsh harness 左侧栏 workspace 语义）──
+  // 打开目录浏览器（Miller 式一层目录 + 面包屑 + 路径编辑 + 新建子目录 + 隐藏开关），
+  // 确认后以该目录新建会话：session.create 传 cwd，服务端绑定并让求值器 cd 过去。
+  const DIR_ICO = {
+    dir: "<svg class=\"ico\" viewBox=\"0 0 24 24\" width=\"15\" height=\"15\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z\"/></svg>",
+    file: "<svg class=\"ico\" viewBox=\"0 0 24 24\" width=\"13\" height=\"13\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z\"/><polyline points=\"3.27 6.96 12 12.01 20.73 6.96\"/><line x1=\"12\" y1=\"22.08\" x2=\"12\" y2=\"12\"/></svg>"
+  };
+  const dirState = { cur: null, hidden: false };
+  async function openDirPicker() {
+    const modal = $("dir-modal");
+    modal.classList.remove("hidden");
+    dirState.cur = null;
+    dirState.hidden = false;
+    $("dir-hidden-toggle").checked = false;
+    $("dir-new-name").value = "";
+    try {
+      const home = await rpc("workspace.home", {});
+      dirState.cur = home.home || "/";
+      renderDirPicker();
+    } catch (err) {
+      line("error", "读取工作目录失败: " + err.message);
+      closeDirPicker();
+    }
+  }
+  function closeDirPicker() {
+    $("dir-modal").classList.add("hidden");
+  }
+  async function dirGo(path) {
+    if (!path) return;
+    try {
+      const listing = await rpc("workspace.listDir", { path });
+      dirState.cur = listing.path;
+      dirState.hidden = $("dir-hidden-toggle").checked;
+      renderDirPicker(listing);
+    } catch (err) {
+      line("error", "浏览目录失败: " + err.message);
+    }
+  }
+  function dirCrumb(listing) {
+    // 面包屑：从根到当前逐段可点
+    const parts = String(listing.path).split(/[\\/]/).filter(Boolean);
+    const home = listing.name === "~" ? listing.path : null;
+    const crumbs = document.createElement("span");
+    crumbs.className = "dir-crumb-space";
+    const mk = (label, path) => {
+      const s = document.createElement("span");
+      s.className = "dir-crumb";
+      s.textContent = label;
+      s.onclick = () => dirGo(path);
+      crumbs.appendChild(s);
+    };
+    if (home) mk("~", listing.path);
+    else {
+      let acc = "";
+      parts.forEach((p, i) => {
+        acc = acc ? acc + "/" + p : "/" + p;
+        mk(i === 0 ? "/" : p, acc);
+      });
+    }
+    return crumbs;
+  }
+  function renderDirPicker(listing) {
+    const box = $("dir-entries");
+    box.innerHTML = "";
+    const showHidden = $("dir-hidden-toggle").checked;
+    const entries = (listing && listing.entries) || [];
+    const parent = listing ? listing.parent : null;
+    if (parent) {
+      const up = document.createElement("div");
+      up.className = "dir-entry dir-up";
+      up.textContent = "…";
+      up.title = parent;
+      up.onclick = () => dirGo(parent);
+      box.appendChild(up);
+    }
+    // 目录优先，文件次之
+    const sorted = entries.slice().sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    sorted.forEach((e) => {
+      if (e.hidden && !showHidden) return;
+      const row = document.createElement("div");
+      row.className = "dir-entry" + (e.kind === "dir" ? " dir-dir" : " dir-file");
+      row.innerHTML = `<span class="dir-ico">${e.kind === "dir" ? DIR_ICO.dir : DIR_ICO.file}</span><span class="dir-name">${escapeHtml(e.name)}</span>`;
+      row.title = e.name;
+      if (e.kind === "dir") {
+        row.onclick = () => dirGo(e.path || (dirState.cur + (dirState.cur.endsWith("/") ? "" : "/") + e.name));
+      } else {
+        row.onclick = () => { /* 文件不可作为工作目录，仅提示 */ };
+      }
+      box.appendChild(row);
+    });
+    // 面包屑 + 路径
+    if (listing) {
+      const crumbs = $("dir-crumbs");
+      crumbs.innerHTML = "";
+      crumbs.appendChild(dirCrumb(listing));
+      const pathInput = $("dir-path");
+      if (pathInput) { pathInput.value = listing.path; pathInput.dataset.cur = listing.path; }
+    }
+  }
+  // 防御式绑定：目录选择器 DOM 缺失时跳过（不拖垮整个 UI 启动块）
+  if ($("dir-modal") && $("new-session-dir")) {
+  $("new-session-dir").addEventListener("click", () => openDirPicker());
+  $("dir-cancel").addEventListener("click", () => closeDirPicker());
+  $("dir-confirm").addEventListener("click", async () => {
+    const picked = dirState.cur;
+    if (!picked) return;
+    closeDirPicker();
+    try {
+      const created = await rpc("session.create", { cwd: picked });
+      updateCwdLabel(created.cwd || picked);
+      await resume(created.sessionId);
+    } catch (err) {
+      line("error", "创建工作目录会话失败: " + err.message);
+    }
+  });
+  $("dir-hidden-toggle").addEventListener("change", () => dirGo(dirState.cur));
+  $("dir-path").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const v = $("dir-path").value.trim();
+      if (v) dirGo(v);
+    }
+  });
+  $("dir-new-name").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("dir-new-btn").click();
+  });
+  $("dir-new-btn").addEventListener("click", async () => {
+    const name = $("dir-new-name").value.trim();
+    const parent = dirState.cur;
+    if (!name || !parent) return;
+    try {
+      const res = await rpc("workspace.mkdir", { path: parent, name });
+      $("dir-new-name").value = "";
+      await dirGo(res.path || parent);
+    } catch (err) {
+      line("error", "新建目录失败: " + err.message);
+    }
+  });
+  // 点遮罩关闭
+  $("dir-modal").addEventListener("mousedown", (e) => {
+    if (e.target === $("dir-modal")) closeDirPicker();
+  });
+  }
+  function updateCwdLabel(cwd) {
+    const label = $("cwd-label");
+    if (!label) return;
+    label.textContent = cwd ? "📂 " + cwd : "";
+    label.title = cwd ? "当前会话工作目录: " + cwd : "";
+  }
 
   // ── 侧栏折叠 ──
   function applySidebar(collapsed, persist) {
@@ -800,6 +955,7 @@ case "goal_round": break;
     const curModel = sessionState.model || "";
     const curProvider = sessionState.provider || "";
     $("model-label").textContent = (curProvider && curModel) ? curProvider + "/" + curModel : (curModel || "(no model)");
+    if (typeof window.__restoreEffort === "function") window.__restoreEffort(sessionState.effort);
     connect();
     loadSessions();
     const firstUser = (hist.messages || []).find(m => m && m.role === "user");
@@ -1198,6 +1354,35 @@ case "goal_round": break;
     const cur = document.documentElement.getAttribute("data-theme") || "dark";
     applyTheme(cur === "light" ? "dark" : "light", true);
   };
+
+  // ── 思考强度段选器（7 档，输入框旁）──
+  const EFFORT_LEVELS = ["off", "auto", "low", "medium", "high", "xhigh", "max"];
+  const effortWrap = $("effort-segments");
+  if (effortWrap) {
+    const renderSegs = (active) => {
+      effortWrap.innerHTML = "";
+      EFFORT_LEVELS.forEach((lv) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "effort-seg" + (lv === active ? " active" : "");
+        b.textContent = lv;
+        b.dataset.level = lv;
+        b.onclick = async () => {
+          renderSegs(lv);
+          if (!state.sid) return;
+          try {
+            await rpc("session.setEffort", { sessionId: state.sid, effort: lv });
+          } catch (err) {
+            line("error", "设置思考强度失败: " + err.message);
+          }
+        };
+        effortWrap.appendChild(b);
+      });
+    };
+    // resume 时按会话恢复选中档（nil → auto）
+    window.__restoreEffort = (effort) => renderSegs(effort || "auto");
+    renderSegs("auto");
+  }
 
   $("send").onclick = send;
   $("attach-btn").onclick = () => $("file-input").click();
@@ -1985,30 +2170,30 @@ case "goal_round": break;
 
   // ── 命令面板 (Command Palette) ──
   const CMD_LIST = [
-    { icon: "📦", name: "/compact", desc: "压缩对话历史", needsArg: false },
-    { icon: "🔀", name: "/diff", desc: "查看当前变更", needsArg: false },
-    { icon: "🤖", name: "/model", desc: "切换模型 (provider/model-id)", needsArg: true },
+    { icon: "▣", name: "/compact", desc: "压缩对话历史", needsArg: false },
+    { icon: "±", name: "/diff", desc: "查看当前变更", needsArg: false },
+    { icon: "◈", name: "/model", desc: "切换模型 (provider/model-id)", needsArg: true },
     { icon: "↩", name: "/undo", desc: "回滚到上一快照", needsArg: false },
-    { icon: "📊", name: "/tokens", desc: "Token 用量详情", needsArg: false },
-    { icon: "🔗", name: "/bindings", desc: "查看绑定变量", needsArg: false },
-    { icon: "📋", name: "/status", desc: "环境状态", needsArg: false },
-    { icon: "🎯", name: "/goal", desc: "设置自主目标", needsArg: true },
-    { icon: "🧬", name: "/evolve", desc: "投递进化需求", needsArg: true },
-    { icon: "🔧", name: "/tools", desc: "查看工具库", needsArg: false },
-    { icon: "🌐", name: "/environment", desc: "环境版本图", needsArg: true },
-    { icon: "📸", name: "/snapshot", desc: "环境快照", needsArg: false },
+    { icon: "#", name: "/tokens", desc: "Token 用量详情", needsArg: false },
+    { icon: "⛓", name: "/bindings", desc: "查看绑定变量", needsArg: false },
+    { icon: "≡", name: "/status", desc: "环境状态", needsArg: false },
+    { icon: "◎", name: "/goal", desc: "设置自主目标", needsArg: true },
+    { icon: "↻", name: "/evolve", desc: "投递进化需求", needsArg: true },
+    { icon: "⚙", name: "/tools", desc: "查看工具库", needsArg: false },
+    { icon: "⌂", name: "/environment", desc: "环境版本图", needsArg: true },
+    { icon: "◉", name: "/snapshot", desc: "环境快照", needsArg: false },
     { icon: "⏪", name: "/rollback", desc: "环境回退", needsArg: true },
-    { icon: "🔐", name: "/permissions", desc: "权限档位", needsArg: true },
+    { icon: "⚿", name: "/permissions", desc: "权限档位", needsArg: true },
     { icon: "⚖", name: "/autonomy", desc: "自治档位", needsArg: true },
-    { icon: "📝", name: "/dump", desc: "环境自画像", needsArg: false },
-    { icon: "📜", name: "/log", desc: "事件日志", needsArg: false },
-    { icon: "✅", name: "/approve", desc: "批准待审变更", needsArg: true },
-    { icon: "❌", name: "/reject", desc: "拒绝待审变更", needsArg: true },
-    { icon: "🔄", name: "/reset", desc: "重置 evaluator", needsArg: false },
-    { icon: "💾", name: "/session", desc: "会话管理", needsArg: true },
-    { icon: "📎", name: "/attach", desc: "接回 daemon", needsArg: false },
+    { icon: "▤", name: "/dump", desc: "环境自画像", needsArg: false },
+    { icon: "☰", name: "/log", desc: "事件日志", needsArg: false },
+    { icon: "✓", name: "/approve", desc: "批准待审变更", needsArg: true },
+    { icon: "✗", name: "/reject", desc: "拒绝待审变更", needsArg: true },
+    { icon: "⟳", name: "/reset", desc: "重置 evaluator", needsArg: false },
+    { icon: "▣", name: "/session", desc: "会话管理", needsArg: true },
+    { icon: "⊕", name: "/attach", desc: "接回 daemon", needsArg: false },
     { icon: "🆕", name: "/new", desc: "新会话", needsArg: false },
-    { icon: "📁", name: "/init", desc: "初始化项目", needsArg: false },
+    { icon: "⌂", name: "/init", desc: "初始化项目", needsArg: false },
   ];
 
   let cmdSelected = 0;

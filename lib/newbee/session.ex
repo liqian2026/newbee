@@ -322,6 +322,32 @@ defmodule Newbee.Session do
   end
 
 
+  @doc "读取该会话绑定的项目工作目录（工作区）；未绑定时返回 nil（沿用全局默认）。"
+  def cwd(id) when is_binary(id) do
+    case metadata(id)["cwd"] do
+      cwd when is_binary(cwd) and cwd != "" -> cwd
+      _ -> nil
+    end
+  end
+
+  @doc "绑定该会话的项目工作目录（WebUI 新建会话时选定）。"
+  def set_cwd(id, cwd) when is_binary(id) and is_binary(cwd) do
+    update_metadata(id, &Map.put(&1, "cwd", cwd))
+  end
+
+  @doc "读取该会话的思考强度（nil = 未设置，用 client 默认）。"
+  def effort(id) when is_binary(id) do
+    case metadata(id)["effort"] do
+      v when is_binary(v) and v != "" -> v
+      _ -> nil
+    end
+  end
+
+  @doc "绑定该会话的思考强度（reasoning_effort）。"
+  def set_effort(id, effort) when is_binary(id) do
+    update_metadata(id, &Map.put(&1, "effort", effort))
+  end
+
   defp update_metadata(id, fun) do
     dir = Path.join(@artifacts, id)
     File.mkdir_p!(dir)
@@ -397,7 +423,8 @@ defmodule Newbee.Session do
               mtime: stat.mtime,
               when_str: when_str(stat.mtime),
               messages: length(msgs),
-              title: custom_title(id) || title(msgs)
+              title: custom_title(id) || title(msgs),
+              cwd: metadata(id)["cwd"]
             }
           ]
 

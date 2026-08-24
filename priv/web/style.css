@@ -343,10 +343,11 @@ body {
   max-width: var(--nb-content-w); margin: 0 auto;
   background: var(--nb-bg-panel); border: 1px solid var(--nb-border);
   border-radius: 20px; padding: 10px 14px;
-  display: flex; gap: 10px; align-items: flex-end;
+  display: flex; flex-direction: column; gap: 6px;
   transition: border-color var(--nb-dur) var(--nb-ease);
 }
 .composer-card:focus-within { border-color: var(--nb-accent); }
+.composer-row { display: flex; gap: 10px; align-items: flex-end; width: 100%; }
 #input {
   flex: 1; background: transparent; color: var(--nb-label-1); border: none;
   font: 15px/24px var(--nb-font); resize: none; max-height: 160px; outline: none;
@@ -1133,10 +1134,11 @@ body {
   max-width: var(--nb-content-w); margin: 0 auto;
   background: var(--nb-bg-panel); border: 1px solid var(--nb-border);
   border-radius: 20px; padding: 10px 14px;
-  display: flex; gap: 10px; align-items: flex-end;
+  display: flex; flex-direction: column; gap: 6px;
   transition: border-color var(--nb-dur) var(--nb-ease);
 }
 .composer-card:focus-within { border-color: var(--nb-accent); }
+.composer-row { display: flex; gap: 10px; align-items: flex-end; width: 100%; }
 #input {
   flex: 1; background: transparent; color: var(--nb-label-1); border: none;
   font: 15px/24px var(--nb-font); resize: none; max-height: 160px; outline: none;
@@ -1375,3 +1377,70 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 15px; }
   cursor: pointer; transition: all .15s;
 }
 .btn-retry:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* ── 项目工作目录选择（dsh DirectoryBrowser 语义）── */
+.session-actions { display: flex; gap: 6px; padding: 0 10px 8px; }
+.session-actions .btn-primary { flex: 1.4; }
+.session-actions .btn-ghost { flex: 1; font-size: 12.5px; }
+.sidebar-foot { padding: 8px 10px; border-top: 1px solid var(--nb-border); display: flex;
+  flex-direction: column; gap: 4px; }
+.cwd-label { font-family: var(--nb-mono); font-size: 11px; color: var(--nb-label-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl;
+  text-align: left; }
+
+.dir-pathbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.dir-crumbs { display: flex; flex-wrap: wrap; gap: 2px; flex: 1;
+  font-family: var(--nb-mono); font-size: 12.5px; color: var(--nb-label-2); min-width: 0; }
+.dir-crumb { padding: 2px 6px; border-radius: 6px; cursor: pointer; transition: background var(--nb-dur); }
+.dir-crumb:hover { background: var(--nb-bg-elev); color: var(--nb-accent-soft); }
+.dir-crumb-space { display: inline-flex; flex-wrap: wrap; gap: 2px; }
+.dir-pathbar input { flex: 0 0 46%; min-width: 130px; }
+.dir-entries { height: min(46vh, 340px); overflow-y: auto; border: 1px solid var(--nb-border);
+  border-radius: 10px; padding: 4px; margin-bottom: 10px; background: var(--nb-bg); }
+.dir-entry { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px;
+  cursor: pointer; font-family: var(--nb-mono); font-size: 12.5px; color: var(--nb-label-2);
+  white-space: nowrap; }
+.dir-entry:hover { background: var(--nb-bg-elev); color: var(--nb-label-1); }
+.dir-entry.dir-dir { color: var(--nb-label-1); }
+.dir-entry.dir-up { justify-content: center; color: var(--nb-label-3); font-size: 16px; }
+.dir-ico { flex: 0 0 auto; }
+.dir-name { overflow: hidden; text-overflow: ellipsis; }
+.dir-create { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.dir-create input { flex: 1; }
+.dir-show-hidden { display: flex; align-items: center; gap: 4px; color: var(--nb-label-3); font-size: 12px;
+  white-space: nowrap; cursor: pointer; }
+
+/* ── 思考强度滑块（composer 输入框旁）── */
+.composer-effort {
+  max-width: var(--nb-content-w); margin: 0 auto 6px;
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  padding: 0 8px;
+}
+
+.effort-label { display: inline-flex; align-items: center; color: var(--fg2); }
+.effort-segments { display: inline-flex; gap: 2px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 2px; overflow-x: auto; max-width: 100%; }
+.effort-seg { border: 0; background: transparent; color: var(--fg2); font: inherit; font-size: 11px; line-height: 1; padding: 4px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.effort-seg:hover { color: var(--fg); background: rgba(128,128,128,.12); }
+.effort-seg.active { background: var(--accent); color: #fff; font-weight: 600; }
+
+/* ── SVG 图标对齐 ── */
+svg.ico {
+  vertical-align: -0.2em;
+  flex-shrink: 0;
+}
+.mc-tab svg.ico,
+.mc-action-btn svg.ico,
+.btn-ghost svg.ico,
+.btn-primary svg.ico,
+.perm-text svg.ico,
+.effort-label svg.ico,
+.dir-entry svg.ico,
+.cwd-label ~ .model-label svg.ico {
+  vertical-align: -0.25em;
+  margin-right: 4px;
+}
+.logo svg.ico {
+  display: block;
+  color: var(--nb-accent);
+}
+

@@ -23,7 +23,9 @@ defmodule Newbee.Agent.Loop do
             compaction_threshold: 0.8,
             compaction_retain: 0.16,
             compaction_max_tokens: 1_024,
-            auto_compact: true
+            auto_compact: true,
+            # 会话工作目录根（WebUI 选定）；nil = 主节点 File.cwd!
+            root: nil
 
   # ── API ──
 
@@ -105,6 +107,7 @@ defmodule Newbee.Agent.Loop do
     client = Keyword.fetch!(opts, :client)
     render = Keyword.get(opts, :render, fn _ -> :ok end)
     evaluator = Keyword.get(opts, :evaluator, Newbee.DEE.Evaluator)
+    root = Keyword.get(opts, :root)
 
     # 会话级隔离：每个会话一个中断 scope（注入 client），evaluator 注册到
     # SessionEvaluators（key = 本 Loop pid），interrupt 只作用本会话。
@@ -169,8 +172,8 @@ defmodule Newbee.Agent.Loop do
 
     prompt =
       case session do
-        nil -> system_prompt()
-        session -> Newbee.Session.system_prompt(session) || Newbee.Session.save_system_prompt(session, system_prompt())
+        nil -> system_prompt(root)
+        session -> Newbee.Session.system_prompt(session) || Newbee.Session.save_system_prompt(session, system_prompt(root))
       end
 
     # 同一 session 的 system prompt 是请求头：首次生成后持久化，恢复时逐字复用。
@@ -206,7 +209,8 @@ defmodule Newbee.Agent.Loop do
        compaction_threshold: Keyword.get(opts, :compaction_threshold, 0.8),
        compaction_retain: Keyword.get(opts, :compaction_retain, 0.16),
        compaction_max_tokens: Keyword.get(opts, :compaction_max_tokens, 1_024),
-       auto_compact: Keyword.get(opts, :auto_compact, true)
+        auto_compact: Keyword.get(opts, :auto_compact, true),
+        root: Keyword.get(opts, :root)
      }}
   end
 
@@ -1463,7 +1467,7 @@ defmodule Newbee.Agent.Loop do
   # 唯一视图构建器是 Environment.Projection：system 基底 + 项目记忆 +
   # RepoMap + 工具价签 + 记忆 Guidance + 绑定摘要 + module_ready/迁移
   # 摘要通知 + 沉睡规则挂载表。Coordinator 未运行时通知/绑定自动跳过。
-  defp system_prompt do
-    Newbee.Environment.Projection.build(%{root: File.cwd!()}).prompt
+  defp system_prompt(root \\ nil) do
+    Newbee.Environment.Projection.build(%{root: root || File.cwd!()}).prompt
   end
 end

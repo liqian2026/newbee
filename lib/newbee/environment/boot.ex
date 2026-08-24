@@ -50,7 +50,7 @@ defmodule Newbee.Environment.Boot do
   调用方（Loop）持有 pid 并注册到 SessionEvaluators。
   """
   def evaluator_or_fallback(opts \\ []) do
-    case Newbee.DEE.Evaluator.start(mode: :node) do
+    case Newbee.DEE.Evaluator.start(mode: :node, cwd: Keyword.get(opts, :cwd)) do
       {:ok, ev} ->
         ev
 

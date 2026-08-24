@@ -11,3 +11,6 @@ newbee-*.tar
 /.newbee/
 .env
 .env.*
+
+# runtime logs
+nohup.out

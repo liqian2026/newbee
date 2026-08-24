@@ -27,7 +27,9 @@ defmodule Newbee.DEE.Evaluator do
             standby_boot: nil,
             restarts: 0,
             boot_error: nil,
-            last_boot_attempt: nil
+            last_boot_attempt: nil,
+            # 会话工作目录（WebUI 选定）：节点 boot 后 cd 过去；nil = 全局默认
+            cwd: nil
 
   @env_deny_prefixes ~w(OPENROUTER_ DEEPSEEK_ ANTHROPIC_ OPENAI_)
   @env_deny_suffixes ~w(_KEY _TOKEN _SECRET)
@@ -91,6 +93,8 @@ defmodule Newbee.DEE.Evaluator do
     mode = Keyword.get(opts, :mode, :node)
     if mode == :node, do: Process.flag(:trap_exit, true)
 
+    # 会话工作目录：boot 后在求值节点上 cd（Fs/Run 工具都以节点 cwd 为根）
+    cwd_opt = Keyword.get(opts, :cwd)
     state =
       case mode do
         :local ->
@@ -103,9 +107,9 @@ defmodule Newbee.DEE.Evaluator do
           # :peer.start_link 的进程）绑进 peer，origin 死则整个 peer BEAM
           # halt（peer.erl origin_link）。所以 spawn_standby_boot 返回的
           # keeper 在 boot 完成后继续存活，直到 peer 死或 evaluator 停。
-          standby_boot = spawn_standby_boot(%__MODULE__{mode: :node})
+          standby_boot = spawn_standby_boot(%__MODULE__{mode: :node, cwd: cwd_opt})
 
-          case boot_node(%__MODULE__{mode: :node}) do
+          case boot_node(%__MODULE__{mode: :node, cwd: cwd_opt}) do
             {:ok, s} ->
               %{s | standby_boot: standby_boot}
 
@@ -372,7 +376,7 @@ defmodule Newbee.DEE.Evaluator do
                   Newbee.DebugLog.log(:boot, "worker up #{inspect(worker)}")
                   Newbee.Environment.Generation.load_active_into(node)
                   # 注意：保留 state.restarts —— maybe_reboot 在 boot 前自增，
-                  # 若这里清零会把重启计数抹掉（restarts >= 1 断言）。
+                  apply_session_cwd(node, state.cwd)
                   {:ok, %{state | peer: peer, node: node, worker: worker, boot_error: nil}}
 
                 bad ->
@@ -407,6 +411,21 @@ defmodule Newbee.DEE.Evaluator do
       :peer.stop(peer)
     catch
       _, _ -> :ok
+    end
+  end
+
+  # 会话工作目录：节点 boot 后 cd 过去（primary/standby 都经 boot_node，重建不丢）。
+  # 失败不致命——降级为全局默认目录继续。
+  defp apply_session_cwd(_node, nil), do: :ok
+
+  defp apply_session_cwd(node, dir) when is_binary(dir) do
+    case :rpc.call(node, File, :cd!, [dir], @rpc_boot_timeout) do
+      :ok ->
+        :ok
+
+      bad ->
+        Newbee.DebugLog.log(:boot, "session cwd cd failed #{inspect(bad)} dir=#{dir}")
+        :ok
     end
   end
 
