@@ -342,17 +342,6 @@ defmodule Newbee.Environment.Coordinator do
     end
   end
 
-  defp check_reevaluable(%Change{} = change, state) do
-    cond do
-      change.status in [:active, :promoted] -> {:error, :already_active}
-      Change.terminal?(change) -> {:error, {:terminal, change.status}}
-      change.candidate_revision == nil -> {:error, :no_candidate}
-      Map.has_key?(state.eval_tasks, change.change_id) -> {:error, :evaluation_in_progress}
-      change.base_revision == state.manifest.revision -> {:error, :base_is_current}
-      true -> :ok
-    end
-  end
-
   # ── activate ──
 
   def handle_call({:activate, change_id, opts}, _from, state) do
@@ -515,6 +504,18 @@ defmodule Newbee.Environment.Coordinator do
        recent_changes: state.changes |> Map.values() |> Enum.sort_by(& &1.created_at, :desc)
      }, state}
   end
+
+  defp check_reevaluable(%Change{} = change, state) do
+    cond do
+      change.status in [:active, :promoted] -> {:error, :already_active}
+      Change.terminal?(change) -> {:error, {:terminal, change.status}}
+      change.candidate_revision == nil -> {:error, :no_candidate}
+      Map.has_key?(state.eval_tasks, change.change_id) -> {:error, :evaluation_in_progress}
+      change.base_revision == state.manifest.revision -> {:error, :base_is_current}
+      true -> :ok
+    end
+  end
+
 
   # ── 评测任务回报（事件驱动状态转换）──
 

@@ -41,7 +41,13 @@ defmodule Newbee.Environment.Projection do
       built_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
 
-    Map.put(view, :prompt, render(view))
+    result = Map.put(view, :prompt, render(view))
+    Newbee.Environment.UsageTracker.observe_plugin("projection.repomap", %{
+      success: view.repomap != "",
+      output_bytes: byte_size(view.repomap),
+      task_type: "projection_build"
+    })
+    result
   end
 
   @doc """

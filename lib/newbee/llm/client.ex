@@ -92,7 +92,10 @@ defmodule Newbee.LLM.Client do
           send(parent, {:stream_chat_result, ref, result})
         end)
 
-      await_stream_chat(worker, monitor, ref, client)
+      started_at = System.monotonic_time(:millisecond)
+      result = await_stream_chat(worker, monitor, ref, client)
+      observe_provider(result, client, started_at, "stream_chat")
+      result
     end
   end
 
@@ -261,11 +264,45 @@ defmodule Newbee.LLM.Client do
       "complete done in #{System.monotonic_time(:millisecond) - t0}ms result=#{elem(result, 0)}"
     )
 
+    observe_provider(result, client, t0, "complete")
     result
   end
 
   defp maybe_put_body(body, _k, nil), do: body
   defp maybe_put_body(body, k, v), do: Map.put(body, k, v)
+  defp observe_provider(result, client, started_at, task_type) do
+    {success, tokens, output_bytes} =
+      case result do
+        {:ok, message, usage} when is_map(message) ->
+          {true, usage_tokens(usage), byte_size(to_string(message["content"] || ""))}
+
+        {:ok, content, %{usage: usage}} when is_binary(content) ->
+          {true, usage_tokens(usage), byte_size(content)}
+
+        _ ->
+          {false, 0, 0}
+      end
+
+    Newbee.Environment.UsageTracker.observe_plugin("provider.openrouter", %{
+      success: success,
+      latency_ms: System.monotonic_time(:millisecond) - started_at,
+      tokens: tokens,
+      output_bytes: output_bytes,
+      model: client.model,
+      task_type: task_type
+    })
+  rescue
+    _ -> :ok
+  end
+
+  defp usage_tokens(usage) when is_map(usage) do
+    usage["total_tokens"] || usage[:total_tokens] ||
+      (usage["prompt_tokens"] || usage[:prompt_tokens] || 0) +
+        (usage["completion_tokens"] || usage[:completion_tokens] || 0)
+  end
+
+  defp usage_tokens(_), do: 0
+
 
   # 429/5xx 过载重试（非流式版，无 SSE drain 需求）
   defp complete_req(req, 0), do: Req.request(req)

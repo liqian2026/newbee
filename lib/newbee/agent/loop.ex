@@ -530,7 +530,7 @@ defmodule Newbee.Agent.Loop do
                     # 沉睡规则命中正文（§4.5 流监控）：注入提醒，模型下轮纠正
                     emit(state, {:rule_hit, hits})
                     # 规则命中热度（§8.5 profiling 输入）
-                    Enum.each(hits, &Newbee.DEE.Rules.hit(&1.id))
+                    Newbee.Environment.UsageTracker.observe_rules(hits)
                     injections = Enum.map_join(hits, "\n", &("- [" <> &1.id <> "] " <> &1.injection))
                     reminder = %{"role" => "system", "content" => "[沉睡规则注入] " <> injections}
 
@@ -686,7 +686,7 @@ defmodule Newbee.Agent.Loop do
                 hits ->
                   emit(state, {:rule_hit, hits})
                   # 规则命中热度（§8.5 profiling 输入）
-                  Enum.each(hits, &Newbee.DEE.Rules.hit(&1.id))
+                  Newbee.Environment.UsageTracker.observe_rules(hits)
                   injections = Enum.map_join(hits, "\n", &("- [" <> &1.id <> "] " <> &1.injection))
 
                   tool_msg = %{
@@ -981,6 +981,12 @@ defmodule Newbee.Agent.Loop do
       end
 
       duration_ms = System.monotonic_time(:millisecond) - tool_started_at
+      Newbee.Environment.UsageTracker.observe_code(code, %{
+        success: eval_result.status == :ok,
+        latency_ms: duration_ms,
+        output_bytes: byte_size(rendered),
+        task_type: "run_elixir"
+      })
       emit(state, {:tool_result, "run_elixir", rendered, duration_ms})
 
       # §12 结构隔离：工具输出是不可信内容，包 envelope（origin/hash/trust）
