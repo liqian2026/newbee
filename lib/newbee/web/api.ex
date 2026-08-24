@@ -457,7 +457,6 @@ defmodule Newbee.Web.Api do
     {:ok, %{events: project_evolution_events(n)}}
   end
 
-<<<<<<< HEAD
   defp dispatch_rpc("evolution.approve", %{"changeId" => change_id}) when is_binary(change_id) do
     case Process.whereis(Newbee.Environment.Coordinator) do
       nil ->
@@ -474,65 +473,6 @@ defmodule Newbee.Web.Api do
         end
     end
   end
-=======
-  defp dispatch_rpc("evolution.trigger", _p) do
-    case Newbee.Host.on_main?() do
-      true ->
-        :ok = Newbee.Daemon.evolve_now()
-        {:ok, %{triggered: true}}
-
-      false ->
-        main = Newbee.Host.main_node()
-
-        if main && Node.ping(main) == :pong do
-          r = :rpc.call(main, Newbee.Daemon, :evolve_now, [])
-          {:ok, %{triggered: r == :ok, node: main}}
-        else
-          {:error, :main_node_unreachable}
-        end
-    end
-  end
-
-  defp dispatch_rpc("evolution.status", _p) do
-    autonomy = Newbee.Environment.Autonomy.get()
-
-    {coord_state, active_releases} =
-      case Process.whereis(Newbee.Environment.Coordinator) do
-        nil ->
-          {:down, []}
-
-        _pid ->
-          try do
-            current = Newbee.Environment.Coordinator.current(Newbee.Environment.Coordinator)
-            changes = Newbee.Environment.Coordinator.changes(Newbee.Environment.Coordinator)
-
-            releases =
-              (current && current.active && Enum.map(current.active, fn {plugin_id, release_id} ->
-                %{
-                  "plugin" => plugin_id,
-                  "release" => release_id,
-                  "kind" => plugin_id |> String.split(".") |> List.first(),
-                  "name" => plugin_id |> String.split(".") |> Enum.drop(1) |> Enum.join(".")
-                }
-              end)) || []
-
-            {%{
-               active_revision: current && current.rev,
-               changes: length(changes),
-               active_count: length(releases)
-             }, releases}
-          rescue
-            _ -> {:error, []}
-          catch
-            :exit, _ -> {:error, []}
-          end
-      end
-
-    # 最近一轮 adapter 运行痕迹：从 EventLog 找最近的 evolution_* 事件
-    recent_evo =
-      Newbee.EventLog.read(50, ["evolution_published", "evolution_rejected"])
-      |> List.first()
->>>>>>> feat(web): manual evolution trigger + offline indicator
 
   defp dispatch_rpc("evolution.approve", _p),
     do: {:error, "invalid_change", "缺少 changeId"}
@@ -753,37 +693,6 @@ defmodule Newbee.Web.Api do
     _ -> {:ok, %{files: []}}
   end
 
-  # ── 文件搜索（@ 引用自动补全）──
-
-  defp dispatch_rpc("files.search", %{"q" => q}) do
-    q = String.trim(q || "")
-
-    if String.length(q) < 1 do
-      {:ok, %{files: []}}
-    else
-      # 用 fd 或 find 搜索项目文件
-      case System.cmd("find", [".", "-type", "f", "-name", "*#{q}*", "-not", "-path", "*/deps/*", "-not", "-path", "*/.git/*", "-not", "-path", "*/_build/*", "-not", "-path", "*/node_modules/*"], stderr_to_stdout: true) do
-        {out, 0} ->
-          files =
-            out
-            |> String.split("\n", trim: true)
-            |> Enum.map(&String.trim_leading(&1, "./"))
-            |> Enum.take(20)
-            |> Enum.map(fn path ->
-              ext = Path.extname(path) |> String.trim_leading(".")
-              %{path: path, ext: ext}
-            end)
-
-          {:ok, %{files: files}}
-
-        _ ->
-          {:ok, %{files: []}}
-      end
-    end
-  rescue
-    _ -> {:ok, %{files: []}}
-  end
-
   # ── 变更影响分析 ──
 
   defp dispatch_rpc("git.impact", _p) do
@@ -947,40 +856,6 @@ defmodule Newbee.Web.Api do
   defp tail(str, n) when is_binary(str) do
     len = String.length(str)
 
-<<<<<<< HEAD
-    if len > n do
-      String.slice(str, len - n, n)
-    else
-      str
-=======
-    case System.cmd(cmd, args, stderr_to_stdout: true) do
-      {out, 0} -> {:ok, %{output: tail(out, 3000), passed: true, cmd: cmd <> " " <> Enum.join(args, " ")}}
-      {out, code} -> {:ok, %{output: tail(out, 3000), passed: false, exit: code, cmd: cmd <> " " <> Enum.join(args, " ")}}
-    end
-  rescue
-    e -> {:error, "test_error", Exception.message(e)}
-  end
-
-  defp dispatch_rpc("git.commit", %{"message" => msg}) do
-    msg = String.trim(msg || "")
-    if msg == "" do
-      {:error, "empty_message", "提交信息不能为空"}
-    else
-      with {:ok, add_out} <- git_cmd(["add", "-A"]),
-           {:ok, commit_out} <- git_cmd(["commit", "-m", msg]) do
-        {:ok, %{output: tail(to_string(add_out) <> to_string(commit_out), 2000), message: msg}}
-      else
-        {:error, err} -> {:error, "git_error", err}
-      end
->>>>>>> fix(core): clean up compiler warnings
-    end
-  end
-
-  defp tail(v, n), do: v |> to_string() |> tail(n)
-
-  defp tail(str, n) when is_binary(str) do
-    len = String.length(str)
-
     if len > n do
       String.slice(str, len - n, n)
     else
@@ -989,127 +864,6 @@ defmodule Newbee.Web.Api do
   end
 
   defp tail(v, n), do: v |> to_string() |> tail(n)
-
-  # ── Checkpoint (vibe coding safety net) ──
-
-  defp dispatch_rpc("git.checkpoint.create", %{"description" => desc}) do
-    desc = String.trim(desc || "")
-    label = if desc == "", do: "checkpoint", else: String.slice(desc, 0, 60)
-
-    case dispatch_rpc("git.diffStat", %{}) do
-      {:ok, %{files: files}} when files != [] ->
-        case git_cmd(["add", "-A"]) do
-          {:ok, _} ->
-            msg = "[checkpoint] " <> label
-            commit_result = git_cmd(["commit", "-m", msg, "--allow-empty"])
-
-            case commit_result do
-              {:ok, out} -> {:ok, %{committed: true, message: msg, output: tail(out, 500)}}
-              {:error, e} -> {:error, {:git_error, to_string(e)}}
-            end
-
-          {:error, e} ->
-            {:error, {:git_error, to_string(e)}}
-        end
-
-      {:ok, _} ->
-        {:error, :nothing_to_checkpoint}
-
-      err ->
-        err
-    end
-  end
-
-  defp dispatch_rpc("git.checkpoint.list", _p) do
-    case git_cmd(["log", "--oneline", "--all", "--grep=[checkpoint]", "-20"]) do
-      {:ok, out} ->
-        checkpoints =
-          out
-          |> String.split("\n", trim: true)
-          |> Enum.map(fn line ->
-            [sha | rest] = String.split(line, " ", parts: 2)
-            msg = Enum.join(rest, " ")
-            desc = msg |> String.replace_prefix("[checkpoint] ", "") |> String.slice(0, 80)
-            %{sha: sha, description: desc}
-          end)
-
-        {:ok, %{checkpoints: checkpoints}}
-
-      {:error, e} ->
-        # 无 commits 的 repo 也算正常
-        {:ok, %{checkpoints: []}}
-    end
-  end
-
-  defp tail(str, n) when is_binary(str) do
-    len = String.length(str)
-
-    if len > n do
-      String.slice(str, len - n, n)
-    else
-      str
-    end
-  end
-
-  defp tail(v, n), do: v |> to_string() |> tail(n)
-
-  # ── Checkpoint (vibe coding safety net) ──
-
-  defp dispatch_rpc("git.checkpoint.create", %{"description" => desc}) do
-    desc = String.trim(desc || "")
-    label = if desc == "", do: "checkpoint", else: String.slice(desc, 0, 60)
-
-    with {:ok, %{files: files}} <- dispatch_rpc("git.diffStat", %{}) do
-      has_changes? = files != []
-
-      staged =
-        if has_changes? do
-          case git_cmd(["add", "-A"]) do
-            {_, 0} -> true
-            _ -> false
-          end
-        end
-
-      cond do
-        not has_changes? ->
-          {:error, :nothing_to_checkpoint}
-
-        has_changes? and staged ->
-          msg = "[checkpoint] " <> label
-          {out, code} = git_cmd(["commit", "-m", msg, "--allow-empty"])
-
-          if code == 0 do
-            {:ok, %{committed: true, message: msg, output: tail(out, 500)}}
-          else
-            {:error, {:git_error, tail(out, 300)}}
-          end
-
-        true ->
-          {:ok, %{committed: false}}
-      end
-    end
-  end
-
-  defp dispatch_rpc("git.checkpoint.list", _p) do
-    case git_cmd(["log", "--oneline", "--all", "--grep=[checkpoint]", "-20"]) do
-      {out, 0} ->
-        checkpoints =
-          out
-          |> String.split("
-", trim: true)
-          |> Enum.map(fn line ->
-            [sha | rest] = String.split(line, " ", parts: 2)
-            msg = Enum.join(rest, " ")
-            desc = msg |> String.replace_prefix("[checkpoint] ", "") |> String.slice(0, 80)
-            %{sha: sha, description: desc}
-          end)
-
-        {:ok, %{checkpoints: checkpoints}}
-
-      {out, _} ->
-        {:error, {:git_error, tail(out, 300)}}
-    end
-  end
 
   defp git_cmd(args) do
     case System.cmd("git", args, stderr_to_stdout: true) do
@@ -1258,6 +1012,9 @@ defmodule Newbee.Web.Api do
 
     %{role: "user", content: text, images: images}
   end
+
+  defp history_msg(%{"role" => "assistant", "done" => true, "content" => c}) when is_binary(c),
+    do: %{role: "done", content: c}
 
   defp history_msg(%{"role" => "assistant"} = m) do
     calls =
