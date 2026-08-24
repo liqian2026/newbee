@@ -720,7 +720,8 @@ defmodule Newbee.Agent.Loop do
 
               case final_check(state) do
                 {:done, state} ->
-                  emit(state, {:done, summary})
+                  # emit(:done) 不发——由 WSession broadcast_turn_end 统一发送
+                  # 避免前端收到两个 done 事件导致渲染两个空圆点
                   # 持久化 done 总结到 transcript（不入 LLM 历史，仅 UI 历史），
                   # 否则刷新后 session.history 读不到最后一条总结
                   if state.session do
