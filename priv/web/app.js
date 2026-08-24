@@ -1262,6 +1262,9 @@ case "goal_round": break;
       if (m.images && m.images.length) renderUserLine(m.content, m.images);
       else line("user", m.content);
     }
+    else if (m.role === "done") {
+      line("done", m.content, true);
+    }
     else if (m.role === "assistant") {
       if (m.reasoning) {
         const d = el("msg-reasoning", "");

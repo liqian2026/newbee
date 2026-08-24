@@ -721,6 +721,15 @@ defmodule Newbee.Agent.Loop do
               case final_check(state) do
                 {:done, state} ->
                   emit(state, {:done, summary})
+                  # 持久化 done 总结到 transcript（不入 LLM 历史，仅 UI 历史），
+                  # 否则刷新后 session.history 读不到最后一条总结
+                  if state.session do
+                    Newbee.Session.append(state.session, %{
+                      "role" => "assistant",
+                      "content" => summary,
+                      "done" => true
+                    })
+                  end
                   # DeepSeek 严格校验：带 tool_calls 的 assistant 后必须跟齐 tool 响应，
                   # 否则下一回合 400（此前 done/ask 从不回填，历史必然悬空）
                   {:halt, {:halt, {:done, summary}, push_msg(state, tool_msg)}}

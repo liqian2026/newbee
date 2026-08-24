@@ -1013,6 +1013,9 @@ defmodule Newbee.Web.Api do
     %{role: "user", content: text, images: images}
   end
 
+  defp history_msg(%{"role" => "assistant", "done" => true, "content" => c}) when is_binary(c),
+    do: %{role: "done", content: c}
+
   defp history_msg(%{"role" => "assistant"} = m) do
     calls =
       for c <- m["tool_calls"] || [],
