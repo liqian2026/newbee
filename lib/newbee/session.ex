@@ -410,7 +410,7 @@ defmodule Newbee.Session do
             {:ok, entries} when is_list(entries) ->
               entries
               |> Enum.filter(&File.regular?(Path.join(@root, "#{&1["id"]}.jsonl")))
-              |> Enum.sort_by(& &1["mtime"], :desc)
+              |> Enum.sort_by(&(&1["created"] || &1["mtime"]), :desc)
               |> Enum.take(n)
 
             _ ->
@@ -455,7 +455,9 @@ defmodule Newbee.Session do
       |> Path.wildcard()
       |> Enum.flat_map(fn fp ->
         case File.stat(fp) do
-          {:ok, stat} -> [%{"id" => Path.basename(fp, ".jsonl"), "mtime" => posix_mtime(stat.mtime)}]
+          {:ok, stat} ->
+            id = Path.basename(fp, ".jsonl")
+            [%{"id" => id, "mtime" => posix_mtime(stat.mtime), "created" => created_from_id(id) || posix_mtime(stat.mtime)}]
           _ -> []
         end
       end)
@@ -463,7 +465,7 @@ defmodule Newbee.Session do
     File.mkdir_p!(@root)
     File.write!(@index, Jason.encode_to_iodata!(entries))
 
-    entries |> Enum.sort_by(& &1["mtime"], :desc)
+    entries |> Enum.sort_by(&(&1["created"] || &1["mtime"]), :desc)
   end
 
   defp touch_index(id) do
@@ -480,10 +482,43 @@ defmodule Newbee.Session do
       end
 
     now = System.system_time(:second)
-    rest = Enum.reject(entries, &(&1["id"] == id))
-    File.write!(@index, Jason.encode_to_iodata!([%{"id" => id, "mtime" => now} | rest]))
+
+    case Enum.find(entries, &(&1["id"] == id)) do
+      nil ->
+        # 新会话：记录创建时间（此后 created 保持不变）
+        File.write!(@index, Jason.encode_to_iodata!([%{"id" => id, "mtime" => now, "created" => now} | entries]))
+
+      existing ->
+        # 已有会话：mtime 刷新，created 保留（缺失时回退 mtime）
+        created = existing["created"] || created_from_id(id) || existing["mtime"] || now
+        rest = Enum.reject(entries, &(&1["id"] == id))
+        File.write!(@index, Jason.encode_to_iodata!([%{"id" => id, "mtime" => now, "created" => created} | rest]))
+    end
   rescue
     _ -> :ok
+  end
+  # 从会话 id 前缀解析创建时间（YYYYMMDD-HHMMSS-xxxx / YYYYMMDD-HHMMSSxxxx），失败返回 nil。
+  # id 前缀是本地时间，需按本地 UTC 偏移换算成 unix 秒（与 System.system_time(:second) 同基准）。
+  defp created_from_id(id) when is_binary(id) do
+    case Regex.run(~r/^(\d{4})(\d{2})(\d{2})[-](\d{2})(\d{2})(\d{2})/, id) do
+      [_, y, mo, d, h, mi, s] ->
+        local =
+          {{String.to_integer(y), String.to_integer(mo), String.to_integer(d)},
+           {String.to_integer(h), String.to_integer(mi), String.to_integer(s)}}
+
+        :calendar.datetime_to_gregorian_seconds(local) -
+          :calendar.datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}}) -
+          utc_offset_seconds()
+
+      _ -> nil
+    end
+  end
+
+  defp created_from_id(_), do: nil
+
+  defp utc_offset_seconds do
+    :calendar.datetime_to_gregorian_seconds(:calendar.local_time()) -
+      :calendar.datetime_to_gregorian_seconds(:calendar.universal_time())
   end
 
   defp posix_mtime(%DateTime{} = dt), do: DateTime.to_unix(dt)
