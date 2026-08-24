@@ -173,7 +173,7 @@ defmodule Newbee.CLI do
 
       input ->
         # 权限确认流（§8 ask 档）：kernel 在等待确认时，输入即 y/n 回复
-        if Newbee.Agent.Loop.awaiting_permission?() do
+        if Newbee.Agent.Loop.awaiting_permission?(kernel) do
           ok = String.trim(input) in ["y", "Y", "yes", "YES"]
           send(kernel, {:permission_reply, ok})
           IO.puts(if ok, do: "✓ 已允许执行", else: "✗ 已拒绝执行")

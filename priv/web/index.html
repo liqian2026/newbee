@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>newbee</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-<link rel="stylesheet" href="/style.css" />
+<link rel="stylesheet" href="/style.css?v=ctx-window-1" />
 </head>
 <body>
 <div id="app">
@@ -13,7 +13,7 @@
 
     <div class="brand">
       <span class="logo"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8.5 5v8L12 21l-8.5-5V8L12 3z"/><path d="M8.5 10.5h7M8.5 13.5h7"/></svg></span><span class="name">newbee</span>
-      <button id="sidebar-toggle" class="icon-btn" title="收起侧栏">⟨</button>
+      <button id="sidebar-toggle" class="icon-btn" title="收起侧栏"><svg class="ico" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="3"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
     </div>
     <div class="session-actions">
       <button id="new-session" class="btn-primary" style="border-radius:12px">+ 新会话</button>
@@ -28,7 +28,7 @@
       <div id="model-label" class="model-label" title="点击切换模型"></div>
     </div>
   </aside>
-  <button id="sidebar-expand" class="sidebar-expand hidden" title="展开侧栏">⟩</button>
+  <button id="sidebar-expand" class="sidebar-expand hidden" title="展开侧栏"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="3"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg></button>
 
   <main id="main">
     <header id="topbar">
@@ -82,7 +82,7 @@
   <aside id="mission-control" class="hidden">
     <div class="mc-head">
       <span class="mc-title">◈ Mission Control</span>
-      <button id="mc-collapse" class="icon-btn" title="收起面板">⟩</button>
+      <button id="mc-collapse" class="icon-btn" title="收起面板"><svg class="ico" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="3"/><path d="M15 3v18"/><path d="m10 9 3 3-3 3"/></svg></button>
     </div>
     <div class="mc-tabs">
       <button class="mc-tab active" data-tab="files" title="文件变更"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 文件</button>
@@ -124,26 +124,54 @@
       <div id="mc-overview-content" class="mc-overview-content"></div>
     </div>
     <div id="mc-evolution" class="mc-pane hidden">
-      <div class="mc-pane-head">
-        <span>环境进化</span>
-        <span style="display:flex;gap:4px">
-          <button id="evo-trigger" class="icon-btn" title="立即运行一轮进化（Adapter 周期）"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> 进化</button>
-          <button id="evo-refresh" class="icon-btn" title="刷新">↻</button>
-        </span>
+      <div class="mc-pane-head evo-pane-head">
+        <div>
+          <strong>环境进化</strong>
+          <span id="evo-engine-state" class="evo-engine-state">正在连接引擎</span>
+        </div>
+        <div class="mc-actions">
+          <button id="evo-trigger" class="mc-action-btn" title="立即让 Adapter 消费信号并运行一轮验证"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>运行一轮</span></button>
+          <button id="evo-refresh" class="icon-btn" title="刷新进化事实">↻</button>
+        </div>
       </div>
-      <div class="evo-status">
-        <div class="evo-status-row"><span class="k">档位</span><span class="v" id="evo-autonomy">-</span></div>
-        <div class="evo-status-row"><span class="k">激活 revision</span><span class="v" id="evo-revision">-</span></div>
-        <div class="evo-status-row"><span class="k">进行中的 change</span><span class="v" id="evo-changes">-</span></div>
-        <div class="evo-status-row"><span class="k">最近进化</span><span class="v" id="evo-last">-</span></div>
-        <div class="evo-status-row"><span class="k">沉睡规则</span><span class="v" id="evo-rules">-</span></div>
-        <div class="evo-status-row"><span class="k">失败抗体</span><span class="v" id="evo-antibodies">-</span></div>
+
+      <div class="evo-overview">
+        <div class="evo-revision-block">
+          <span class="evo-eyebrow">ACTIVE ENVIRONMENT</span>
+          <div class="evo-revision-line"><strong id="evo-revision">r-</strong><span id="evo-revision-health" class="evo-health-pill">检查中</span></div>
+          <span id="evo-autonomy" class="evo-autonomy">-</span>
+        </div>
+        <div class="evo-kpis">
+          <div><strong id="evo-open-count">-</strong><span>开放 Change</span></div>
+          <div><strong id="evo-release-count">-</strong><span>激活 Release</span></div>
+          <div><strong id="evo-signal-count">-</strong><span>待处理信号</span></div>
+        </div>
       </div>
-      <div class="evo-feed-head"><span>Release 效果（使用 · 成功率 · 均耗）</span></div>
-      <div id="evo-releases" class="evo-releases"></div>
-      <div class="evo-feed-head"><span>进化事件流</span></div>
-      <div id="evo-feed" class="evo-feed"></div>
-    </div>
+
+      <div class="evo-loop" aria-label="进化生命周期">
+        <span>信号</span><i>→</i><span>候选</span><i>→</i><span>五层验证</span><i>→</i><span>门控</span><i>→</i><span>Revision</span>
+      </div>
+
+      <section class="evo-section">
+        <div class="evo-section-head"><span>进行中的 Change</span><span id="evo-change-summary" class="evo-section-meta">-</span></div>
+        <div id="evo-changes-list" class="evo-changes-list"></div>
+      </section>
+
+      <section class="evo-section">
+        <div class="evo-section-head"><span>输入信号</span><span class="evo-section-meta">Worker → Adapter</span></div>
+        <div id="evo-signals" class="evo-signals"></div>
+      </section>
+
+      <section class="evo-section">
+        <div class="evo-section-head"><span>Active Release 观测</span><span class="evo-section-meta">使用 · 成功率 · 均耗</span></div>
+        <div id="evo-releases" class="evo-releases"></div>
+      </section>
+
+      <section class="evo-section evo-audit-section">
+        <div class="evo-section-head"><span>不可变事件证据</span><span id="evo-events-size" class="evo-section-meta">-</span></div>
+        <div id="evo-feed" class="evo-feed"></div>
+      </section>
+
   </aside>
 </div>
 <div id="cmd-palette" class="modal hidden">
@@ -180,7 +208,7 @@
     <div class="modal-body" id="confirm-body"></div>
     <div class="modal-actions">
       <button class="btn-ghost" id="confirm-cancel">取消</button>
-      <button class="btn-deny" id="confirm-ok">删除</button>
+      <button class="btn-primary" id="confirm-ok">确认</button>
     </div>
   </div>
 </div>
@@ -209,6 +237,6 @@
   <button data-act="delete" class="danger"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> 删除</button>
 </div>
 
-<script src="/app.js"></script>
+<script src="/app.js?v=reevaluate-idempotent-1"></script>
 </body>
 </html>

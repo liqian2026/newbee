@@ -39,10 +39,78 @@ defmodule Newbee.LLM.Config do
       model: model,
       api_key: expand_env(provider["apiKey"]),
       reasoning_effort: role_cfg["reasoningEffort"],
-      context_window: role_cfg["contextWindow"] || provider["contextWindow"],
+      # 上下文窗口优先级：单模型覆盖（contextWindows.<model>，WebUI 可改）
+      #   > 角色级 contextWindow > provider 级 contextWindow > nil（客户端自动探测）
+      context_window:
+        provider_context_override(provider, model) || role_cfg["contextWindow"] ||
+          provider["contextWindow"],
       vision: Map.get(role_cfg, "vision", Map.get(provider, "vision", true))
     )
   end
+
+  @doc "读取某 provider 下单模型的上下文窗口覆盖值；未设置返回 nil。"
+  def context_window_override(provider_name, model)
+      when is_binary(provider_name) and is_binary(model) do
+    cfg = load()
+    provider_context_override(cfg["providers"][provider_name] || %{}, model)
+  end
+
+  defp provider_context_override(provider, model) when is_map(provider) and is_binary(model) do
+    case provider["contextWindows"] do
+      %{} = map ->
+        case map[model] do
+          n when is_integer(n) and n > 0 -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp provider_context_override(_, _), do: nil
+
+  @doc """
+  设置/清除某 provider 下单模型的上下文窗口覆盖（WebUI 模型弹窗）。
+  n 为正整数时写入 `providers.<name>.contextWindows.<model>`；n 为 nil 时删除覆盖
+  （恢复 provider 元数据自动探测）。provider 不存在返回 {:error, {:unknown_provider, name}}。
+  落盘到当前生效的配置文件（与 set_default_model 同一目标）。
+  """
+  def set_context_window(provider_name, model, n)
+      when is_binary(provider_name) and is_binary(model) and (is_nil(n) or (is_integer(n) and n > 0)) do
+    cfg = load()
+
+    case cfg["providers"][provider_name] do
+      nil ->
+        {:error, {:unknown_provider, provider_name}}
+
+      provider when is_map(provider) ->
+        overrides =
+          case provider["contextWindows"] do
+            %{} = map -> map
+            _ -> %{}
+          end
+
+        overrides =
+          case n do
+            nil -> Map.delete(overrides, model)
+            n -> Map.put(overrides, model, n)
+          end
+
+        provider =
+          if map_size(overrides) == 0 do
+            Map.delete(provider, "contextWindows")
+          else
+            Map.put(provider, "contextWindows", overrides)
+          end
+
+        cfg = put_in(cfg, ["providers", provider_name], provider)
+        write_config!(cfg)
+        :ok
+    end
+  end
+
+  def set_context_window(_, _, n) when not is_nil(n), do: {:error, :bad_context_window}
 
   @doc "WebUI 模型目录：按厂家分组的完整列表 + 当前默认（provider/model）。"
   def model_catalog(opts \\ []) do
@@ -53,7 +121,13 @@ defmodule Newbee.LLM.Config do
       providers_cfg
       |> Task.async_stream(
         fn {name, p} ->
-          %{name: name, models: provider_models(name, p, opts)}
+          %{
+            name: name,
+            models: provider_models(name, p, opts),
+            # 单模型上下文窗口覆盖表（WebUI 可编辑）+ provider 级默认（若有）
+            contextWindows: context_windows_map(p),
+            contextWindow: p["contextWindow"]
+          }
         end,
         max_concurrency: 8,
         timeout: 10_000,
@@ -90,22 +164,29 @@ defmodule Newbee.LLM.Config do
         default = get_in(cfg, ["roles", "default"]) || %{"provider" => provider_name}
         default = default |> Map.put("provider", provider_name) |> Map.put("model", model)
         cfg = put_in(cfg, ["roles", "default"], default)
-
-        target =
-          Enum.find(
-            [
-              System.get_env("NEWBEE_MODEL_JSON"),
-              "model.json",
-              "model.local.json",
-              Path.join([System.user_home!(), ".newbee", "model.json"])
-            ],
-            &(&1 && File.exists?(&1))
-          ) || Path.join(System.user_home!(), ".newbee/model.json")
-
-        File.mkdir_p!(Path.dirname(target))
-        File.write!(target, Jason.encode_to_iodata!(cfg, pretty: true))
+        write_config!(cfg)
         :ok
     end
+  end
+
+  # 当前生效的配置文件路径（找不到则创建 ~/.newbee/model.json）
+  defp config_target do
+    Enum.find(
+      [
+        System.get_env("NEWBEE_MODEL_JSON"),
+        "model.json",
+        "model.local.json",
+        Path.join([System.user_home!(), ".newbee", "model.json"])
+      ],
+      &(&1 && File.exists?(&1))
+    ) || Path.join(System.user_home!(), ".newbee/model.json")
+  end
+
+  defp write_config!(cfg) do
+    target = config_target()
+    File.mkdir_p!(Path.dirname(target))
+    File.write!(target, Jason.encode_to_iodata!(cfg, pretty: true))
+    :ok
   end
 
   # "a/b/c" → {"a", "b/c"}（a 是已知 provider）；"c" → {当前 provider, "c"}
@@ -227,6 +308,19 @@ defmodule Newbee.LLM.Config do
 
   defp static_models(provider) do
     Enum.filter(provider["models"] || [], &is_binary/1)
+  end
+
+  # 只保留正整数覆盖项（配置文件可能被手编辑出脏数据）
+  defp context_windows_map(provider) do
+    case provider["contextWindows"] do
+      %{} = map ->
+        Map.new(map, fn {k, v} -> {to_string(k), v} end)
+        |> Enum.filter(fn {_k, v} -> is_integer(v) and v > 0 end)
+        |> Map.new()
+
+      _ ->
+        %{}
+    end
   end
 
   defp ensure_cache_table do

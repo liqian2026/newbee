@@ -22,7 +22,7 @@ defmodule Newbee.Agent.Worker do
   defdelegate switch_model(loop, client), to: Newbee.Agent.Loop
   defdelegate interrupt(loop), to: Newbee.Agent.Loop
   defdelegate compact(loop), to: Newbee.Agent.Loop
-  defdelegate awaiting_permission?(), to: Newbee.Agent.Loop
+  defdelegate awaiting_permission?(loop), to: Newbee.Agent.Loop
 
   # ── 进化协作（worker 的三条轻量通道，§7.1）──
 

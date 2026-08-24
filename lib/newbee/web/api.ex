@@ -431,33 +431,79 @@ defmodule Newbee.Web.Api do
     end
   end
 
+  # 单模型上下文窗口覆盖：持久化到 model.json 的 providers.<name>.contextWindows，
+  # 并实时推给所有在线会话（provider+model 匹配的热更新 client 与压缩口径）。
+  # contextWindow: 正整数覆盖；nil/""/0 清除覆盖（恢复自动探测）。
+  defp dispatch_rpc("llm.setContextWindow", %{"provider" => provider, "model" => model} = p) do
+    with {:ok, n} <- parse_context_window(p["contextWindow"]),
+         :ok <- Newbee.LLM.Config.set_context_window(provider, model, n) do
+      hot_apply_context_window(provider, model, n)
+      {:ok, %{provider: provider, model: model, contextWindow: n}}
+    else
+      {:error, :bad_context_window} ->
+        {:error, "bad_context_window", "上下文窗口须为正整数（或留空恢复自动）"}
+
+      {:error, {:unknown_provider, name}} ->
+        {:error, "unknown_provider", name}
+    end
+  end
+
+  defp dispatch_rpc("llm.setContextWindow", _p),
+    do: {:error, "bad_request", "缺少 provider / model 参数"}
+
   # 进化域（左侧进化面板数据）
   defp dispatch_rpc("evolution.feed", p) do
-    n = min(max(p["n"] || 100, 1), 500)
-
-    topics = [
-      "evolution_published",
-      "evolution_rejected",
-      "release_observation",
-      "change_activated",
-      "change_rejected",
-      "change_rolled_back",
-      "revision_advanced",
-      "revision_degraded",
-      "snapshot_created",
-      "snapshot_restored",
-      "generation_switched",
-      "generation_switch_failed",
-      "audit"
-    ]
-
-    events =
-      Newbee.EventLog.read(n * 3, topics)
-      |> Enum.take(n)
-      |> Enum.map(&json_safe/1)
-
-    {:ok, %{events: events}}
+    n = min(max(p["n"] || 100, 1), 300)
+    {:ok, %{events: project_evolution_events(n)}}
   end
+
+  defp dispatch_rpc("evolution.approve", %{"changeId" => change_id}) when is_binary(change_id) do
+    case Process.whereis(Newbee.Environment.Coordinator) do
+      nil ->
+        {:error, "coordinator_down", "环境 Coordinator 未运行"}
+
+      _pid ->
+        case Newbee.Environment.Coordinator.approve(
+               Newbee.Environment.Coordinator,
+               change_id,
+               "web:user"
+             ) do
+          :ok -> {:ok, %{approved: true, change_id: change_id}}
+          {:error, reason} -> {:error, "approval_failed", inspect(reason)}
+        end
+    end
+  end
+
+  defp dispatch_rpc("evolution.approve", _p),
+    do: {:error, "invalid_change", "缺少 changeId"}
+
+  defp dispatch_rpc("evolution.reevaluate", %{"changeId" => change_id})
+       when is_binary(change_id) do
+    case Process.whereis(Newbee.Environment.Coordinator) do
+      nil ->
+        {:error, "coordinator_down", "环境 Coordinator 未运行"}
+
+      _pid ->
+        case Newbee.Environment.Coordinator.reevaluate(Newbee.Environment.Coordinator, change_id) do
+          {:ok, change} ->
+            {:ok,
+             %{
+               reevaluating: true,
+               change_id: change.change_id,
+               base_revision: change.base_revision
+             }}
+
+          {:error, :already_active} ->
+            {:ok, %{reevaluating: false, already_active: true, change_id: change_id}}
+
+          {:error, reason} ->
+            {:error, "reevaluation_failed", inspect(reason)}
+        end
+    end
+  end
+
+  defp dispatch_rpc("evolution.reevaluate", _p),
+    do: {:error, "invalid_change", "缺少 changeId"}
 
   defp dispatch_rpc("evolution.trigger", _p) do
     case Newbee.Host.on_main?() do
@@ -479,85 +525,50 @@ defmodule Newbee.Web.Api do
 
   defp dispatch_rpc("evolution.status", _p) do
     autonomy = Newbee.Environment.Autonomy.get()
+    {coord_state, active_releases, changes} = evolution_coordinator_state(autonomy)
 
-    {coord_state, active_releases} =
-      case Process.whereis(Newbee.Environment.Coordinator) do
-        nil ->
-          {:down, []}
-
-        _pid ->
-          try do
-            current = Newbee.Environment.Coordinator.current(Newbee.Environment.Coordinator)
-            changes = Newbee.Environment.Coordinator.changes(Newbee.Environment.Coordinator)
-
-            releases =
-              (current && current.active &&
-                 Enum.map(current.active, fn {plugin_id, release_id} ->
-                   %{
-                     "plugin" => plugin_id,
-                     "release" => release_id,
-                     "kind" => plugin_id |> String.split(".") |> List.first(),
-                     "name" => plugin_id |> String.split(".") |> Enum.drop(1) |> Enum.join(".")
-                   }
-                 end)) || []
-
-            {%{
-               active_revision: current && current.rev,
-               changes: length(changes),
-               active_count: length(releases)
-             }, releases}
-          rescue
-            _ -> {:error, []}
-          catch
-            :exit, _ -> {:error, []}
-          end
-      end
-
-    # 最近一轮 adapter 运行痕迹：从 EventLog 找最近的 evolution_* 事件
-    recent_evo =
-      Newbee.EventLog.read(50, ["evolution_published", "evolution_rejected"])
-      |> List.first()
-
-    # 每个 release 的使用统计（fitness 聚合）
     release_stats =
       active_releases
-      |> Enum.map(fn rel ->
-        rid = rel["release"]
-
-        obs =
-          try do
-            Newbee.Environment.Fitness.observations(rid)
-          rescue
-            _ -> []
-          catch
-            :exit, _ -> []
-          end
-
-        n = length(obs)
-
-        if n > 0 do
-          succ = Enum.count(obs, & &1["success"])
-          avg_tok = obs |> Enum.map(&(&1["tokens"] || 0)) |> Enum.sum() |> div(max(n, 1))
-
-          Map.merge(rel, %{
-            "uses" => n,
-            "success_rate" => Float.round(succ / n, 2),
-            "avg_tokens" => avg_tok
-          })
-        else
-          Map.merge(rel, %{"uses" => 0})
-        end
-      end)
-      # 按使用次数倒序
+      |> Enum.map(&release_with_fitness/1)
       |> Enum.sort_by(&(-Map.get(&1, "uses", 0)))
+
+    pending_signals =
+      try do
+        Newbee.Agent.Protocol.pending_needs()
+        |> Enum.take(-20)
+        |> Enum.reverse()
+        |> Enum.map(fn signal ->
+          payload = signal["payload"] || %{}
+
+          %{
+            "id" => signal["message_id"],
+            "capability" => payload["capability"],
+            "evidence" => payload["evidence"],
+            "urgency" => payload["urgency"],
+            "created_at" => signal["created_at"]
+          }
+        end)
+      rescue
+        _ -> []
+      end
+
+    recent_evo = project_evolution_events(1) |> List.first()
 
     {:ok,
      %{
        autonomy: autonomy,
+       autonomy_label: autonomy_label(autonomy),
        coordinator: json_safe(coord_state),
+       changes: json_safe(changes),
+       pending_signals: json_safe(pending_signals),
        active_releases: json_safe(release_stats),
        last_evolution: json_safe(recent_evo),
-       event_log_bytes: Newbee.EventLog.size()
+       engine: %{
+         coordinator_online: Process.whereis(Newbee.Environment.Coordinator) != nil,
+         daemon_online: Process.whereis(Newbee.Daemon) != nil,
+         event_store_bytes: project_event_store_size(),
+         event_log_bytes: Newbee.EventLog.size()
+       }
      }}
   end
 
@@ -658,7 +669,9 @@ defmodule Newbee.Web.Api do
                "-not",
                "-path",
                "*/node_modules/*"
-             ], stderr_to_stdout: true) do
+             ],
+             stderr_to_stdout: true
+           ) do
         {out, 0} ->
           files =
             out
@@ -906,6 +919,35 @@ defmodule Newbee.Web.Api do
 
   # ── helpers ──
 
+  # llm.setContextWindow 参数解析：nil/""/0 → 清除覆盖；正整数（或数字串）→ 覆盖值；其余拒绝
+  defp parse_context_window(nil), do: {:ok, nil}
+  defp parse_context_window(""), do: {:ok, nil}
+  defp parse_context_window(0), do: {:ok, nil}
+  defp parse_context_window(n) when is_integer(n) and n > 0, do: {:ok, n}
+
+  defp parse_context_window(s) when is_binary(s) do
+    case Integer.parse(String.trim(s)) do
+      {n, ""} when n > 0 -> {:ok, n}
+      {0, ""} -> {:ok, nil}
+      _ -> {:error, :bad_context_window}
+    end
+  end
+
+  defp parse_context_window(_), do: {:error, :bad_context_window}
+
+  # 上下文窗口覆盖推给所有在线 Web 会话；会话进程自己判断 provider/model 是否匹配
+  defp hot_apply_context_window(provider, model, n) do
+    Newbee.Web.SessionRegistry
+    |> Registry.select([{{:_, :"$1", :_}, [], [:"$1"]}])
+    |> Enum.each(fn pid ->
+      GenServer.cast(pid, {:hot_context_window, provider, model, n})
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   defp find_session(sid) do
     case Newbee.Web.Session.ensure(sid) do
       {:ok, pid, _sid} -> {:ok, pid}
@@ -1014,6 +1056,244 @@ defmodule Newbee.Web.Api do
     |> put_resp_header("access-control-allow-origin", "*")
     |> send_resp(status, body)
   end
+
+  defp evolution_coordinator_state(autonomy) do
+    case Process.whereis(Newbee.Environment.Coordinator) do
+      nil ->
+        {:down, [], []}
+
+      _pid ->
+        try do
+          current = Newbee.Environment.Coordinator.current(Newbee.Environment.Coordinator)
+          raw_changes = Newbee.Environment.Coordinator.changes(Newbee.Environment.Coordinator)
+          revisions = Newbee.Environment.Coordinator.revisions(Newbee.Environment.Coordinator)
+
+          releases =
+            Enum.map(current.active || %{}, fn {plugin_id, release_id} ->
+              %{
+                "plugin" => plugin_id,
+                "release" => release_id,
+                "kind" => plugin_id |> String.split(".") |> List.first(),
+                "name" => plugin_id |> String.split(".") |> Enum.drop(1) |> Enum.join(".")
+              }
+            end)
+
+          changes =
+            raw_changes
+            |> Enum.sort_by(&(&1.updated_at || &1.created_at || ""), :desc)
+            |> Enum.map(&evolution_change(&1, autonomy, current.revision))
+
+          status_counts = Enum.frequencies_by(changes, & &1["derived_status"])
+          open_count = Enum.count(changes, &(not &1["terminal"]))
+
+          coord = %{
+            active_revision: current.revision,
+            checkpoint: current.checkpoint,
+            active_count: length(releases),
+            change_count: length(changes),
+            open_count: open_count,
+            status_counts: status_counts,
+            degraded: current.degraded || [],
+            revisions: Enum.take(revisions, -8) |> Enum.reverse() |> json_safe()
+          }
+
+          {coord, releases, changes}
+        rescue
+          _ -> {:error, [], []}
+        catch
+          :exit, _ -> {:error, [], []}
+        end
+    end
+  end
+
+  defp evolution_change(change, autonomy, active_revision) do
+    evaluation = change.evaluation_result || %{}
+    passed = truthy?(evaluation["passed"] || evaluation[:passed])
+
+    stale =
+      not Newbee.Environment.Change.terminal?(change) and change.candidate_revision != nil and
+        change.base_revision != active_revision
+
+    derived =
+      if stale, do: "stale_base", else: derived_change_status(change.status, autonomy, passed)
+
+    %{
+      "change_id" => change.change_id,
+      "status" => to_string(change.status),
+      "derived_status" => derived,
+      "status_label" => change_status_label(derived),
+      "terminal" => Newbee.Environment.Change.terminal?(change),
+      "can_approve" => derived == "awaiting_approval",
+      "can_reevaluate" => derived == "stale_base",
+      "next_action" => change_next_action(derived),
+      "reason" => change.reason,
+      "author" => to_string(change.author_agent),
+      "base_revision" => change.base_revision,
+      "candidate_release" => change.candidate_revision,
+      "release_id" =>
+        evaluation["release_id"] || evaluation[:release_id] || change.candidate_revision,
+      "plugin_id" => evaluation["plugin_id"] || evaluation[:plugin_id],
+      "ring" => evaluation["ring"] || evaluation[:ring],
+      "evidence" => change.evidence,
+      "evaluation" => %{
+        "passed" => passed,
+        "evaluated_at" => evaluation["evaluated_at"] || evaluation[:evaluated_at],
+        "failed_layers" => evaluation["failed_layers"] || evaluation[:failed_layers] || [],
+        "layers" => evaluation_layers(evaluation["layers"] || evaluation[:layers] || %{})
+      },
+      "created_at" => change.created_at,
+      "updated_at" => change.updated_at,
+      "deadline" => change.deadline
+    }
+  end
+
+  defp evaluation_layers(layers) do
+    for {key, label} <- [
+          {"static", "静态检查"},
+          {"deterministic", "确定性测试"},
+          {"counterfactual", "反事实回放"},
+          {"usage", "真实使用"},
+          {"longitudinal", "长期表现"}
+        ] do
+      result = layers[key] || layers[String.to_atom(key)] || %{}
+      skipped = truthy?(result["skipped"] || result[:skipped])
+      sufficient = result["sufficient"] || result[:sufficient]
+
+      status =
+        cond do
+          map_size(result) == 0 -> "pending"
+          skipped -> "skipped"
+          key == "usage" and sufficient in [false, "false"] -> "observing"
+          truthy?(result["passed"] || result[:passed]) -> "passed"
+          true -> "failed"
+        end
+
+      %{
+        "key" => key,
+        "label" => label,
+        "status" => status,
+        "samples" => result["samples"] || result[:samples],
+        "replayed" => result["replayed"] || result[:replayed],
+        "reason" => result["reason"] || result[:reason]
+      }
+    end
+  end
+
+  defp derived_change_status(:canary, :manual, true), do: "awaiting_approval"
+  defp derived_change_status(:canary, :observe, _), do: "suggestion_ready"
+  defp derived_change_status(status, _, _), do: to_string(status)
+
+  defp change_status_label("awaiting_approval"), do: "验证通过 · 等待批准"
+  defp change_status_label("suggestion_ready"), do: "建议已就绪"
+  defp change_status_label("stale_base"), do: "基线已过期"
+  defp change_status_label("building"), do: "正在合成候选"
+  defp change_status_label("evaluating"), do: "正在验证"
+  defp change_status_label("canary"), do: "Canary 观察中"
+  defp change_status_label("active"), do: "已激活"
+  defp change_status_label("promoted"), do: "已晋升"
+  defp change_status_label("rejected"), do: "已拒绝"
+  defp change_status_label("degraded"), do: "已退化"
+  defp change_status_label("rolled_back"), do: "已回退"
+  defp change_status_label(status), do: status
+
+  defp change_next_action("awaiting_approval"), do: "人工批准后生成新 revision"
+  defp change_next_action("suggestion_ready"), do: "observe 档位仅记录建议，不激活"
+  defp change_next_action("stale_base"), do: "active revision 已推进；需在新基线上重新评测"
+  defp change_next_action("building"), do: "候选构建完成后进入五层验证"
+  defp change_next_action("evaluating"), do: "确定性门与回放必须通过"
+  defp change_next_action("canary"), do: "继续收集 canary 使用证据"
+  defp change_next_action("active"), do: "持续观测效果，退化时可回退"
+  defp change_next_action("promoted"), do: "持续观测长期表现"
+  defp change_next_action("rejected"), do: "候选未越过验证门，不影响 active 环境"
+  defp change_next_action("degraded"), do: "等待回退到已知良好 revision"
+  defp change_next_action("rolled_back"), do: "已恢复已知良好 revision"
+  defp change_next_action(_), do: "等待下一条生命周期事件"
+
+  defp release_with_fitness(rel) do
+    observations =
+      try do
+        Newbee.Environment.Fitness.observations(rel["release"])
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    count = length(observations)
+
+    if count == 0 do
+      Map.merge(rel, %{"uses" => 0})
+    else
+      successes = Enum.count(observations, &truthy?(&1["success"]))
+      avg_tokens = observations |> Enum.map(&(&1["tokens"] || 0)) |> Enum.sum() |> div(count)
+      avg_latency = observations |> Enum.map(&(&1["latency_ms"] || 0)) |> Enum.sum() |> div(count)
+
+      Map.merge(rel, %{
+        "uses" => count,
+        "success_rate" => Float.round(successes / count, 2),
+        "avg_tokens" => avg_tokens,
+        "avg_latency_ms" => avg_latency
+      })
+    end
+  end
+
+  defp project_evolution_events(n) do
+    prefixes = ["change_", "revision_", "release_", "generation_", "snapshot_", "evaluation_"]
+
+    project_event_tail()
+    |> Enum.filter(fn event ->
+      Enum.any?(prefixes, &String.starts_with?(event["topic"] || "", &1))
+    end)
+    |> Enum.take(-n)
+    |> Enum.reverse()
+    |> Enum.map(fn event ->
+      %{
+        "id" => event["id"],
+        "topic" => event["topic"],
+        "event" => event["data"],
+        "at" => event["at"],
+        "source" => "project_event_store"
+      }
+    end)
+  end
+
+  defp project_event_tail do
+    path = Newbee.Environment.Store.path(:events)
+
+    with {:ok, stat} <- File.stat(path),
+         {:ok, io} <- File.open(path, [:read, :binary]) do
+      bytes = min(stat.size, 4_000_000)
+      start = stat.size - bytes
+      {:ok, body} = :file.pread(io, start, bytes)
+      File.close(io)
+
+      body
+      |> String.split("\n", trim: true)
+      |> then(fn lines -> if start > 0, do: Enum.drop(lines, 1), else: lines end)
+      |> Enum.flat_map(fn line ->
+        case Jason.decode(line) do
+          {:ok, event} -> [event]
+          _ -> []
+        end
+      end)
+    else
+      _ -> []
+    end
+  end
+
+  defp project_event_store_size do
+    case File.stat(Newbee.Environment.Store.path(:events)) do
+      {:ok, stat} -> stat.size
+      _ -> 0
+    end
+  end
+
+  defp autonomy_label(:observe), do: "观察 · 只产出建议"
+  defp autonomy_label(:manual), do: "人工门控 · 验证后批准"
+  defp autonomy_label(:autonomous), do: "自主 · 过门后自动激活"
+  defp autonomy_label(:emergency_stop), do: "紧急停止 · 仅允许回退"
+
+  defp truthy?(value), do: value in [true, "true", 1, "1"]
 
   # JSON 安全化（atom key / datetime / tuple）
   defp json_safe(%{__struct__: _} = v), do: v |> Map.from_struct() |> json_safe()

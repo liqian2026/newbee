@@ -2,6 +2,8 @@
  * 信道：REST RPC（POST /api/<method>）+ WebSocket 事件下行（/ws?session=）。 */
 (() => {
   const ICO_FOLDER = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px"><path d="M3 8V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"/><path d="M3 8l2.4 9.1A2 2 0 0 0 7.3 19h12.2a1 1 0 0 0 1-1.3L18 11H5L3 8z"/></svg>';
+  const ICO_SIDEBAR_COLLAPSE = '<svg class="ico" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="3"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg>';
+  const ICO_SIDEBAR_EXPAND = '<svg class="ico" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="3"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg>';
   // ── Markdown 渲染器（零依赖，覆盖 newbee.Markdown 同语法集，输出安全 HTML）──
   // 语法：ATX 标题、围栏代码块、引用、无序/有序/任务列表、水平线、表格、
   // 行内 **bold** *italic* `code` [text](url) ~~del~~。全部经 escapeHtml 防注入。
@@ -369,6 +371,8 @@ case "done": finishTurn(); line("done", p.summary, true); break;
       case "usage": setUsage(p.usage); break;
       case "compacted": line("notice", `历史已压缩 ${p.count} 条`); break;
       case "model_switched": $("model-label").textContent = p.model; break;
+      // 上下文窗口覆盖热更新（当前会话模型匹配时服务端推送）：顶栏用量标签立即反映新值
+      case "context_window_changed": refreshStats(); break;
       case "goal_start": line("notice", `目标开始: ${p.text}`); break;
       case "goal_done": line("notice", `目标达成: ${p.summary || ""}`); break;
       case "goal_cancelled": line("notice", `目标取消 (${p.reason || ""})`); break;
@@ -820,14 +824,20 @@ case "goal_round": break;
           }
           await loadSessions();
         } catch (err) { line("error", "删除失败: " + err.message); }
-      });
+      }, { confirmLabel: "删除", confirmClass: "btn-deny" });
     }
   });
 
   // ── 确认弹窗 ──
   let confirmCb = null;
-  function confirmDialog(text, cb) {
+  function confirmDialog(text, cb, options = {}) {
+    const ok = $("confirm-ok");
+    const confirmClass = ["btn-primary", "btn-allow", "btn-deny"].includes(options.confirmClass)
+      ? options.confirmClass
+      : "btn-primary";
     $("confirm-body").textContent = text;
+    ok.textContent = options.confirmLabel || "确认";
+    ok.className = confirmClass;
     $("confirm-modal").classList.remove("hidden");
     confirmCb = cb;
   }
@@ -1041,7 +1051,7 @@ case "goal_round": break;
     document.getElementById("app").classList.toggle("sidebar-collapsed", collapsed);
     $("sidebar-expand").classList.toggle("hidden", !collapsed);
     const tog = $("sidebar-toggle");
-    if (tog) tog.textContent = collapsed ? "⟩" : "⟨";
+    if (tog) tog.innerHTML = collapsed ? ICO_SIDEBAR_EXPAND : ICO_SIDEBAR_COLLAPSE;
     if (persist) localStorage.setItem("newbee.sidebar", collapsed ? "1" : "0");
   }
   function initSidebar() {
@@ -1059,16 +1069,43 @@ case "goal_round": break;
     renderSessionList();
   });
 
+  // 流式渲染状态（streamAcc / currentAssistant / currentReasoning / currentTool）
+  // 是全局单份、挂在「当前屏幕」上的：切会话只清 flow.innerHTML 而不重置它们，
+  // 旧会话流式途中切走，新会话的 delta 会接着写进旧会话遗留的 buffer/节点，
+  // 两个会话的输出混在一起。切会话前必须整体复位。
+  function resetStreamState() {
+    streamAcc = "";
+    if (streamRaf) { cancelAnimationFrame(streamRaf); streamRaf = 0; }
+    if (reasoningRaf) { cancelAnimationFrame(reasoningRaf); reasoningRaf = 0; }
+    state.currentAssistant = null;
+    state.currentReasoning = null;
+    state.currentTool = null;
+    state.currentToolCard = null;
+  }
+
+  // resume 代次守卫：快速连切会话时多个 resume() 并发交错，
+  // 晚返回的旧 resume 会把上一个会话的历史/状态渲染进新会话的 flow。
+  // 每次 resume 递增序号，await 返回后序号或 sid 已变则直接丢弃后续渲染。
+  let resumeSeq = 0;
+
   async function resume(sid) {
+    const seq = ++resumeSeq;
+    const stale = () => seq !== resumeSeq || state.sid !== sid;
     state.sid = sid;
     localStorage.setItem("newbee.sid", sid);
     loadTiming(sid);
+    resetStreamState();
+    // 权限条是 flow 之外的独立 DOM：切会话必须先收起，否则 A 的确认请求
+    // 挂在 B 的界面上，用户一点就把回复发给了错误的会话
+    hidePermission();
     flow.innerHTML = "";
     await rpc("session.resume", { sessionId: sid });
+    if (stale()) return;
     const [hist, sessionState] = await Promise.all([
       rpc("session.history", { sessionId: sid }),
       rpc("session.state", { sessionId: sid }),
     ]);
+    if (stale()) return;
     renderHistory(hist.messages || []);
     const hasUserMessage = (hist.messages || []).some(m => m && m.role === "user");
     state.hasPrompted = hasUserMessage;
@@ -1083,6 +1120,8 @@ case "goal_round": break;
     state.cwd = sessionState.cwd || null;
     // 同步会话忙碌状态：切到正在跑任务的会话时，UI 立即反映（中断/转向按钮、busy 圆点）
     setBusy(sessionState.busy === true);
+    // 切回正在等待权限确认的会话时恢复确认条（permission_ask 事件在切走期间已错过）
+    if (sessionState.awaiting_permission === true) showPermission("该会话正在等待权限确认（代码执行请求）");
     connect();
     loadSessions();
     const firstUser = (hist.messages || []).find(m => m && m.role === "user");
@@ -1118,14 +1157,13 @@ case "goal_round": break;
       try { state.ws.close(); } catch (e) {}
       state.ws = null;
     }
+    resumeSeq++; // 作废旧会话可能仍在途的 resume()，防止其晚到后覆盖新会话 UI
     state.sid = sid;
     localStorage.setItem("newbee.sid", sid);
     state.busy = false;
     state.hasPrompted = false;
     state.titleDirty = false;
-    state.currentAssistant = null;
-    state.currentReasoning = null;
-    state.currentTool = null;
+    resetStreamState();
     flow.innerHTML = "";
     renderWelcome();
     $("session-title").textContent = "新会话";
@@ -1449,13 +1487,33 @@ case "goal_round": break;
       pbox.appendChild(po);
     });
 
+    // 上下文窗口显示文案：单模型覆盖 > provider 级默认 > auto（自动探测）
+    const ctxLabel = (p, m) => {
+      const ov = (p.contextWindows || {})[m];
+      if (ov) return fmtContext(ov);
+      if (p.contextWindow) return fmtContext(p.contextWindow);
+      return "auto";
+    };
+
     function renderModels(p) {
       mbox.innerHTML = "";
       (p.models || []).forEach((m) => {
         const o = document.createElement("div");
         const isSel = (p.name === pending.provider) && (m === pending.model);
         o.className = "model-opt" + (isSel ? " current" : "");
-        o.textContent = m;
+        const nameEl = document.createElement("span");
+        nameEl.className = "model-name";
+        nameEl.textContent = m;
+        o.appendChild(nameEl);
+        // 上下文窗口 chip：点击就地编辑（不触发选中）；覆盖过的高亮
+        const ov = (p.contextWindows || {})[m];
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "ctx-chip" + (ov ? " set" : "");
+        chip.title = "上下文窗口：" + ctxLabel(p, m) + "（点击修改，实时生效）";
+        chip.textContent = "⬡ " + ctxLabel(p, m);
+        chip.onclick = (e) => { e.stopPropagation(); openCtxEditor(p, m, o); };
+        o.appendChild(chip);
         o.onclick = () => {
           mbox.querySelectorAll(".model-opt").forEach((x) => x.classList.remove("current"));
           o.classList.add("current");
@@ -1463,6 +1521,53 @@ case "goal_round": break;
         };
         mbox.appendChild(o);
       });
+    }
+
+    // 行内上下文编辑器：输入 128000 / 128K / 1M；Enter 保存，Esc 取消；留空/「自动」= 清除覆盖
+    function openCtxEditor(p, m, rowEl) {
+      mbox.querySelectorAll(".ctx-editor").forEach((x) => x.remove());
+      const ed = document.createElement("div");
+      ed.className = "ctx-editor";
+      const inp = document.createElement("input");
+      inp.type = "text";
+      inp.spellcheck = false;
+      inp.placeholder = "如 128000 / 128K / 1M，留空=自动";
+      const cur = (p.contextWindows || {})[m];
+      if (cur) inp.value = String(cur);
+      const okBtn = document.createElement("button");
+      okBtn.type = "button"; okBtn.className = "ctx-save"; okBtn.textContent = "保存";
+      const autoBtn = document.createElement("button");
+      autoBtn.type = "button"; autoBtn.className = "ctx-auto"; autoBtn.textContent = "自动";
+      ed.appendChild(inp); ed.appendChild(okBtn); ed.appendChild(autoBtn);
+      rowEl.after(ed);
+      inp.focus(); inp.select();
+
+      const close = () => ed.remove();
+      const save = async (raw) => {
+        const val = String(raw == null ? "" : raw).trim();
+        const n = parseCtx(val);
+        if (val !== "" && !n) { line("error", "上下文大小无效: " + val); return; }
+        try {
+          await rpc("llm.setContextWindow", { sessionId: state.sid, provider: p.name, model: m, contextWindow: n });
+        } catch (e) { line("error", "设置上下文失败: " + e.message); return; }
+        p.contextWindows = p.contextWindows || {};
+        if (n) p.contextWindows[m] = n; else delete p.contextWindows[m];
+        // 就地更新 chip（不重建列表，保留滚动位置与选中态）
+        const chip = rowEl.querySelector(".ctx-chip");
+        if (chip) {
+          chip.textContent = "⬡ " + ctxLabel(p, m);
+          chip.classList.toggle("set", !!n);
+          chip.title = "上下文窗口：" + ctxLabel(p, m) + "（点击修改，实时生效）";
+        }
+        close();
+        line("notice", `${p.name}/${m} 上下文窗口 ${n ? "→ " + fmtContext(n) : "恢复自动"}（实时生效）`);
+      };
+      okBtn.onclick = () => save(inp.value);
+      autoBtn.onclick = () => save("");
+      inp.onkeydown = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); save(inp.value); }
+        if (e.key === "Escape") { e.preventDefault(); close(); }
+      };
     }
 
     const def = providers.find((p) => p.name === curProvider) || providers[0];
@@ -1489,7 +1594,10 @@ case "goal_round": break;
         refreshBtn.disabled = true;
         try {
           const r = await rpc("llm.providerModels", { sessionId: state.sid, provider: currentProvider, refresh: true });
-          const updated = providerData.get(currentProvider) || { name: currentProvider };
+          // 优先复用目录里的 provider 对象（保留 contextWindows/contextWindow 覆盖数据）
+          const updated = providerData.get(currentProvider)
+            || providers.find((x) => x && x.name === currentProvider)
+            || { name: currentProvider };
           updated.models = r.models || [];
           providerData.set(currentProvider, updated);
           const p = providerData.get(currentProvider);
@@ -1545,10 +1653,31 @@ case "goal_round": break;
   function clearTurnStatus() {
     if (turnStatusEl) { turnStatusEl.remove(); turnStatusEl = null; }
   }
+  function fmtContext(n) {
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    if (n < 1000) return String(Math.round(n));
+    if (n < 1000000) return (n / 1000).toFixed(2).replace(/\.?0+$/, "") + "K";
+    return (n / 1000000).toFixed(2).replace(/\.?0+$/, "") + "M";
+  }
+
+  // 解析用户输入的上下文大小："128000" / "128K" / "1.5M"（K/M 按 1000 计，与 fmtContext 显示互逆）
+  // 返回正整数或 null（无效输入）；空串 → null（调用方按「恢复自动」处理）
+  function parseCtx(s) {
+    const m = /^\s*(\d+(?:\.\d+)?)\s*([kKmM])?\s*$/.exec(String(s || ""));
+    if (!m) return null;
+    let n = parseFloat(m[1]);
+    const u = (m[2] || "").toUpperCase();
+    if (u === "K") n *= 1000;
+    if (u === "M") n *= 1000000;
+    n = Math.round(n);
+    return n > 0 ? n : null;
+  }
+
   function setUsage(u) {
     if (!u) return;
-    const t = u.total_tokens || u["total_tokens"];
-    if (t) $("usage-label").textContent = `${(t / 1000).toFixed(1)}k tok`;
+    if (u.context_tokens > 0 && u.context_window > 0) {
+      $("usage-label").textContent = `${fmtContext(u.context_tokens)}/${fmtContext(u.context_window)}`;
+    }
   }
   function scrollBottom(force) {
     if (force) state.stickBottom = true;
@@ -1664,7 +1793,9 @@ case "goal_round": break;
   async function refreshStats() {
     if (!state.sid) return;
     try {
-      const st = await rpc("session.state", { sessionId: state.sid });
+      const sid = state.sid;
+      const st = await rpc("session.state", { sessionId: sid });
+      if (state.sid !== sid) return; // 轮询途中切了会话，丢弃旧会话数据，避免渲染进新会话 UI
       renderStats(st);
     } catch (e) { /* 忽略轮询错误 */ }
   }
@@ -1681,6 +1812,9 @@ case "goal_round": break;
       const m = (st.provider && st.provider !== "default") ? st.provider + "/" + st.model : st.model;
       const el = $("model-label");
       if (el && el.textContent !== m) el.textContent = m;
+    }
+    if (st.context_tokens > 0 && st.context_window > 0) {
+      $("usage-label").textContent = `${fmtContext(st.context_tokens)}/${fmtContext(st.context_window)}`;
     }
     const u = st.usage || {};
     const cacheRead = u.cache_read_tokens || u.cached_tokens
@@ -1717,208 +1851,335 @@ case "goal_round": break;
     $("stats-right").innerHTML = `${stTxt} bind:${st.bindings || 0} ${escapeHtml(st.policy || "")}`;
   }
 
-  // ── 进化面板（最左，默认收起）──
+  // ── 环境进化控制台 ──
   function initEvolution() {
     const refreshBtn = $("evo-refresh");
     if (refreshBtn) refreshBtn.onclick = () => refreshEvolution();
+
     const triggerBtn = $("evo-trigger");
-    if (triggerBtn)
+    if (triggerBtn) {
       triggerBtn.onclick = async () => {
-        const orig = triggerBtn.textContent;
+        const label = triggerBtn.querySelector("span");
+        const original = label ? label.textContent : "运行一轮";
+        triggerBtn.disabled = true;
         triggerBtn.classList.add("running");
+        if (label) label.textContent = "已排队";
         try {
-          const r = await rpc("evolution.trigger", {});
-          triggerBtn.textContent = r && r.triggered ? "✓ 已触发" : "✗ 不可达";
-          setTimeout(refreshEvolution, 2000);
+          await rpc("evolution.trigger", {});
+          setTimeout(refreshEvolution, 1800);
         } catch (e) {
-          triggerBtn.textContent = "✗ 失败";
+          if (label) label.textContent = "触发失败";
         } finally {
           triggerBtn.classList.remove("running");
-          setTimeout(() => { triggerBtn.textContent = orig; }, 2500);
+          setTimeout(() => {
+            triggerBtn.disabled = false;
+            if (label) label.textContent = original;
+          }, 2200);
         }
       };
-    // poll status every 10s; events stream in via WS (evo_* branches in onEvent)
-    setInterval(refreshEvoStatus, 10_000);
-  }
+    }
 
+    setInterval(() => {
+      if (MC.open && MC.tab === "evolution") refreshEvoStatus();
+    }, 10_000);
+  }
 
   async function refreshEvolution() {
     await Promise.all([refreshEvoStatus(), refreshEvoFeed()]);
+    flushEvoBuffer();
   }
 
   async function refreshEvoStatus() {
     try {
       const st = await rpc("evolution.status", {});
-      const setV = (id, v) => { const el = $(id); if (el) el.textContent = v == null ? "-" : String(v); };
-      setV("evo-autonomy", st.autonomy);
-      const cs = st.coordinator || {};
-      if (typeof cs === "object") {
-        setV("evo-revision", cs.active_revision != null ? "r" + cs.active_revision : "-");
-        setV("evo-changes", cs.changes != null ? cs.changes : "-");
-      } else {
-        setV("evo-revision", "引擎离线");
-        setV("evo-changes", "引擎离线");
-      }
-      // 最近进化事件（时间 + 类型）
-      const le = st.last_evolution;
-      if (le && le.event) {
-        const t = (le.at || "").replace("T", " ").slice(5, 16);
-        setV("evo-last", (le.event.kind || le.event.topic || "evo") + " " + t);
-      } else {
-        setV("evo-last", "暂无");
-      }
-      // Release 效果表：plugin · 使用 · 成功率 · 均耗
+      const coordinator = st.coordinator && typeof st.coordinator === "object" ? st.coordinator : null;
+      const engine = st.engine || {};
+      const engineEl = $("evo-engine-state");
+      const online = !!engine.coordinator_online;
+      engineEl.textContent = online
+        ? (engine.daemon_online ? "Coordinator + Daemon 在线" : "Coordinator 在线 · Daemon 按需运行")
+        : "Coordinator 离线";
+      engineEl.className = "evo-engine-state " + (online ? "online" : "offline");
+
+      const revision = coordinator && coordinator.active_revision != null ? coordinator.active_revision : null;
+      $("evo-revision").textContent = revision == null ? "r-" : "r" + revision;
+      $("evo-autonomy").textContent = st.autonomy_label || st.autonomy || "-";
+      $("evo-open-count").textContent = coordinator ? coordinator.open_count || 0 : "-";
+      $("evo-release-count").textContent = coordinator ? coordinator.active_count || 0 : "-";
+      $("evo-signal-count").textContent = (st.pending_signals || []).length;
+
+      const degraded = coordinator && (coordinator.degraded || []).length > 0;
+      const health = $("evo-revision-health");
+      health.textContent = !online ? "离线" : degraded ? "已退化" : "健康";
+      health.className = "evo-health-pill " + (!online || degraded ? "degraded" : "healthy");
+
+      renderEvoChanges(st.changes || []);
+      renderEvoSignals(st.pending_signals || []);
       renderEvoReleases(st.active_releases || []);
-      const kb = (st.event_log_bytes || 0) / 1024;
-      setV("evo-events-size", kb >= 1024 ? (kb / 1024).toFixed(1) + " MB" : Math.round(kb) + " KB");
-    } catch (e) { /* 忽略轮询错误 */ }
-    // 环境健康（规则/抗体）
-    try {
-      const health = await rpc("env.health", {});
-      const rules = health.rules || {};
-      const abs = health.antibodies || {};
-      const totalHits = Object.values(rules.hits || {}).reduce((a, b) => a + b, 0);
-      setV("evo-rules", (rules.count || 0) + " 条 (命中 " + totalHits + " 次)");
-      setV("evo-antibodies", (abs.count || 0) + " 条 (" + (abs.verified || 0) + " 已验证)");
-    } catch (e) { /* env.health 不可用时忽略 */ }
+
+      const bytes = engine.event_store_bytes || 0;
+      $("evo-events-size").textContent = formatBytes(bytes) + " · project store";
+    } catch (e) {
+      const engineEl = $("evo-engine-state");
+      if (engineEl) {
+        engineEl.textContent = "状态读取失败";
+        engineEl.className = "evo-engine-state offline";
+      }
+    }
+  }
+
+  function renderEvoChanges(changes) {
+    const box = $("evo-changes-list");
+    if (!box) return;
+    const open = changes.filter((c) => !c.terminal);
+    const shown = open.length ? open : changes.slice(0, 3);
+    $("evo-change-summary").textContent = open.length ? `${open.length} 个开放` : "无开放 Change";
+
+    if (!shown.length) {
+      box.innerHTML = '<div class="evo-empty">暂无 Change。输入信号后，Adapter 会生成最小候选并进入验证。</div>';
+      return;
+    }
+
+    box.innerHTML = shown.map((change) => {
+      const status = change.derived_status || change.status || "requested";
+      const layers = ((change.evaluation || {}).layers || []).map(renderEvoLayer).join("");
+      const release = change.plugin_id || shortRelease(change.candidate_release) || change.change_id;
+      const changeId = escapeHtml(change.change_id || "");
+      const action = change.can_approve
+        ? `<button class="evo-approve" data-change-id="${changeId}">批准激活</button>`
+        : change.can_reevaluate
+          ? `<button class="evo-reevaluate" data-change-id="${changeId}">重新评测</button>`
+          : "";
+      return `<article class="evo-change ${escapeHtml(status)}">
+          <div class="evo-change-title"><strong title="${escapeHtml(change.candidate_release || "")}">${escapeHtml(release || "change")}</strong><span>${changeId} · Ring ${escapeHtml(change.ring == null ? "-" : change.ring)}</span></div>
+          <span class="evo-status-tag">${escapeHtml(change.status_label || status)}</span>
+        </div>
+        <div class="evo-change-reason">${escapeHtml(cleanEvolutionReason(change.reason || "未记录原因"))}</div>
+        <div class="evo-layers">${layers || renderPendingLayers()}</div>
+        <div class="evo-change-foot"><span class="evo-change-next" title="${escapeHtml(change.next_action || "")}">${escapeHtml(change.next_action || "等待下一步")}</span>${action}</div>
+      </article>`;
+    }).join("");
+
+    box.querySelectorAll(".evo-approve").forEach((button) => {
+      button.onclick = () => approveEvolutionChange(button.dataset.changeId, button);
+    });
+    box.querySelectorAll(".evo-reevaluate").forEach((button) => {
+      button.onclick = () => reevaluateEvolutionChange(button.dataset.changeId, button);
+    });
+
+  }
+
+  function renderEvoLayer(layer) {
+    const status = layer.status || "pending";
+    const marks = { passed: "PASS", failed: "FAIL", observing: "LIVE", pending: "WAIT", skipped: "N/A" };
+    let detail = "";
+    if (layer.samples != null) detail = `${layer.samples} samples`;
+    else if (layer.replayed != null) detail = `${layer.replayed} replay`;
+    else detail = layer.label || layer.key || "gate";
+    return `<div class="evo-layer ${escapeHtml(status)}" title="${escapeHtml(layer.reason || layer.label || "")}"><b>${marks[status] || "WAIT"}</b><span>${escapeHtml(detail)}</span></div>`;
+  }
+
+  function renderPendingLayers() {
+    return ["静态", "确定性", "回放", "使用", "长期"].map((label) =>
+      `<div class="evo-layer pending"><b>WAIT</b><span>${label}</span></div>`
+    ).join("");
+  }
+
+  function renderEvoSignals(signals) {
+    const box = $("evo-signals");
+    if (!box) return;
+    if (!signals.length) {
+      box.innerHTML = '<div class="evo-empty">信号队列为空。Worker 的重复失败、规则命中和显式 need 会进入这里。</div>';
+      return;
+    }
+    box.innerHTML = signals.slice(0, 5).map((signal) => `<div class="evo-signal">
+      <div class="evo-signal-head"><strong>${escapeHtml(signal.capability || "未命名能力")}</strong><span>${escapeHtml(signal.urgency || "normal")}</span></div>
+      <p>${escapeHtml(signal.evidence || "等待 Adapter 诊断")}</p>
+    </div>`).join("");
   }
 
   function renderEvoReleases(releases) {
     const box = $("evo-releases");
     if (!box) return;
     if (!releases.length) {
-      box.innerHTML = '<div class="evo-empty">暂无激活的 release — 环境还在初始状态</div>';
+      box.innerHTML = '<div class="evo-empty">当前 revision 没有激活的 Release。</div>';
       return;
     }
-    box.innerHTML = releases
-      .map((r) => {
-        const uses = r.uses != null ? r.uses : "-";
-        const rate = r.success_rate != null ? Math.round(r.success_rate * 100) + "%" : "-";
-        const tok = r.avg_tokens != null ? fmtTok(r.avg_tokens) : "-";
-        const ok = r.success_rate != null && r.success_rate >= 0.8;
-        const cls = r.success_rate == null ? "" : ok ? " good" : " warn";
-        return '<div class="evo-release"><span class="evo-release-name" title="' + escapeHtml(r.plugin || "") + '">'
-          + escapeHtml(r.plugin || "?") + '</span>'
-          + '<span class="evo-release-stats">' + uses + ' 次 · <span class="evo-rate' + cls + '">'
-          + rate + '</span> · ' + tok + '</span></div>';
-      })
-      .join("");
+    box.innerHTML = releases.map((release) => {
+      const uses = release.uses || 0;
+      const rate = release.success_rate == null ? "待观测" : Math.round(release.success_rate * 100) + "%";
+      const rateClass = release.success_rate == null ? "" : release.success_rate >= 0.8 ? " good" : " warn";
+      const cost = release.avg_tokens == null ? "-" : fmtTok(release.avg_tokens) + " tok";
+      return `<div class="evo-release">
+        <span class="evo-release-name" title="${escapeHtml(release.release || "")}">${escapeHtml(release.plugin || "?")}</span>
+        <span class="evo-release-stats">${uses} 次 · <span class="evo-rate${rateClass}">${rate}</span> · ${cost}</span>
+        <span class="evo-release-kind">${escapeHtml(release.kind || "release")}</span>
+      </div>`;
+    }).join("");
   }
 
-  function fmtTok(n) {
-    if (n == null) return "-";
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-    if (n >= 1000) return (n / 1000).toFixed(1) + "K";
-    return String(n);
+  async function approveEvolutionChange(changeId, button) {
+    if (!changeId) return;
+    confirmDialog(`批准 ${changeId} 激活？验证通过的候选将生成新 revision。`, async () => {
+      button.disabled = true;
+      button.textContent = "激活中";
+      try {
+        await rpc("evolution.approve", { changeId });
+        await refreshEvolution();
+      } catch (e) {
+        line("error", "批准 Change 失败: " + e.message);
+        button.disabled = false;
+        button.textContent = "重试批准";
+      }
+    }, { confirmLabel: "批准激活", confirmClass: "btn-allow" });
+  }
+
+  async function reevaluateEvolutionChange(changeId, button) {
+    if (!changeId) return;
+    button.disabled = true;
+    button.textContent = "评测中";
+    try {
+      await rpc("evolution.reevaluate", { changeId });
+      await refreshEvolution();
+    } catch (e) {
+      if (String(e.message || e).includes("already_active")) {
+        await refreshEvolution();
+        return;
+      }
+      line("error", "重新评测 Change 失败: " + e.message);
+      button.disabled = false;
+      button.textContent = "重试评测";
+    }
+  }
+
+
+  function formatBytes(bytes) {
+    if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+    if (bytes >= 1024) return Math.round(bytes / 1024) + " KB";
+    return bytes + " B";
+  }
+
+  function shortRelease(value) {
+    if (!value) return "";
+    return String(value).split("@")[0];
+  }
+
+  function cleanEvolutionReason(value) {
+    return String(value || "").replace(/^adapter:\s*/, "Adapter 提案：");
   }
 
   async function refreshEvoFeed() {
     try {
-      const feed = await rpc("evolution.feed", { n: 80 });
+      const feed = await rpc("evolution.feed", { n: 100 });
       renderEvoFeed(feed.events || []);
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {
+      const box = $("evo-feed");
+      if (box) box.innerHTML = '<div class="evo-empty">事件证据暂时不可读。</div>';
+    }
   }
 
   function renderEvoFeed(events) {
     const box = $("evo-feed");
     if (!box) return;
-    box.innerHTML = "";
-    if (events.length === 0) {
-      const d = document.createElement("div");
-      d.className = "evo-empty";
-      d.textContent = "暂无进化事件";
-      box.appendChild(d);
+    if (!events.length) {
+      box.innerHTML = '<div class="evo-empty">项目 EventStore 尚无进化事件。</div>';
       return;
     }
-    events.forEach((ev) => box.appendChild(evoEventEl(ev)));
+    box.innerHTML = "";
+    events.forEach((event) => box.appendChild(evoEventEl(event)));
   }
 
-  function evoEventEl(ev) {
-    const d = document.createElement("div");
-    const kind = ev.topic || "event";
-    d.className = "evo-event kind-" + evoKindClass(kind);
-    const time = (ev.at || "").replace("T", " ").slice(5, 19);
-    const body = evoEventSummary(kind, ev.event);
-    d.innerHTML = `<span class="evo-kind">${escapeHtml(kind)}</span><span class="evo-time">${escapeHtml(time)}</span><div class="evo-body">${escapeHtml(body)}</div>`;
-    return d;
+  function evoEventEl(event) {
+    const row = document.createElement("details");
+    const kind = event.topic || "event";
+    const payload = event.event || {};
+    row.className = "evo-event kind-" + evoKindClass(kind);
+    const time = formatEvolutionTime(event.at);
+    const title = evoEventTitle(kind, payload);
+    const summary = evoEventSummary(kind, payload);
+    const identity = evoEventIdentity(payload);
+    row.innerHTML = `<summary><span class="evo-event-dot"></span><div class="evo-event-main"><span class="evo-kind" title="${escapeHtml(kind)}">${escapeHtml(title)}</span><div class="evo-body">${escapeHtml(summary)}</div></div><span class="evo-time">${escapeHtml(time)}</span></summary><pre class="evo-event-raw">${escapeHtml(JSON.stringify({ topic: kind, id: event.id, identity, payload }, null, 2))}</pre>`;
+    return row;
   }
 
   function evoKindClass(kind) {
-    if (/reject|error|fail|degraded/.test(kind)) return "rejected";
-    if (/activated|published|switched|created|advanced/.test(kind)) return "activated";
+    if (/reject|error|fail|degraded|rolled_back/.test(kind)) return "rejected";
+    if (/activated|approved|promoted|healthy|advanced|evaluated/.test(kind)) return "activated";
     return "info";
   }
 
+  function evoEventTitle(kind, payload) {
+    const passed = payload && (payload.passed === true || payload.passed === "true");
+    const labels = {
+      change_requested: "收到变更信号",
+      change_building: "候选已构建",
+      change_evaluated: passed ? "验证通过" : "验证失败",
+      change_canary: "进入门控",
+      change_approved: "人工已批准",
+      change_activated: "变更已激活",
+      change_rejected: "候选已拒绝",
+      change_rolled_back: "变更已回退",
+      revision_advanced: "Revision 已推进",
+      revision_degraded: "Revision 已退化",
+      revision_healthy: "Revision 健康",
+      release_observation: "Release 使用观测"
+    };
+    return labels[kind] || kind.replaceAll("_", " ");
+  }
+
+  function evoEventIdentity(payload) {
+    if (!payload) return "";
+    return payload.change_id || shortRelease(payload.release_id) || (payload.revision && `r${payload.revision.rev}`) || "";
+  }
+
   function evoEventSummary(kind, payload) {
-    if (payload == null) return "";
-    if (typeof payload === "string") return payload.slice(0, 200);
-    try {
-      // 对齐 Adapter 日志：列出关键字段
-      const p = payload;
-      switch (kind) {
-        case "evolution_published":
-          return `发布 ${p.release_id || p.plugin_id || "?"} · ${p.kind || ""}`;
-        case "evolution_rejected":
-          return `拒绝 ${p.release_id || p.plugin_id || "?"}: ${p.reason || ""}`;
-        case "release_observation":
-          return `${p.release_id || "?"} · ${p.model || ""} · ${p.success ? "✓" : "✗"} ${p.tokens || 0}tok ${p.latency_ms || 0}ms`;
-        case "change_activated":
-          return `激活 ${p.change_id || p.revision || "?"}`;
-        case "change_rejected":
-          return `拒绝 ${p.change_id || "?"}: ${p.reason || ""}`;
-        case "change_rolled_back":
-          return `回滚 ${p.change_id || "?"}: ${p.reason || ""}`;
-        case "revision_advanced":
-          return `推进至 r${p.revision || "?"}`;
-        case "revision_degraded":
-          return `r${p.revision || "?"} 退化: ${p.reason || ""}`;
-        case "snapshot_created":
-          return `快照 ${p.snapshot_id || p.generation || "?"}`;
-        case "snapshot_restored":
-          return `恢复快照 ${p.snapshot_id || p.generation || "?"}`;
-        case "generation_switched":
-          return `切换 gen → r${p.revision || "?"}`;
-        case "generation_switch_failed":
-          return `切换失败 r${p.revision || "?"}: ${p.reason || ""}`;
-        case "audit":
-          // audit 可能是 tuple 数组 ["audit","dangerous_code",[...],"none"]
-          if (Array.isArray(p)) {
-            const kind = p[1] || "";
-            const arg1 = Array.isArray(p[2]) ? p[2].join(",") : String(p[2] || "");
-            const arg2 = String(p[3] || "");
-            return (kind + " " + arg1 + " " + arg2).trim();
-          }
-          return `${p.action || p.kind || ""} ${p.who || ""} ${Array.isArray(p.paths) ? p.paths.join(",") : (p.what || "")}`.trim();
-        default:
-          return JSON.stringify(payload).slice(0, 200);
-      }
-    } catch (e) {
-      return String(payload).slice(0, 200);
+    const p = payload || {};
+    const identity = evoEventIdentity(p);
+    switch (kind) {
+      case "change_requested": return `${identity} · ${cleanEvolutionReason(p.reason || "等待 Adapter 诊断")}`;
+      case "change_building": return `${identity} · ${shortRelease(p.release_id)}`;
+      case "change_evaluated": return `${identity} · 静态、确定性与回放门已完成`;
+      case "change_canary": return `${identity} · 等待 canary 或人工批准`;
+      case "change_approved": return `${identity} · 批准者 ${p.approver || "user"}`;
+      case "change_activated": return `${identity} · active 环境已切换`;
+      case "change_rejected": return `${identity} · ${p.reason || "未越过验证门"}`;
+      case "change_rolled_back": return `${identity} · ${p.reason || "已恢复 known-good"}`;
+      case "revision_advanced": return `${identity || "新 revision"} · active release 图已更新`;
+      case "revision_degraded": return `${identity || "revision"} · 等待回退处理`;
+      case "revision_healthy": return `${identity || "revision"} · 健康检查通过`;
+      case "release_observation": return `${identity} · ${p.success ? "成功" : "失败"} · ${p.tokens || 0} tok`;
+      default: return identity || "展开查看原始事件";
     }
   }
 
-  // 实时接收进化事件（从 WS 下行）。先入内存缓冲，面板展开时 flush；
-  // 缓冲满则截断。这样即使面板收起，事件也不丢。
+
+  function formatEvolutionTime(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).replace("T", " ").slice(5, 16);
+    return date.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+
   let evoBuffer = [];
   function pushEvoEvent(topic, payload) {
-    evoBuffer.unshift({ topic, event: payload, at: new Date().toISOString() });
-    if (evoBuffer.length > 200) evoBuffer.length = 200;
+    evoBuffer.unshift({ topic, event: payload, at: new Date().toISOString(), source: "websocket" });
+    if (evoBuffer.length > 100) evoBuffer.length = 100;
     flushEvoBuffer();
+    if (MC.open && MC.tab === "evolution" && /^change_|^revision_/.test(topic)) {
+      setTimeout(refreshEvoStatus, 150);
+    }
   }
+
   function flushEvoBuffer() {
     const box = $("evo-feed");
     const pane = $("mc-evolution");
-    if (!box || !pane || pane.classList.contains("hidden")) return;
-    if (evoBuffer.length === 0) return;
+    if (!box || !pane || pane.classList.contains("hidden") || !evoBuffer.length) return;
     const empty = box.querySelector(".evo-empty");
     if (empty) empty.remove();
-    evoBuffer.forEach((ev) => box.prepend(evoEventEl(ev)));
+    evoBuffer.reverse().forEach((event) => box.prepend(evoEventEl(event)));
     evoBuffer = [];
     while (box.children.length > 100) box.removeChild(box.lastChild);
   }
-
-
-
 
   // ── @ 文件引用自动补全 ──
   let atDropdown = null;
@@ -2267,7 +2528,9 @@ case "goal_round": break;
     const content = $("mc-overview-content");
     if (!state.sid) { content.innerHTML = '<div style="color:var(--fg2);padding:20px;text-align:center">无活跃会话</div>'; return; }
     try {
-      const st = await rpc("session.state", { sessionId: state.sid });
+      const sid = state.sid;
+      const st = await rpc("session.state", { sessionId: sid });
+      if (state.sid !== sid) return; // 轮询途中切了会话，丢弃旧会话数据
       const u = st.usage || {};
       const rows = [
         ["模型", (st.provider ? st.provider + "/" : "") + (st.model || "-")],
@@ -2282,7 +2545,8 @@ case "goal_round": break;
       ];
       let bindingsHtml = "";
       try {
-        const bd = await rpc("session.bindings", { sessionId: state.sid });
+        const bd = await rpc("session.bindings", { sessionId: sid });
+        if (state.sid !== sid) return; // 同上：切会话后丢弃
         const items = (bd && bd.bindings) || [];
         if (items.length > 0) {
           bindingsHtml = '<div class="mc-bindings-title">Bindings</div>' + items.map((b) =>

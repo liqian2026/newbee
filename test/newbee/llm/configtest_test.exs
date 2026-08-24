@@ -115,4 +115,88 @@ defmodule Newbee.LLM.ConfigTest do
       assert {:error, :bad_model_id} = Newbee.LLM.Config.set_default_model("   ")
     end
   end
+
+  describe "set_context_window" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "newbee-configtest-#{System.unique_integer([:positive])}/model.json")
+      File.mkdir_p!(Path.dirname(tmp))
+
+      File.write!(
+        tmp,
+        Jason.encode!(%{
+          "providers" => %{
+            "openrouter" => %{
+              "baseUrl" => "https://openrouter.ai/api/v1",
+              "apiKey" => "k",
+              "models" => [],
+              "contextWindow" => 200_000
+            }
+          },
+          "roles" => %{
+            "default" => %{"provider" => "openrouter", "model" => "deepseek/deepseek-v4-flash-0731"}
+          }
+        })
+      )
+
+      System.put_env("NEWBEE_MODEL_JSON", tmp)
+
+      on_exit(fn ->
+        System.delete_env("NEWBEE_MODEL_JSON")
+        File.rm_rf!(Path.dirname(tmp))
+      end)
+
+      :ok
+    end
+
+    test "写入单模型覆盖并落盘，client_for 立即生效" do
+      assert :ok = Newbee.LLM.Config.set_context_window("openrouter", "deepseek/deepseek-v4-flash-0731", 131_072)
+
+      cfg = Newbee.LLM.Config.load()
+      assert cfg["providers"]["openrouter"]["contextWindows"] == %{"deepseek/deepseek-v4-flash-0731" => 131_072}
+
+      client = Newbee.LLM.Config.client_for("default")
+      assert client.context_window == 131_072
+      assert Newbee.LLM.Config.context_window_override("openrouter", "deepseek/deepseek-v4-flash-0731") == 131_072
+    end
+
+    test "nil 清除覆盖并回退 provider 级 contextWindow" do
+      assert :ok = Newbee.LLM.Config.set_context_window("openrouter", "deepseek/deepseek-v4-flash-0731", 131_072)
+      assert :ok = Newbee.LLM.Config.set_context_window("openrouter", "deepseek/deepseek-v4-flash-0731", nil)
+
+      cfg = Newbee.LLM.Config.load()
+      refute Map.has_key?(cfg["providers"]["openrouter"], "contextWindows")
+
+      client = Newbee.LLM.Config.client_for("default")
+      assert client.context_window == 200_000
+      assert Newbee.LLM.Config.context_window_override("openrouter", "deepseek/deepseek-v4-flash-0731") == nil
+    end
+
+    test "覆盖只作用于指定模型，其它模型不受影响" do
+      assert :ok = Newbee.LLM.Config.set_context_window("openrouter", "deepseek/deepseek-v4-flash-0731", 64_000)
+
+      other = Newbee.LLM.Config.client_for("default", model: "openai/gpt-5")
+      assert other.context_window == 200_000
+    end
+
+    test "未知 provider 拒绝且不落盘" do
+      before = File.read!(System.get_env("NEWBEE_MODEL_JSON"))
+      assert {:error, {:unknown_provider, "nosuch"}} = Newbee.LLM.Config.set_context_window("nosuch", "m1", 1000)
+      assert File.read!(System.get_env("NEWBEE_MODEL_JSON")) == before
+    end
+
+    test "非法覆盖值拒绝" do
+      assert {:error, :bad_context_window} = Newbee.LLM.Config.set_context_window("openrouter", "m1", 0)
+      assert {:error, :bad_context_window} = Newbee.LLM.Config.set_context_window("openrouter", "m1", -5)
+      assert {:error, :bad_context_window} = Newbee.LLM.Config.set_context_window("openrouter", "m1", "abc")
+    end
+
+    test "model_catalog 暴露 contextWindows 与 provider 级默认" do
+      assert :ok = Newbee.LLM.Config.set_context_window("openrouter", "deepseek/deepseek-v4-flash-0731", 99_000)
+
+      cat = Newbee.LLM.Config.model_catalog()
+      p = Enum.find(cat.providers, &(&1.name == "openrouter"))
+      assert p.contextWindows == %{"deepseek/deepseek-v4-flash-0731" => 99_000}
+      assert p.contextWindow == 200_000
+    end
+  end
 end

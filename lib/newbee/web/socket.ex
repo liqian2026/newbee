@@ -30,6 +30,7 @@ defmodule Newbee.Web.Socket do
 
       {:ok, %{"type" => "prompt", "text" => t}} ->
         cast_session(st.sid, &WSession.prompt(&1, t))
+
       {:ok, %{"type" => "promptImage", "images" => images, "text" => t}} ->
         cast_session(st.sid, &WSession.prompt_images(&1, images || [], t || ""))
 
@@ -50,10 +51,11 @@ defmodule Newbee.Web.Socket do
 
   # 系统级进化事件下行（与具体 session 无关；前端进化面板消费）
   @evo_topics ~w(evolution_published evolution_rejected release_observation
-                 change_activated change_rejected change_rolled_back
-                 revision_advanced revision_degraded
-                 snapshot_created snapshot_restored
-                 generation_switched generation_switch_failed audit)a
+                  change_requested change_building change_evaluated change_canary
+                  change_approved change_activated change_rejected change_rolled_back
+                  revision_advanced revision_degraded revision_healthy
+                  snapshot_created snapshot_restored
+                  generation_switched generation_switch_failed)a
 
   def handle_info({:newbee_event, topic, payload}, st) when topic in @evo_topics do
     frame =
@@ -86,7 +88,6 @@ defmodule Newbee.Web.Socket do
   defp json_safe(v), do: inspect(v)
 
   defp cast_session(sid, fun) do
-
     case WSession.ensure(sid) do
       {:ok, pid, _} -> fun.(pid)
       _ -> :ok

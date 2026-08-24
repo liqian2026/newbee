@@ -23,7 +23,18 @@ defmodule Newbee.Environment.Coordinator do
   """
 
   use GenServer
-  alias Newbee.Environment.{Antibodies, Autonomy, Change, Manifest, PluginManager, Release, Store, Verifier}
+
+  alias Newbee.Environment.{
+    Antibodies,
+    Autonomy,
+    Change,
+    Manifest,
+    PluginManager,
+    Release,
+    Store,
+    Verifier
+  }
+
   alias Newbee.Environment.Revision
 
   @max_eval_tasks 4
@@ -79,6 +90,13 @@ defmodule Newbee.Environment.Coordinator do
   @doc "manual 档下人工授权（§8.1：带签名的授权事件，进 Event Store，可审计）。"
   def approve(server \\ __MODULE__, change_id, approver \\ "user") do
     GenServer.call(server, {:approve, change_id, approver})
+  end
+
+  @doc "将基线过期的候选绑定到当前 revision 并重新运行完整验证。"
+  def reevaluate(change_id), do: reevaluate(__MODULE__, change_id)
+
+  def reevaluate(server, change_id) do
+    GenServer.call(server, {:reevaluate, change_id}, 60_000)
   end
 
   @doc "激活（合取判定：Host Safety ∧ Capability ∧ Autonomy ∧ Ring Gate ∧ 预算）。"
@@ -243,16 +261,26 @@ defmodule Newbee.Environment.Coordinator do
 
         case PluginManager.materialize(release) do
           {:ok, _dir} ->
-            change = %{Change.transition(change, :building) | candidate_revision: release.release_id}
+            change = %{
+              Change.transition(change, :building)
+              | candidate_revision: release.release_id
+            }
+
             state = put_change(state, change)
-            append_event(state, :change_building, %{"change_id" => change_id, "release_id" => release.release_id})
+
+            append_event(state, :change_building, %{
+              "change_id" => change_id,
+              "release_id" => release.release_id
+            })
 
             # 异步评测（有界任务队列，完成后事件回报）
             state = start_evaluation(state, change, release, opts)
             {:reply, {:ok, release}, state}
 
           {:error, reason} ->
-            {change, state} = reject_change(state, change, "materialize_failed: #{inspect(reason)}")
+            {change, state} =
+              reject_change(state, change, "materialize_failed: #{inspect(reason)}")
+
             {:reply, {:error, reason}, put_change(state, change)}
         end
     end
@@ -280,6 +308,51 @@ defmodule Newbee.Environment.Coordinator do
     end
   end
 
+  # ── reevaluate（显式重基后重新越过验证门）──
+
+  def handle_call({:reevaluate, change_id}, _from, state) do
+    with {:ok, change} <- Map.fetch(state.changes, change_id),
+         :ok <- check_reevaluable(change, state),
+         {:ok, release} <- fetch_candidate(change) do
+      previous_base = change.base_revision
+
+      change = %{
+        Change.transition(change, :building)
+        | base_revision: state.manifest.revision,
+          attempt: change.attempt + 1,
+          deadline: default_deadline(),
+          evaluation_result: nil
+      }
+
+      state = put_change(state, change)
+
+      append_event(state, :change_rebased, %{
+        "change_id" => change_id,
+        "from_revision" => previous_base,
+        "to_revision" => change.base_revision,
+        "attempt" => change.attempt,
+        "release_id" => release.release_id
+      })
+
+      state = start_evaluation(state, change, release, [])
+      {:reply, {:ok, change}, state}
+    else
+      :error -> {:reply, {:error, :change_not_found}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp check_reevaluable(%Change{} = change, state) do
+    cond do
+      change.status in [:active, :promoted] -> {:error, :already_active}
+      Change.terminal?(change) -> {:error, {:terminal, change.status}}
+      change.candidate_revision == nil -> {:error, :no_candidate}
+      Map.has_key?(state.eval_tasks, change.change_id) -> {:error, :evaluation_in_progress}
+      change.base_revision == state.manifest.revision -> {:error, :base_is_current}
+      true -> :ok
+    end
+  end
+
   # ── activate ──
 
   def handle_call({:activate, change_id, opts}, _from, state) do
@@ -289,7 +362,11 @@ defmodule Newbee.Environment.Coordinator do
 
       # 已激活的同一候选：幂等成功（at-least-once + 幂等 effect，§7.2）
       {:ok, %Change{status: s, candidate_revision: cand}} when s in [:active, :promoted] ->
-        state = %{state | idempotency: Map.put(state.idempotency, {:activate, change_id, cand}, :ok)}
+        state = %{
+          state
+          | idempotency: Map.put(state.idempotency, {:activate, change_id, cand}, :ok)
+        }
+
         {:reply, :ok, state}
 
       {:ok, change} ->
@@ -351,7 +428,12 @@ defmodule Newbee.Environment.Coordinator do
     # 负反馈 + suggested_action: rollback → 自动受理回退（§7.1）
     state =
       if attrs[:suggested_action] == :rollback and attrs[:plugin_id] do
-        case do_rollback(state, {:plugin, attrs[:plugin_id], attrs[:target]}, attrs[:comment] || "worker feedback", []) do
+        case do_rollback(
+               state,
+               {:plugin, attrs[:plugin_id], attrs[:target]},
+               attrs[:comment] || "worker feedback",
+               []
+             ) do
           {:ok, _change, state} -> state
           {:error, _reason, state} -> state
         end
@@ -391,7 +473,12 @@ defmodule Newbee.Environment.Coordinator do
 
     known_good = Manifest.last_known_good(manifest)
 
-    case do_rollback(%{state | manifest: manifest}, {:revision, known_good}, "recover to known-good rev #{known_good}: #{reason}", []) do
+    case do_rollback(
+           %{state | manifest: manifest},
+           {:revision, known_good},
+           "recover to known-good rev #{known_good}: #{reason}",
+           []
+         ) do
       {:ok, change, state} ->
         notify(state, :rolled_back, %{revision: known_good, reason: "degraded recovery"})
 
@@ -415,7 +502,9 @@ defmodule Newbee.Environment.Coordinator do
     manifest = Manifest.mark_health(state.manifest, rev, :healthy)
     append_event(state, :revision_healthy, %{"rev" => rev})
     persist_manifest(manifest, state.event_store)
-    {:reply, :ok, %{state | manifest: manifest, pending_notices: [notice | state.pending_notices]}}
+
+    {:reply, :ok,
+     %{state | manifest: manifest, pending_notices: [notice | state.pending_notices]}}
   end
 
   def handle_call(:autonomy_evidence, _from, state) do
@@ -453,7 +542,12 @@ defmodule Newbee.Environment.Coordinator do
 
           true ->
             reason = "evaluation failed: #{inspect(result.failed_layers)}"
-            append_event(state, :change_evaluated, %{"change_id" => change_id, "passed" => false, "result" => inspect(result.layers, limit: 8)})
+
+            append_event(state, :change_evaluated, %{
+              "change_id" => change_id,
+              "passed" => false,
+              "result" => inspect(result.layers, limit: 8)
+            })
 
             # 通知双方（§7.2 module_rejected）
             notify(state, :module_rejected, %{
@@ -532,8 +626,11 @@ defmodule Newbee.Environment.Coordinator do
 
   defp eval_timeout(%Change{deadline: deadline}) do
     case DateTime.from_iso8601(deadline) do
-      {:ok, dt, _} -> max(DateTime.to_unix(dt, :millisecond) - System.system_time(:millisecond), 1)
-      _ -> @default_eval_timeout
+      {:ok, dt, _} ->
+        max(DateTime.to_unix(dt, :millisecond) - System.system_time(:millisecond), 1)
+
+      _ ->
+        @default_eval_timeout
     end
   end
 
@@ -593,8 +690,11 @@ defmodule Newbee.Environment.Coordinator do
   end
 
   defp check_stale_base(%Change{base_revision: base}, state) when base != nil do
-    if base == state.manifest.revision, do: :ok, else: {:error, {:stale_base, base, state.manifest.revision}}
+    if base == state.manifest.revision,
+      do: :ok,
+      else: {:error, {:stale_base, base, state.manifest.revision}}
   end
+
   defp check_stale_base(_, _), do: :ok
 
   defp activation_gate(%Release{} = release, change, state, opts) do
@@ -674,7 +774,8 @@ defmodule Newbee.Environment.Coordinator do
         state = %{state | manifest: manifest} |> put_change(change)
 
         append_event(state, :revision_advanced, %{
-          "revision" => Revision.to_map(Revision.new(manifest.revision, manifest.active, change.change_id))
+          "revision" =>
+            Revision.to_map(Revision.new(manifest.revision, manifest.active, change.change_id))
         })
 
         append_event(state, :change_rolled_back, %{
@@ -745,7 +846,9 @@ defmodule Newbee.Environment.Coordinator do
       state.manifest
       | revision: state.manifest.revision + 1,
         active: active_map,
-        revisions: state.manifest.revisions ++ [Revision.new(state.manifest.revision + 1, active_map, change.change_id)]
+        revisions:
+          state.manifest.revisions ++
+            [Revision.new(state.manifest.revision + 1, active_map, change.change_id)]
     }
 
     change = Change.transition(change, :active)
@@ -815,7 +918,11 @@ defmodule Newbee.Environment.Coordinator do
 
   defp reject_change(state, %Change{} = change, reason) do
     change = Change.transition(change, :rejected)
-    change = %{change | evaluation_result: change.evaluation_result || %{"rejected_reason" => reason}}
+
+    change = %{
+      change
+      | evaluation_result: change.evaluation_result || %{"rejected_reason" => reason}
+    }
 
     append_event(state, :change_rejected, %{"change_id" => change.change_id, "reason" => reason})
     persist_change(change)
@@ -830,7 +937,6 @@ defmodule Newbee.Environment.Coordinator do
   def recover_known_good(server \\ __MODULE__, failed_rev, reason) do
     GenServer.call(server, {:recover_known_good, failed_rev, reason})
   end
-
 
   # ── revision 变化后的运行时驱动（§4.2 generation 切换 + §6.3 规则挂载）──
 
@@ -871,12 +977,20 @@ defmodule Newbee.Environment.Coordinator do
                   GenServer.call(coordinator, {:mark_healthy, rev, notice})
 
                 {:error, reason} ->
-                  Newbee.Events.emit(:generation_switch_failed, %{revision: rev, reason: inspect(reason)})
+                  Newbee.Events.emit(:generation_switch_failed, %{
+                    revision: rev,
+                    reason: inspect(reason)
+                  })
+
                   recover_generation(coordinator, pool, rev, reason)
               end
 
             {:error, reason} ->
-              Newbee.Events.emit(:generation_switch_failed, %{revision: rev, reason: inspect(reason)})
+              Newbee.Events.emit(:generation_switch_failed, %{
+                revision: rev,
+                reason: inspect(reason)
+              })
+
               recover_generation(coordinator, pool, rev, reason)
           end
         end)
@@ -892,12 +1006,20 @@ defmodule Newbee.Environment.Coordinator do
         # 用恢复后的 active 图重建 generation（不再递归恢复——失败则保持降级态）
         current = GenServer.call(coordinator, :current)
 
-        with {:ok, _} <- Newbee.Environment.EvaluatorPool.boot_candidate(pool, current.revision, current.active),
+        with {:ok, _} <-
+               Newbee.Environment.EvaluatorPool.boot_candidate(
+                 pool,
+                 current.revision,
+                 current.active
+               ),
              {:ok, _} <- Newbee.Environment.EvaluatorPool.switch(pool) do
           Newbee.Events.emit(:generation_switched, %{revision: good_rev, recovered: true})
         else
           _ ->
-            Newbee.Events.emit(:generation_switch_failed, %{revision: good_rev, reason: "recovery boot failed (degraded)"})
+            Newbee.Events.emit(:generation_switch_failed, %{
+              revision: good_rev,
+              reason: "recovery boot failed (degraded)"
+            })
         end
 
       {:error, _} ->
@@ -957,7 +1079,8 @@ defmodule Newbee.Environment.Coordinator do
     # 编译 release 源码取 describe（pattern/injection 即 contract 数据）
     with [{_name, source} | _] <- Map.to_list(release.source_files),
          {:ok, %{envelope: env}} <- Newbee.Environment.PluginContract.validate_source(source),
-         %{pattern: pattern, injection: injection} when is_binary(pattern) and is_binary(injection) <-
+         %{pattern: pattern, injection: injection}
+         when is_binary(pattern) and is_binary(injection) <-
            env.describe do
       Newbee.DEE.Rules.add(release.plugin_id, pattern, injection,
         source: :release,
@@ -975,8 +1098,11 @@ defmodule Newbee.Environment.Coordinator do
       |> Enum.flat_map(fn {plugin_id, release_id} ->
         if String.starts_with?(plugin_id, "prompt.") do
           case PluginManager.fetch_or_builtin(release_id) do
-            {:ok, release} -> [%{plugin_id: plugin_id, release_id: release_id, usage: release.usage}]
-            _ -> []
+            {:ok, release} ->
+              [%{plugin_id: plugin_id, release_id: release_id, usage: release.usage}]
+
+            _ ->
+              []
           end
         else
           []

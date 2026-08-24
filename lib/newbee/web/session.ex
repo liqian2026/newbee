@@ -19,9 +19,11 @@ defmodule Newbee.Web.Session do
             boot_client: nil,
             queue: :queue.new(),
             turns: 0,
+            context_tokens: 0,
+            context_window: nil,
+            client: nil,
             usage_snap: %{},
-            steps_snap: 0,
-            client: nil
+            steps_snap: 0
 
   # ── registry ──
 
@@ -387,9 +389,42 @@ defmodule Newbee.Web.Session do
   # usage 快照（render 回调经 cast 推来，绝不 call 忙碌 kernel）
   def handle_cast({:usage_snap, usage}, st) when is_map(usage) do
     merged = Map.merge(st.usage_snap, usage, fn _k, a, b -> (num(a) || 0) + (num(b) || 0) end)
-    next = %{st | usage_snap: merged, steps_snap: st.steps_snap + 1}
+    context_tokens = usage["prompt_tokens"] || usage[:prompt_tokens] || st.context_tokens
+    next = %{st | usage_snap: merged, context_tokens: context_tokens, steps_snap: st.steps_snap + 1}
     save_stats(next)
     {:noreply, next}
+  end
+
+  # 单模型上下文窗口覆盖热更新（llm.setContextWindow 广播给所有会话，这里按
+  # 当前 provider/model 匹配生效）：n 为覆盖值，nil 表示恢复自动探测。
+  # 只改 client.context_window；kernel 忙时 call 排队超时不算失败——
+  # st.client 已更新，下次 turn / 2s 轮询的 session.state 都会用新值。
+  def handle_cast({:hot_context_window, provider, model, n}, st) do
+    if st.client && provider_of(st) == provider && st.client.model == model do
+      client = %{st.client | context_window: n}
+
+      applied =
+        if st.kernel && Process.alive?(st.kernel) do
+          try do
+            match?(:ok, Newbee.Agent.Loop.set_context_window(st.kernel, n))
+          catch
+            :exit, _ -> false
+          end
+        else
+          false
+        end
+
+      broadcast(st.sid, :context_window_changed, %{
+        provider: provider,
+        model: model,
+        contextWindow: n,
+        applied: applied
+      })
+
+      {:noreply, %{st | client: client}}
+    else
+      {:noreply, st}
+    end
   end
 
   def handle_call({:set_cwd, cwd}, _from, st) when is_binary(cwd) do
@@ -444,8 +479,12 @@ defmodule Newbee.Web.Session do
        model: st.client && st.client.model,
        effort: st.client && st.client.reasoning_effort,
        usage: usage,
+       context_tokens: st.context_tokens,
+       context_window: st.client && Newbee.LLM.Client.context_window(st.client),
        goal: goal,
-       awaiting_permission: Newbee.Agent.Loop.awaiting_permission?(),
+       awaiting_permission:
+         st.kernel != nil and Process.alive?(st.kernel) and
+           Newbee.Agent.Loop.awaiting_permission?(st.kernel),
        steps: steps,
        bindings: bindings,
        turns: st.turns,

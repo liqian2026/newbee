@@ -63,6 +63,16 @@ defmodule Newbee.Agent.Loop do
     GenServer.call(kernel, {:switch_model, client}, 5_000)
   end
 
+  @doc """
+  热更新上下文窗口（WebUI 模型弹窗实时生效）。n 为正整数覆盖值；nil 清除覆盖，
+  回退 provider 元数据自动探测。不触发 model_switched 事件，只更新压缩阈值口径。
+  """
+  def set_context_window(kernel, n) when is_integer(n) and n > 0 do
+    GenServer.call(kernel, {:set_context_window, n}, 15_000)
+  end
+
+  def set_context_window(kernel, nil), do: GenServer.call(kernel, {:set_context_window, nil}, 15_000)
+
   @doc "中断本会话的模型请求或代码求值（会话级隔离，不影响其它会话）。"
   def interrupt(kernel) do
     # 非阻塞控制面：不能向正在 handle_call/2 中运行的 Loop 发 call。
@@ -299,6 +309,20 @@ defmodule Newbee.Agent.Loop do
     end
 
     emit(state, {:model_switched, client.model})
+
+    {:reply, :ok,
+     %{state | client: client, client_fun: client_fun, context_window: Newbee.LLM.Client.context_window(client)}}
+  end
+
+  # 热更新上下文窗口（contextWindows 覆盖变更实时生效）：只替换 client 上的
+  # context_window 字段并重算压缩口径；不发 model_switched，不动其它状态。
+  # n = nil 表示清除覆盖，回退 provider 元数据/默认 256K。
+  def handle_call({:set_context_window, n}, _from, state) do
+    client = Map.put(state.client, :context_window, n)
+
+    client_fun = fn messages, on_text, on_reasoning ->
+      Newbee.LLM.Client.stream_chat(client, messages, on_text, on_reasoning)
+    end
 
     {:reply, :ok,
      %{state | client: client, client_fun: client_fun, context_window: Newbee.LLM.Client.context_window(client)}}
@@ -870,14 +894,17 @@ defmodule Newbee.Agent.Loop do
   # ── 权限确认（§8 ask 档）──
 
   # 等待 TUI/CLI 的权限回复（普通消息；超时 120s 默认拒绝）。
-  # persistent_term 标记供 CLI 主循环查询（"等待确认中"）。
+  # persistent_term 标记按 kernel 进程隔离（key 带 pid）：多会话并存时
+  # A 会话等待权限不会让 B 会话的 state 也报 awaiting_permission（跨会话串扰）。
   @permission_key {__MODULE__, :awaiting_permission}
 
-  @doc "CLI 主循环查询：当前是否在等待权限确认。"
-  def awaiting_permission?, do: :persistent_term.get(@permission_key, false)
+  @doc "查询指定 kernel 当前是否在等待权限确认。"
+  def awaiting_permission?(kernel) when is_pid(kernel),
+    do: :persistent_term.get({@permission_key, kernel}, false)
 
   defp await_permission do
-    :persistent_term.put(@permission_key, true)
+    key = {@permission_key, self()}
+    :persistent_term.put(key, true)
 
     result =
       receive do
@@ -886,7 +913,7 @@ defmodule Newbee.Agent.Loop do
         120_000 -> false
       end
 
-    :persistent_term.erase(@permission_key)
+    :persistent_term.erase(key)
     result
   end
 

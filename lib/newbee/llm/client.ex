@@ -28,7 +28,7 @@ defmodule Newbee.LLM.Client do
       base_url: Keyword.get(opts, :base_url, @default_base_url),
       reasoning_effort: Keyword.get(opts, :reasoning_effort),
       vision: Keyword.get(opts, :vision, true),
-      context_window: nil,
+      context_window: Keyword.get(opts, :context_window),
       interrupt_scope: Keyword.get(opts, :interrupt_scope)
     }
   end
