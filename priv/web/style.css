@@ -514,34 +514,8 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 15px; }
 }
 
 /* ── 进化面板（最右，默认收起）── */
-#evolution-panel {
-  width: 320px; min-width: 320px;
-  background: var(--nb-bg-panel);
-  border-left: 1px solid var(--nb-border);
-  display: flex; flex-direction: column;
-  margin-right: -320px;
-  transition: margin-right var(--nb-dur) var(--nb-ease);
-  overflow: hidden;
-}
-#app.evo-open #evolution-panel { margin-right: 0; }
 
-.evo-expand {
-  position: absolute; right: 0; top: 50%; transform: translateY(-50%);
-  width: 24px; height: 64px; z-index: 20;
-  background: var(--nb-bg-panel); border: 1px solid var(--nb-border);
-  border-right: none; border-radius: 10px 0 0 10px;
-  color: var(--nb-label-3); cursor: pointer; font-size: 14px;
-  transition: background var(--nb-dur), color var(--nb-dur), right var(--nb-dur) var(--nb-ease);
-  display: flex; align-items: center; justify-content: center;
-}
-.evo-expand:hover { background: var(--nb-bg-elev); color: var(--nb-accent); }
-#app.evo-open .evo-expand { right: 320px; }
 
-.evo-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 14px 10px; border-bottom: 1px solid var(--nb-border);
-}
-.evo-title { font-weight: 600; font-size: 13px; color: var(--nb-accent-soft); letter-spacing: 0.3px; }
 
 .evo-status {
   padding: 10px 14px; border-bottom: 1px solid var(--nb-border);
@@ -551,6 +525,23 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 15px; }
 .evo-status-row .k { color: var(--nb-label-caption); }
 .evo-status-row .v { color: var(--nb-label-1); font-family: var(--nb-mono); font-size: 11.5px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.evo-releases {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 4px 10px 8px; border-bottom: 1px solid var(--nb-border);
+}
+.evo-release {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 4px 8px; border-radius: 6px; background: var(--nb-bg-elev);
+  font-size: 11.5px;
+}
+.evo-release-name {
+  font-family: var(--nb-mono); color: var(--nb-label-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.evo-release-stats { color: var(--nb-label-caption); white-space: nowrap; }
+.evo-rate.good { color: var(--nb-green); }
+.evo-rate.warn { color: var(--nb-warn); }
 
 .evo-feed-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -1313,34 +1304,8 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 15px; }
 }
 
 /* ── 进化面板（最右，默认收起）── */
-#evolution-panel {
-  width: 320px; min-width: 320px;
-  background: var(--nb-bg-panel);
-  border-left: 1px solid var(--nb-border);
-  display: flex; flex-direction: column;
-  margin-right: -320px;
-  transition: margin-right var(--nb-dur) var(--nb-ease);
-  overflow: hidden;
-}
-#app.evo-open #evolution-panel { margin-right: 0; }
 
-.evo-expand {
-  position: absolute; right: 0; top: 50%; transform: translateY(-50%);
-  width: 24px; height: 64px; z-index: 20;
-  background: var(--nb-bg-panel); border: 1px solid var(--nb-border);
-  border-right: none; border-radius: 10px 0 0 10px;
-  color: var(--nb-label-3); cursor: pointer; font-size: 14px;
-  transition: background var(--nb-dur), color var(--nb-dur), right var(--nb-dur) var(--nb-ease);
-  display: flex; align-items: center; justify-content: center;
-}
-.evo-expand:hover { background: var(--nb-bg-elev); color: var(--nb-accent); }
-#app.evo-open .evo-expand { right: 320px; }
 
-.evo-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 14px 10px; border-bottom: 1px solid var(--nb-border);
-}
-.evo-title { font-weight: 600; font-size: 13px; color: var(--nb-accent-soft); letter-spacing: 0.3px; }
 
 .evo-status {
   padding: 10px 14px; border-bottom: 1px solid var(--nb-border);

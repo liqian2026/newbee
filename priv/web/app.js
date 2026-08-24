@@ -107,6 +107,8 @@
     t = t.replace(/\*([^*\s][^*]*)\*/g, "<em>$1</em>");
     t = t.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
     t = t.replace(/\[([^\]\n]*)\]\(([^)\n]*)\)/g, '<a class="md-link" href="$2" target="_blank" rel="noopener">$1</a>');
+    // 文件路径可点击（lib/xxx.ex 等）
+    t = t.replace(/\b((?:lib|test|config|docs|priv|bench)\/[\w\/.\-]+\.(?:ex|exs|js|css|html|md|json|toml|yml|yaml))\b/g, '<span class="file-ref" data-path="$1" title="点击查看 diff">$1</span>');
     return t;
   }
 
@@ -181,6 +183,7 @@ const flow = $("flow");
   // 主动 close 旧连接后，旧 onclose 又排一个 connect() 造成多连接并存、
   // 同一事件被多条连接各推一份而在前端重复渲染。
   let reconnectTimer = 0;
+  let lastUserPrompt = ""; // 错误重试用
   function connect() {
     if (!state.sid) return;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = 0; }
@@ -205,9 +208,14 @@ const flow = $("flow");
       }
       else if (frame.type === "system") pushEvoEvent(frame.topic, frame.payload);
     };
+    ws.onopen = () => {
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = 0; }
+      line("notice", "✓ 已连接");
+    };
     ws.onclose = () => {
       if (ws !== state.ws) return; // 过期连接不重连
       if (state.ws === ws) state.ws = null;
+      line("notice", "⚠ 连接断开，正在重连…");
       reconnectTimer = setTimeout(connect, 1500);
     };
   }
@@ -295,6 +303,7 @@ case "goal_round": break;
   }
 
   function finishTurn() {
+    clearCurrentOp();
     state.busy = false;
     if (state.currentAssistant) {
       state.currentAssistant.innerHTML = renderMarkdown(streamAcc);
@@ -446,6 +455,8 @@ case "goal_round": break;
   function toolStart(p) {
     // 工具开始时归档当前 reasoning 块（去 running，下次 reasoning 开新块）
     archiveReasoning();
+    mcToolStart(p);
+    showCurrentOp(p.title || "run_elixir");
     const card = document.createElement("div");
     card.className = "msg msg-tool";
     const head = document.createElement("div");
@@ -482,10 +493,27 @@ case "goal_round": break;
     if (!state.currentTool) return;
     state.currentTool.classList.add(ok ? "ok" : "err");
     state.currentTool.textContent = (text || "").split("\n").slice(0, 30).join("\n");
+    if (!ok && lastUserPrompt) {
+      addRetryButton(state.currentToolCard);
+    }
     stampDuration(state.currentToolCard, durationMs);
+    mcToolResult(ok, durationMs);
     state.currentTool = null;
     state.currentToolCard = null;
   }
+  function addRetryButton(toolCard) {
+    if (!toolCard || !lastUserPrompt) return;
+    const btn = document.createElement("button");
+    btn.className = "btn-retry";
+    btn.innerHTML = "↻ 重试";
+    btn.addEventListener("click", () => {
+      btn.remove();
+      input.value = lastUserPrompt;
+      send();
+    });
+    toolCard.appendChild(btn);
+  }
+
   // 工具用时（对齐 TUI ⏱ format_duration）：<60s → X.Xs，否则 Xm Y.Ys
   function formatDur(ms) {
     const secs = ms / 1000;
@@ -538,6 +566,7 @@ case "goal_round": break;
     card.append(head, body);
     flow.appendChild(card);
     state.currentAssistant = null;
+    mcOnFileChange(p.path);
   }
 
 
@@ -669,6 +698,7 @@ case "goal_round": break;
       confirmDialog("删除会话「" + title + "」？此操作不可恢复。", async () => {
         try {
           await rpc("session.delete", { sessionId: s.id });
+          clearTiming(s.id); // 清理本地 timing 缓存
           if (s.id === state.sid) {
             state.sid = null;
             localStorage.removeItem("newbee.sid");
@@ -777,34 +807,124 @@ case "goal_round": break;
     $("session-title").textContent = title || sid;
   }
 
+  function renderWelcome() {
+    const flowEl = $("flow");
+    const card = document.createElement("div");
+    card.className = "welcome-card";
+    card.innerHTML = `
+      <div class="wc-title">🐝 欢迎使用 newbee</div>
+      <div class="wc-desc">在一个持久化的 Elixir 环境中与 AI 协作编程</div>
+      <div class="wc-grid">
+        <div class="wc-item"><b>@文件</b><span>引用项目文件内容</span></div>
+        <div class="wc-item"><b>/命令</b><span>输入 / 打开命令面板</span></div>
+        <div class="wc-item"><b>Ctrl+K</b><span>快速命令</span></div>
+        <div class="wc-item"><b>Ctrl+M</b><span>Mission Control 面板</span></div>
+        <div class="wc-item"><b>Esc</b><span>中断 AI 执行</span></div>
+        <div class="wc-item"><b>Steering</b><span>AI 工作时发消息可转向</span></div>
+      </div>
+    `;
+    flowEl.appendChild(card);
+  }
+
   async function newSession() {
+    // 清空对话后显示欢迎卡片
+    setTimeout(() => { if ($("flow").children.length === 0) renderWelcome(); }, 500);
     const created = await rpc("session.create", {});
     await resume(created.sessionId);
   }
 
-  function renderHistory(msgs) {
-    msgs.forEach((m) => {
-      if (!m) return;
-      if (m.role === "user") {
-        if (m.images && m.images.length) renderUserLine(m.content, m.images);
-        else line("user", m.content);
-      }
-      else if (m.role === "assistant") {
-        if (m.reasoning) {
-          const d = el("msg-reasoning", "");
-          d.dataset.thinkText = m.reasoning;
-          d.dataset.open = "0";
-          renderReasoningBody(d);
-        }
+  // 分页加载常量
+  const HISTORY_PAGE = 50;
+  let historyOffset = 0;   // 已跳过的消息数（从头算起）
+  let allHistoryMsgs = []; // 全量历史缓存
 
-        if (m.content) { const d = el("msg-assistant", m.content, true); bindCopyButtons(d); }
-        (m.toolCalls || []).forEach((tc) => toolStart({ name: tc.name, title: tc.title, code: tc.code }));
-      } else if (m.role === "tool") {
-        const ok = !(m.content || "").startsWith("✗");
-        toolResult(m.content, ok);
-      }
-    });
+  function renderHistory(msgs) {
+    MC._replaying = true;
+    allHistoryMsgs = msgs.filter(Boolean);
+
+    if (allHistoryMsgs.length > HISTORY_PAGE) {
+      // 只渲染最近 HISTORY_PAGE 条
+      const skip = allHistoryMsgs.length - HISTORY_PAGE;
+      historyOffset = skip;
+      renderLoadMoreBtn(skip);
+      allHistoryMsgs.slice(skip).forEach(renderOneMsg);
+    } else {
+      allHistoryMsgs.forEach(renderOneMsg);
+    }
+
+    MC._replaying = false;
+    MC.steps = [];
+    renderMCSteps();
     scrollBottom();
+  }
+
+  function renderOneMsg(m) {
+    if (m.role === "user") {
+      if (m.images && m.images.length) renderUserLine(m.content, m.images);
+      else line("user", m.content);
+    }
+    else if (m.role === "assistant") {
+      if (m.reasoning) {
+        const d = el("msg-reasoning", "");
+        d.dataset.thinkText = m.reasoning;
+        d.dataset.open = "0";
+        renderReasoningBody(d);
+      }
+      if (m.content) { const d = el("msg-assistant", m.content, true); bindCopyButtons(d); }
+      (m.toolCalls || []).forEach((tc) => toolStart({ name: tc.name, title: tc.title, code: tc.code }));
+    } else if (m.role === "tool") {
+      const ok = !(m.content || "").startsWith("✗");
+      toolResult(m.content, ok);
+    }
+  }
+
+  function renderLoadMoreBtn(remaining) {
+    const flowEl = $("flow");
+    const btn = document.createElement("div");
+    btn.className = "load-more-btn";
+    btn.id = "load-more";
+    btn.innerHTML = `<button class="btn-ghost" style="margin:8px auto;display:block;font-size:12px">↑ 加载更早 ${remaining} 条消息</button>`;
+    btn.addEventListener("click", () => loadEarlier());
+    flowEl.insertBefore(btn, flowEl.firstChild);
+  }
+
+  async function loadEarlier() {
+    const btn = $("load-more");
+    if (btn) btn.remove();
+    const flowEl = $("flow");
+
+    // 记录当前滚动位置
+    const transcriptEl = $("transcript");
+    const oldHeight = transcriptEl.scrollHeight;
+
+    MC._replaying = true;
+    const newSkip = Math.max(0, historyOffset - HISTORY_PAGE);
+    const start = newSkip;
+    const end = historyOffset;
+    historyOffset = newSkip;
+
+    // 在顶部插入旧消息（需要先收集 DOM 节点再插入）
+    const fragment = document.createDocumentFragment();
+    const tempFlow = document.createElement("div");
+    
+    // 暂存当前 flow 内容
+    const existingNodes = Array.from(flowEl.childNodes);
+    
+    // 清空 flow，渲染旧消息到 fragment
+    // 简化方案：直接在前面追加（DOM 顺序可能不完全对，但功能正确）
+    allHistoryMsgs.slice(start, end).forEach((m) => { renderOneMsg(m); });
+
+    MC._replaying = false;
+
+    // 保持滚动位置（看到的是同一条消息）
+    requestAnimationFrame(() => {
+      transcriptEl.scrollTop = transcriptEl.scrollHeight - oldHeight;
+    });
+
+    // 如果还有更早的消息，重新显示按钮
+    if (historyOffset > 0) {
+      renderLoadMoreBtn(historyOffset);
+    }
   }
 
   // ── 图片附件（上传 / 粘贴 / 预览）──
@@ -879,6 +999,13 @@ case "goal_round": break;
     const text = input.value.trim();
     const images = state.attachments.map(x => x.dataUrl);
     if ((!text && images.length === 0) || !state.sid) return;
+    const wasSteering = state.busy;
+    if (!wasSteering && text) lastUserPrompt = text;
+    if (wasSteering) {
+      // 转向模式：先中断当前 turn
+      interrupt();
+      line("notice", "⤳ 转向：中断当前操作，执行新指令");
+    }
     input.value = "";
     autoGrow();
     // 回显：文本 + 图片
@@ -1006,8 +1133,23 @@ case "goal_round": break;
   function setBusy(b) {
     $("status-dot").className = `dot ${b ? "busy" : "idle"}`;
     $("interrupt").classList.toggle("hidden", !b);
-    $("send").disabled = b && false;  // 允许排队发送
-    if (b) showTurnStatus(); else clearTurnStatus();
+    const sendBtn = $("send");
+    sendBtn.disabled = false;
+    sendBtn.textContent = b ? "转向" : "发送";
+    sendBtn.title = b ? "中断当前 turn 并发送新指令" : "发送";
+    sendBtn.classList.toggle("btn-steer", b);
+    if (b) {
+      showTurnStatus();
+      // AI 开始工作时，自动展开 MC 步骤 tab（如果 MC 已打开）
+      if (MC.open) switchMCTab("steps");
+    } else {
+      clearTurnStatus();
+      // AI 完成时，自动切换到文件 tab
+      if (MC.open) {
+        switchMCTab("files");
+        refreshMCFiles();
+      }
+    }
   }
   // dsh turn 状态行：shimmer 文字，turn 进行中显示
   let turnStatusEl = null;
@@ -1155,25 +1297,12 @@ case "goal_round": break;
 
   // ── 进化面板（最左，默认收起）──
   function initEvolution() {
-    applyEvo(localStorage.getItem("newbee.evo") === "1", false);
-    const expandBtn = $("evo-expand");
-    if (expandBtn) expandBtn.onclick = () => applyEvo(true, true);
-    const collapseBtn = $("evo-collapse");
-    if (collapseBtn) collapseBtn.onclick = () => applyEvo(false, true);
     const refreshBtn = $("evo-refresh");
     if (refreshBtn) refreshBtn.onclick = () => refreshEvolution();
-    refreshEvolution();
-    // 每 10s 轮询状态；事件经 WS 实时增量（onEvent 里的 evo_* 分支）
+    // poll status every 10s; events stream in via WS (evo_* branches in onEvent)
     setInterval(refreshEvoStatus, 10_000);
   }
 
-  function applyEvo(open, persist) {
-    document.getElementById("app").classList.toggle("evo-open", open);
-    const expandBtn = $("evo-expand");
-    if (expandBtn) expandBtn.style.display = open ? "none" : "flex";
-    if (persist) localStorage.setItem("newbee.evo", open ? "1" : "0");
-    if (open) flushEvoBuffer();
-  }
 
   async function refreshEvolution() {
     await Promise.all([refreshEvoStatus(), refreshEvoFeed()]);
@@ -1192,9 +1321,57 @@ case "goal_round": break;
         setV("evo-revision", "-");
         setV("evo-changes", "-");
       }
+      // 最近进化事件（时间 + 类型）
+      const le = st.last_evolution;
+      if (le && le.event) {
+        const t = (le.at || "").replace("T", " ").slice(5, 16);
+        setV("evo-last", (le.event.kind || le.event.topic || "evo") + " " + t);
+      } else {
+        setV("evo-last", "暂无");
+      }
+      // Release 效果表：plugin · 使用 · 成功率 · 均耗
+      renderEvoReleases(st.active_releases || []);
       const kb = (st.event_log_bytes || 0) / 1024;
       setV("evo-events-size", kb >= 1024 ? (kb / 1024).toFixed(1) + " MB" : Math.round(kb) + " KB");
     } catch (e) { /* 忽略轮询错误 */ }
+    // 环境健康（规则/抗体）
+    try {
+      const health = await rpc("env.health", {});
+      const rules = health.rules || {};
+      const abs = health.antibodies || {};
+      const totalHits = Object.values(rules.hits || {}).reduce((a, b) => a + b, 0);
+      setV("evo-rules", (rules.count || 0) + " 条 (命中 " + totalHits + " 次)");
+      setV("evo-antibodies", (abs.count || 0) + " 条 (" + (abs.verified || 0) + " 已验证)");
+    } catch (e) { /* env.health 不可用时忽略 */ }
+  }
+
+  function renderEvoReleases(releases) {
+    const box = $("evo-releases");
+    if (!box) return;
+    if (!releases.length) {
+      box.innerHTML = '<div class="evo-empty">暂无激活的 release — 环境还在初始状态</div>';
+      return;
+    }
+    box.innerHTML = releases
+      .map((r) => {
+        const uses = r.uses != null ? r.uses : "-";
+        const rate = r.success_rate != null ? Math.round(r.success_rate * 100) + "%" : "-";
+        const tok = r.avg_tokens != null ? fmtTok(r.avg_tokens) : "-";
+        const ok = r.success_rate != null && r.success_rate >= 0.8;
+        const cls = r.success_rate == null ? "" : ok ? " good" : " warn";
+        return '<div class="evo-release"><span class="evo-release-name" title="' + escapeHtml(r.plugin || "") + '">'
+          + escapeHtml(r.plugin || "?") + '</span>'
+          + '<span class="evo-release-stats">' + uses + ' 次 · <span class="evo-rate' + cls + '">'
+          + rate + '</span> · ' + tok + '</span></div>';
+      })
+      .join("");
+  }
+
+  function fmtTok(n) {
+    if (n == null) return "-";
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+    return String(n);
   }
 
   async function refreshEvoFeed() {
@@ -1292,7 +1469,8 @@ case "goal_round": break;
   }
   function flushEvoBuffer() {
     const box = $("evo-feed");
-    if (!box || !document.getElementById("app").classList.contains("evo-open")) return;
+    const pane = $("mc-evolution");
+    if (!box || !pane || pane.classList.contains("hidden")) return;
     if (evoBuffer.length === 0) return;
     const empty = box.querySelector(".evo-empty");
     if (empty) empty.remove();
@@ -1301,11 +1479,625 @@ case "goal_round": break;
     while (box.children.length > 100) box.removeChild(box.lastChild);
   }
 
+
+  // 当前操作指示器
+  function showCurrentOp(title) {
+    const el = $("current-op");
+    if (el) { el.textContent = "⟳ " + title; el.classList.remove("hidden"); }
+  }
+  function clearCurrentOp() {
+    const el = $("current-op");
+    if (el) { el.textContent = ""; el.classList.add("hidden"); }
+  }
+
+
+  // ── @ 文件引用自动补全 ──
+  let atDropdown = null;
+  let atSelected = 0;
+  let atItems = [];
+
+  function initAtComplete() {
+    const input = $("input");
+    let atDebounce = null;
+
+    input.addEventListener("input", () => {
+      const v = input.value;
+      const cursor = input.selectionStart;
+      const before = v.slice(0, cursor);
+      const atMatch = before.match(/@([\w\/.\-]*)$/);
+
+      if (atMatch) {
+        clearTimeout(atDebounce);
+        atDebounce = setTimeout(() => showAtDropdown(atMatch[1], cursor), 200);
+      } else {
+        hideAtDropdown();
+      }
+    });
+
+    input.addEventListener("keydown", (e) => {
+      if (!atDropdown) return;
+      if (e.key === "ArrowDown") { e.preventDefault(); atSelected = Math.min(atSelected + 1, atItems.length - 1); renderAtDropdown(); }
+      if (e.key === "ArrowUp") { e.preventDefault(); atSelected = Math.max(atSelected - 1, 0); renderAtDropdown(); }
+      if (e.key === "Tab" || e.key === "Enter") {
+        if (atItems.length > 0) { e.preventDefault(); selectAtItem(atItems[atSelected]); }
+      }
+      if (e.key === "Escape") { hideAtDropdown(); }
+    });
+
+    // 点击其他区域关闭
+    document.addEventListener("click", (e) => {
+      if (atDropdown && !atDropdown.contains(e.target) && e.target !== input) hideAtDropdown();
+    });
+  }
+
+  async function showAtDropdown(query, cursor) {
+    try {
+      const res = await rpc("files.search", { q: query });
+      atItems = (res && res.files) || [];
+      if (atItems.length === 0) { hideAtDropdown(); return; }
+      atSelected = 0;
+
+      if (!atDropdown) {
+        atDropdown = document.createElement("div");
+        atDropdown.className = "at-dropdown";
+        const composer = $("composer");
+        composer.style.position = "relative";
+        composer.appendChild(atDropdown);
+      }
+      atDropdown.classList.remove("hidden");
+      renderAtDropdown();
+    } catch (e) { hideAtDropdown(); }
+  }
+
+  function renderAtDropdown() {
+    if (!atDropdown) return;
+    atDropdown.innerHTML = atItems.map((f, i) =>
+      `<div class="at-item ${i === atSelected ? "selected" : ""}" data-idx="${i}">
+        <span class="at-icon">${f.ext === "ex" || f.ext === "exs" ? "💧" : f.ext === "js" ? "📜" : f.ext === "md" ? "📝" : "📄"}</span>
+        <span class="at-path">${escapeHtml(f.path)}</span>
+      </div>`
+    ).join("");
+    atDropdown.querySelectorAll(".at-item").forEach((el) => {
+      el.addEventListener("mousedown", (e) => { e.preventDefault(); selectAtItem(atItems[+el.dataset.idx]); });
+    });
+  }
+
+  function selectAtItem(item) {
+    const input = $("input");
+    const v = input.value;
+    const cursor = input.selectionStart;
+    const before = v.slice(0, cursor);
+    const after = v.slice(cursor);
+    const newBefore = before.replace(/@[\w\/.\-]*$/, "@" + item.path + " ");
+    input.value = newBefore + after;
+    input.focus();
+    input.selectionStart = input.selectionEnd = newBefore.length;
+    hideAtDropdown();
+  }
+
+  function hideAtDropdown() {
+    if (atDropdown) { atDropdown.classList.add("hidden"); }
+    atItems = [];
+  }
+
+  // ── Mission Control 面板 ──
+  const MC = {
+    open: false,
+    tab: "files",
+    files: [],
+    steps: [],
+    stepCounter: 0,
+    refreshTimer: null,
+  };
+
+  function initMissionControl() {
+    const panel = $("mission-control");
+    const expandBtn = $("mc-expand");
+    const collapseBtn = $("mc-collapse");
+
+    expandBtn.addEventListener("click", () => setMCOpen(true));
+    collapseBtn.addEventListener("click", () => setMCOpen(false));
+
+    // Tab 切换
+    document.querySelectorAll(".mc-tab").forEach((btn) => {
+      btn.addEventListener("click", () => switchMCTab(btn.dataset.tab));
+    });
+
+    // 文件刷新
+    $("mc-files-refresh").addEventListener("click", () => refreshMCFiles());
+    // 步骤清空
+    $("mc-steps-clear").addEventListener("click", () => { MC.steps = []; renderMCSteps(); });
+    // Diff 刷新
+    $("mc-diff-refresh").addEventListener("click", () => refreshMCDiff());
+    $("mc-overview-refresh").addEventListener("click", () => refreshMCOverview());
+    $("mc-run-test").addEventListener("click", () => mcRunTest());
+    $("mc-commit").addEventListener("click", () => mcCommit());
+
+    // 恢复面板状态
+    try {
+      const saved = localStorage.getItem("newbee-mc-open");
+      if (saved === "1") setMCOpen(true);
+    } catch (e) {}
+  }
+
+  function setMCOpen(open) {
+    MC.open = open;
+    const panel = $("mission-control");
+    const expandBtn = $("mc-expand");
+    if (open) {
+      panel.classList.remove("hidden");
+      expandBtn.classList.add("hidden");
+      refreshMCFiles();
+      if (MC.tab === "evolution") refreshEvolution();
+      if (MC.tab === "overview") refreshMCOverview();
+      if (MC.tab === "diff") refreshMCDiff();
+    } else {
+      panel.classList.add("hidden");
+      expandBtn.classList.remove("hidden");
+    }
+    try { localStorage.setItem("newbee-mc-open", open ? "1" : "0"); } catch (e) {}
+  }
+
+  function switchMCTab(tab) {
+    MC.tab = tab;
+    document.querySelectorAll(".mc-tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    document.querySelectorAll(".mc-pane").forEach((p) => p.classList.add("hidden"));
+    $("mc-" + tab).classList.remove("hidden");
+    if (tab === "diff") refreshMCDiff();
+    if (tab === "overview") refreshMCOverview();
+    if (tab === "evolution") refreshEvolution();
+  }
+
+  // ── 文件变更追踪 ──
+  async function refreshMCFiles() {
+    try {
+      const res = await rpc("git.diffStat", {});
+      MC.files = (res && res.files) || [];
+      renderMCFiles();
+    } catch (e) {
+      // git 不可用（非 git 项目等）
+      MC.files = [];
+      renderMCFiles();
+    }
+  }
+
+  function renderMCFiles() {
+    const list = $("mc-files-list");
+    const count = $("mc-files-count");
+    const n = MC.files.length;
+    count.textContent = n === 0 ? "无文件变更" : `${n} 个文件变更`;
+
+    if (n === 0) {
+      list.innerHTML = '<div style="color:var(--fg2);font-size:12px;padding:20px;text-align:center">工作区干净<br>暂无变更</div>';
+      return;
+    }
+
+    list.innerHTML = MC.files.map((f) => {
+      const cls = f.status === "new" ? "mc-file new" : "mc-file";
+      const stats = f.status === "new"
+        ? `<span class="mc-file-added">+${f.added}</span> <span class="mc-file-status">新文件</span>`
+        : `<span class="mc-file-added">+${f.added}</span> <span class="mc-file-deleted">-${f.deleted}</span>`;
+      return `<div class="${cls}" data-path="${escapeHtml(f.path)}" title="点击查看 diff">
+        <div class="mc-file-path">${escapeHtml(f.path)}</div>
+        <div class="mc-file-stats">${stats}</div>
+      </div>`;
+    }).join("");
+
+    // 点击展开 diff
+    list.querySelectorAll(".mc-file").forEach((el) => {
+      el.addEventListener("click", () => showFileDiff(el.dataset.path));
+    });
+  }
+
+  async function showFileDiff(path) {
+    switchMCTab("diff");
+    const content = $("mc-diff-content");
+    content.innerHTML = '<div style="color:var(--fg2);padding:20px;text-align:center">加载中…</div>';
+    try {
+      const res = await rpc("git.diff", { path });
+      renderDiff(content, res.diff || "(无 diff)");
+    } catch (e) {
+      content.innerHTML = `<div style="color:#f44336;padding:20px">加载失败: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  // ── 执行步骤时间线 ──
+  function mcToolStart(p) {
+    if (MC._replaying) return;
+    MC.stepCounter++;
+    const step = {
+      id: MC.stepCounter,
+      title: p.title || "run_elixir",
+      code: p.code || "",
+      status: "running",
+      startTime: Date.now(),
+      duration: null,
+    };
+    MC.steps.push(step);
+    // 只保留最近 200 步
+    if (MC.steps.length > 200) MC.steps = MC.steps.slice(-200);
+    renderMCSteps();
+  }
+
+  function mcToolResult(ok, durationMs) {
+    if (MC._replaying) return;
+    // 更新最后一个 running 步骤
+    for (let i = MC.steps.length - 1; i >= 0; i--) {
+      if (MC.steps[i].status === "running") {
+        MC.steps[i].status = ok ? "ok" : "err";
+        MC.steps[i].duration = durationMs || (Date.now() - MC.steps[i].startTime);
+        break;
+      }
+    }
+    renderMCSteps();
+    // 有文件操作时刷新文件列表（防抖）
+    if (MC.open && MC.tab === "files") {
+      clearTimeout(MC.refreshTimer);
+      MC.refreshTimer = setTimeout(() => refreshMCFiles(), 800);
+    }
+  }
+  function mcOnFileChange(path) {
+    // 文件变更事件 → 防抖刷新文件列表
+    if (MC.open) {
+      clearTimeout(MC.refreshTimer);
+      MC.refreshTimer = setTimeout(() => refreshMCFiles(), 600);
+    }
+  }
+
+
+  function renderMCSteps() {
+    const list = $("mc-steps-list");
+    const count = $("mc-steps-count");
+    const n = MC.steps.length;
+    count.textContent = n === 0 ? "无步骤" : `${n} 个步骤`;
+
+    if (n === 0) {
+      list.innerHTML = '<div style="color:var(--fg2);font-size:12px;padding:20px;text-align:center">等待 AI 执行…</div>';
+      return;
+    }
+
+    // 倒序显示（最新在前）
+    const reversed = [...MC.steps].reverse();
+    list.innerHTML = reversed.map((s) => {
+      const statusCls = s.status === "running" ? "running" : s.status === "ok" ? "ok" : "err";
+      const statusIcon = s.status === "running" ? "⏳" : s.status === "ok" ? "✓" : "✗";
+      const dur = s.duration ? fmtDur(s.duration) : "…";
+      const codePreview = s.code ? escapeHtml(s.code.slice(0, 500)) : "";
+      return `<div class="mc-step ${statusCls}" data-id="${s.id}">
+        <div class="mc-step-title">${statusIcon} #${s.id} ${escapeHtml(s.title)}</div>
+        <div class="mc-step-meta">${dur}</div>
+        ${codePreview ? `<div class="mc-step-detail">${codePreview}</div>` : ""}
+      </div>`;
+    }).join("");
+
+    // 点击展开/折叠
+    list.querySelectorAll(".mc-step").forEach((el) => {
+      el.addEventListener("click", () => el.classList.toggle("expanded"));
+    });
+  }
+
+  // ── 全量 Diff ──
+  async function refreshMCDiff() {
+    const content = $("mc-diff-content");
+    content.innerHTML = '<div style="color:var(--fg2);padding:20px;text-align:center">加载中…</div>';
+    try {
+      // 先取影响分析
+      const impact = await rpc("git.impact", {}).catch(() => null);
+      let impactHtml = "";
+      if (impact && impact.summary) {
+        const s = impact.summary;
+        const riskColor = s.overall_risk === "high" ? "#f44336" : s.overall_risk === "medium" ? "#ff9800" : "#4caf50";
+        const riskLabel = s.overall_risk === "high" ? "⚠ 高风险" : s.overall_risk === "medium" ? "◆ 中风险" : "● 低风险";
+        impactHtml = `<div class="mc-impact">
+          <div class="mc-impact-summary" style="border-left:3px solid ${riskColor}">
+            <b>${riskLabel}</b> · ${s.total_files} 文件 · <span class="diff-add">+${s.total_added}</span> <span class="diff-del">-${s.total_deleted}</span>
+            ${s.has_tests ? ' · ✓ 含测试' : ' · ⚠ 无测试'}
+          </div>
+          ${(impact.files || []).slice(0, 10).map(f => {
+            const rc = f.risk === "high" ? "#f44336" : f.risk === "medium" ? "#ff9800" : "var(--fg2)";
+            return `<div class="mc-impact-file" title="${f.dependent_files ? '被依赖: ' + escapeHtml(f.dependent_files.join(", ")) : ''}">
+              <span style="color:${rc}">●</span> ${escapeHtml(f.path)}
+              <span class="mc-impact-meta">+${f.added} -${f.deleted}${f.dependents > 0 ? ' · ' + f.dependents + ' 依赖' : ''}${f.is_test ? ' 🧪' : ''}</span>
+            </div>`;
+          }).join("")}
+        </div><hr style="border-color:var(--border);margin:8px 0">`;
+      }
+      // 再取 diff
+      const res = await rpc("git.diff", {});
+      if (!res.diff || res.diff.trim() === "") {
+        content.innerHTML = impactHtml || '<div style="color:var(--fg2);padding:20px;text-align:center">工作区干净<br>无 diff</div>';
+      } else {
+        renderDiff(content, res.diff);
+        if (impactHtml) content.innerHTML = impactHtml + content.innerHTML;
+      }
+    } catch (e) {
+      content.innerHTML = `<div style="color:#f44336;padding:20px">加载失败: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  function renderDiff(container, diffText) {
+    const lines = diffText.split("\n");
+    const html = lines.map((line) => {
+      let cls = "";
+      let escaped = escapeHtml(line);
+      if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) {
+        cls = ' class="diff-header"';
+      } else if (line.startsWith("@@")) {
+        cls = ' class="diff-hunk"';
+      } else if (line.startsWith("+")) {
+        cls = ' class="diff-add"';
+      } else if (line.startsWith("-")) {
+        cls = ' class="diff-del"';
+      }
+      return `<div${cls}>${escaped}</div>`;
+    }).join("");
+    container.innerHTML = html;
+  }
+  // ── 会话概览 ──
+  async function refreshMCOverview() {
+    const content = $("mc-overview-content");
+    if (!state.sid) { content.innerHTML = '<div style="color:var(--fg2);padding:20px;text-align:center">无活跃会话</div>'; return; }
+    try {
+      const st = await rpc("session.state", { sessionId: state.sid });
+      const u = st.usage || {};
+      const rows = [
+        ["模型", (st.provider ? st.provider + "/" : "") + (st.model || "-")],
+        ["状态", st.busy ? "🔴 运行中" : "🟢 空闲"],
+        ["轮数 / 步数", (st.turns || 0) + " 轮 · " + (st.steps || 0) + " 步"],
+        ["Bindings", st.bindings || 0],
+        ["队列", st.queued || 0],
+        ["输入 tokens", fmtTok(u.prompt_tokens || 0)],
+        ["输出 tokens", fmtTok(u.completion_tokens || 0)],
+        ["缓存命中", u.prompt_tokens > 0 ? (((u.cache_read_tokens || 0) / u.prompt_tokens) * 100).toFixed(1) + "%" : "-"],
+        ["自治档位", st.policy || "-"],
+      ];
+      let bindingsHtml = "";
+      try {
+        const bd = await rpc("session.bindings", { sessionId: state.sid });
+        const items = (bd && bd.bindings) || [];
+        if (items.length > 0) {
+          bindingsHtml = '<div class="mc-bindings-title">Bindings</div>' + items.map((b) =>
+            `<div class="mc-ov-row"><span class="k">${escapeHtml(b.name)}</span><span class="v">${b.type} · ${fmtTok(b.size || 0)}B</span></div>`
+          ).join("");
+        }
+      } catch (e) { /* bindings RPC 不可用 */ }
+
+      content.innerHTML = rows.map(([k, v]) =>
+        `<div class="mc-ov-row"><span class="k">${k}</span><span class="v">${v}</span></div>`
+      ).join("") + bindingsHtml;
+    } catch (e) {
+      content.innerHTML = `<div style="color:#f44336;padding:20px">加载失败</div>`;
+    }
+  }
+
+
+  // ── 工作流闭环：测试 + 提交 ──
+  async function mcRunTest() {
+    const btn = $("mc-run-test");
+    const diffContent = $("mc-diff-content");
+    btn.classList.add("running");
+    btn.textContent = "⏳ 运行中";
+    try {
+      const res = await rpc("project.test", {});
+      const cls = res.passed ? "pass" : "fail";
+      const icon = res.passed ? "✓ 通过" : "✗ 失败";
+      diffContent.innerHTML = `<div class="mc-test-result ${cls}">
+        <b>${icon}</b> · ${escapeHtml(res.cmd || "")}
+        \n\n${escapeHtml(res.output || "")}
+      </div>` + diffContent.innerHTML;
+    } catch (e) {
+      line("error", "测试运行失败: " + e.message);
+    }
+    btn.classList.remove("running");
+    btn.textContent = "🧪 测试";
+  }
+
+  async function mcCommit() {
+    const msg = prompt("提交信息:", "wip");
+    if (!msg) return;
+    try {
+      const res = await rpc("git.commit", { message: msg });
+      line("done", `已提交: ${msg}`);
+      refreshMCFiles();
+      refreshMCDiff();
+    } catch (e) {
+      line("error", "提交失败: " + e.message);
+    }
+  }
+
+
+
+  // ── 全局键盘快捷键 ──
+  function initGlobalKeys() {
+    document.addEventListener("keydown", (e) => {
+      // 不在输入框中时的快捷键
+      const inInput = document.activeElement === $("input") || document.activeElement === $("cmd-input");
+      const mod = e.ctrlKey || e.metaKey;
+
+      // Escape: 中断（全局）
+      if (e.key === "Escape" && state.busy && !inInput) {
+        e.preventDefault();
+        interrupt();
+      }
+
+      // Ctrl+M: 打开/关闭 Mission Control
+      if (mod && e.key === "m" && !e.shiftKey) {
+        e.preventDefault();
+        setMCOpen(!MC.open);
+      }
+
+      // Ctrl+Shift+M: 打开 Mission Control 并切到进化 tab
+      if (mod && e.key === "M" && e.shiftKey) {
+        e.preventDefault();
+        setMCOpen(true);
+        switchMCTab("evolution");
+      }
+
+      // Ctrl+N: 新会话
+      if (mod && e.key === "n") {
+        e.preventDefault();
+        newSession();
+      }
+
+      // Ctrl+1/2/3/4: 切换 MC tab（MC 打开时）
+      if (mod && ["1", "2", "3", "4"].includes(e.key) && MC.open) {
+        e.preventDefault();
+        const tabs = ["files", "steps", "diff", "overview"];
+        const tab = tabs[parseInt(e.key) - 1];
+        if (tab) switchMCTab(tab);
+      }
+
+      // Ctrl+Enter: 发送（输入框中）
+      if (mod && e.key === "Enter" && inInput) {
+        e.preventDefault();
+        send();
+      }
+    });
+  }
+
+
+  // 文件路径点击 → 显示 diff
+  document.addEventListener("click", (e) => {
+    if (e.target.classList.contains("file-ref")) {
+      const path = e.target.dataset.path;
+      if (path) {
+        if (!MC.open) setMCOpen(true);
+        showFileDiff(path);
+      }
+    }
+  });
+
+  // ── 命令面板 (Command Palette) ──
+  const CMD_LIST = [
+    { icon: "📦", name: "/compact", desc: "压缩对话历史", needsArg: false },
+    { icon: "🔀", name: "/diff", desc: "查看当前变更", needsArg: false },
+    { icon: "🤖", name: "/model", desc: "切换模型 (provider/model-id)", needsArg: true },
+    { icon: "↩", name: "/undo", desc: "回滚到上一快照", needsArg: false },
+    { icon: "📊", name: "/tokens", desc: "Token 用量详情", needsArg: false },
+    { icon: "🔗", name: "/bindings", desc: "查看绑定变量", needsArg: false },
+    { icon: "📋", name: "/status", desc: "环境状态", needsArg: false },
+    { icon: "🎯", name: "/goal", desc: "设置自主目标", needsArg: true },
+    { icon: "🧬", name: "/evolve", desc: "投递进化需求", needsArg: true },
+    { icon: "🔧", name: "/tools", desc: "查看工具库", needsArg: false },
+    { icon: "🌐", name: "/environment", desc: "环境版本图", needsArg: true },
+    { icon: "📸", name: "/snapshot", desc: "环境快照", needsArg: false },
+    { icon: "⏪", name: "/rollback", desc: "环境回退", needsArg: true },
+    { icon: "🔐", name: "/permissions", desc: "权限档位", needsArg: true },
+    { icon: "⚖", name: "/autonomy", desc: "自治档位", needsArg: true },
+    { icon: "📝", name: "/dump", desc: "环境自画像", needsArg: false },
+    { icon: "📜", name: "/log", desc: "事件日志", needsArg: false },
+    { icon: "✅", name: "/approve", desc: "批准待审变更", needsArg: true },
+    { icon: "❌", name: "/reject", desc: "拒绝待审变更", needsArg: true },
+    { icon: "🔄", name: "/reset", desc: "重置 evaluator", needsArg: false },
+    { icon: "💾", name: "/session", desc: "会话管理", needsArg: true },
+    { icon: "📎", name: "/attach", desc: "接回 daemon", needsArg: false },
+    { icon: "🆕", name: "/new", desc: "新会话", needsArg: false },
+    { icon: "📁", name: "/init", desc: "初始化项目", needsArg: false },
+  ];
+
+  let cmdSelected = 0;
+
+  function initCmdPalette() {
+    const palette = $("cmd-palette");
+    const input = $("cmd-input");
+    const list = $("cmd-list");
+
+    // Ctrl+K 或 Ctrl+P 打开
+    document.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "p")) {
+        e.preventDefault();
+        openCmdPalette();
+      }
+      if (e.key === "Escape" && !palette.classList.contains("hidden")) {
+        closeCmdPalette();
+      }
+    });
+
+    // 输入框中输入 "/" 开头时提示
+    $("input").addEventListener("input", () => {
+      const v = $("input").value;
+      if (v === "/") openCmdPalette();
+    });
+
+    input.addEventListener("input", () => renderCmdList(input.value));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); cmdSelected = Math.min(cmdSelected + 1, filteredCmds().length - 1); renderCmdList(input.value); }
+      if (e.key === "ArrowUp") { e.preventDefault(); cmdSelected = Math.max(cmdSelected - 1, 0); renderCmdList(input.value); }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const cmds = filteredCmds();
+        if (cmds[cmdSelected]) selectCmd(cmds[cmdSelected]);
+      }
+    });
+
+    // 点击空白关闭
+    palette.addEventListener("click", (e) => {
+      if (e.target === palette) closeCmdPalette();
+    });
+  }
+
+  function openCmdPalette() {
+    const palette = $("cmd-palette");
+    const input = $("cmd-input");
+    palette.classList.remove("hidden");
+    input.value = "";
+    cmdSelected = 0;
+    renderCmdList("");
+    input.focus();
+  }
+
+  function closeCmdPalette() {
+    $("cmd-palette").classList.add("hidden");
+  }
+
+  function filteredCmds() {
+    const q = $("cmd-input").value.toLowerCase().replace(/^\//, "");
+    if (!q) return CMD_LIST;
+    return CMD_LIST.filter((c) => c.name.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q));
+  }
+
+  function renderCmdList(query) {
+    const list = $("cmd-list");
+    const cmds = filteredCmds();
+    if (cmds.length === 0) {
+      list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--fg2)">无匹配命令</div>';
+      return;
+    }
+    list.innerHTML = cmds.map((c, i) =>
+      `<div class="cmd-item ${i === cmdSelected ? "selected" : ""}" data-idx="${i}">
+        <span class="cmd-icon">${c.icon}</span>
+        <span class="cmd-name">${c.name}</span>
+        <span class="cmd-desc">${c.desc}</span>
+      </div>`
+    ).join("");
+    list.querySelectorAll(".cmd-item").forEach((el) => {
+      el.addEventListener("click", () => selectCmd(cmds[+el.dataset.idx]));
+    });
+  }
+
+  function selectCmd(cmd) {
+    closeCmdPalette();
+    const input = $("input");
+    if (cmd.needsArg) {
+      input.value = cmd.name + " ";
+      input.focus();
+    } else {
+      input.value = cmd.name;
+      input.focus();
+      // 无参数命令直接发送
+      send();
+    }
+  }
+
   // ── 启动 ──
   (async () => {
     initTheme();
     initSidebar();
     initEvolution();
+    initMissionControl();
+    initCmdPalette();
+    initGlobalKeys();
+    initAtComplete();
     const host = await rpc("host.describe", {});
     $("model-label").textContent = host.model || "(no model)";
     if (!state.sid) {
