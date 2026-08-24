@@ -1,6 +1,7 @@
 /* newbee WebUI 前端（移植 dsh client/web 会话 shell 语义，无构建依赖原生 JS）。
  * 信道：REST RPC（POST /api/<method>）+ WebSocket 事件下行（/ws?session=）。 */
 (() => {
+  const ICO_FOLDER = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px"><path d="M3 8V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"/><path d="M3 8l2.4 9.1A2 2 0 0 0 7.3 19h12.2a1 1 0 0 0 1-1.3L18 11H5L3 8z"/></svg>';
   // ── Markdown 渲染器（零依赖，覆盖 newbee.Markdown 同语法集，输出安全 HTML）──
   // 语法：ATX 标题、围栏代码块、引用、无序/有序/任务列表、水平线、表格、
   // 行内 **bold** *italic* `code` [text](url) ~~del~~。全部经 escapeHtml 防注入。
@@ -733,7 +734,7 @@ case "goal_round": break;
       const title = String(s.title || fallback).replace(/\s+/g, " ").trim().slice(0, 40) || "(未命名)";
       const stCls = s.busy ? "busy" : (s.running ? "online" : "offline");
       const cwdShort = s.cwd ? (() => { const p = String(s.cwd).replace(/\\$/, ""); return p.split("/").filter(Boolean).pop() || p; })() : null;
-      item.innerHTML = `<span class="t"><span class="sess-dot ${stCls}"></span>${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条${cwdShort ? " · 📂" + escapeHtml(cwdShort) : ""}</span>`;
+       item.innerHTML = `<span class="t"><span class="sess-dot ${stCls}"></span>${escapeHtml(title)}</span><span class="meta">${escapeHtml(s.when_str || "")} · ${s.messages || 0} 条${cwdShort ? " · " + ICO_FOLDER + " " + escapeHtml(cwdShort) : ""}</span>`;
       item.dataset.sid = s.id;
       item.onclick = (e) => {
         if (e.target.classList.contains("menu-btn")) return; // 点 ⋯ 不切换会话
@@ -1033,7 +1034,7 @@ case "goal_round": break;
   function updateCwdLabel(cwd) {
     const label = $("cwd-label");
     if (!label) return;
-    label.textContent = cwd ? "📂 " + cwd : "";
+     label.textContent = cwd ? ICO_FOLDER + " " + cwd : "";
     label.title = cwd ? "当前会话工作目录: " + cwd : "";
   }
 
@@ -1698,7 +1699,7 @@ case "goal_round": break;
       updateCwdLabel(state.cwd);
     }
     const cwd0 = state.cwd || "";
-    const left = [cwd0 ? ("📂 " + cwd0) : "newbee"];
+     const left = [cwd0 ? (ICO_FOLDER + " " + cwd0) : "newbee"];
     const turns = st.turns || 0, steps = st.steps || 0;
     if (turns > 0 || steps > 0) left.push(`${turns} 轮 · ${steps} 步`);
     // LLM/工具耗时（dsh: LLM Xs · 工具 Ys）
