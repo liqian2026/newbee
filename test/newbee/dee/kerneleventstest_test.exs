@@ -22,7 +22,7 @@ defmodule Newbee.Agent.LoopEventsTest do
       )
 
     assert {:done, "done"} = Loop.submit(kernel, "go")
-    assert_received {:newbee_event, :done, {:done, "done"}}
+    # Loop 不再广播 :done——由 session 层 broadcast_turn_end 统一发送（去重）
     refute_received {:newbee_event, :done, {:done, "done"}}
     assert_received {:newbee_event, :usage, {:usage, %{"prompt_tokens" => 3}}}
     assert_received {:newbee_event, :tool_error, {:tool_error, rendered}}
