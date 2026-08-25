@@ -361,6 +361,13 @@ ledger compactions.jsonl（append-only；tail_sha 锚自校验；尾行损坏整
 见完整历史）；provider 前缀缓存语义不变（摘要固定在消息位 2，两次压缩之间仍只追加）。
 `Session.rewrite` 标记废弃保留。`session: false` 的 ephemeral 模式走旧内存路径。
 
+**档案召回（查询感知 rehydration，零检索基础设施的 mini-RAG）**：用户提交新输入时，
+宿主对已压缩段做确定性词元打分（latin/digit ≥3 去停用词 + CJK 二元组，命中 distinct
+词元数 ≥2）；强相关时在请求尾部注入一条 `[档案召回]` 指针提示——**只指路不推载荷**
+（细节仍走 `history://` 拉取，光头原则不破；注入即追加，不破前缀缓存）。无档案/弱
+命中/异常一律静默。CLI/TUI 侧新增 `/archive [关键词]` 命令：裸查询出段索引，带关键词
+跨段全文检索。
+
 ---
 
 ## 7. Worker / Adapter：两个真正的模型身份

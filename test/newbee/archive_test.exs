@@ -260,6 +260,29 @@ defmodule Newbee.ArchiveTest do
     refute Archive.archived?(s)
   end
 
+  test "档案召回：用户输入词元命中归档段 → 返回指针行；弱命中静默", %{session: s} do
+    msgs =
+      conv(4) ++
+        [
+          %{"role" => "user", "content" => "parser 在处理 utf8 输入时崩溃了，帮我修 parser"},
+          %{"role" => "tool", "tool_call_id" => "p1", "content" => "✓ ok\nparser fixed"}
+        ] ++ conv(2)
+
+    feed(s, msgs)
+    # 归档区间覆盖 parser 消息（最近 4 条原文保留）
+    {:ok, _} = Archive.compact(s, retain: 4)
+
+    # 强命中：parser + utf8（latin 词元）都在归档段里
+    hits = Archive.recall(s, "回到 utf8 parser 崩溃的问题，现在 parser 又出错了")
+    assert length(hits) >= 1
+    assert Enum.all?(hits, &String.starts_with?(&1, "[seg-"))
+
+    # 弱命中（词元不足 2 个）/ 停用词：静默
+    assert Archive.recall(s, "the and with") == []
+    # 短文本（词元提取后不足阈值）
+    assert Archive.recall(s, "继续") == []
+  end
+
   # ── fakes ──
 
   defp fake_client(text) when is_binary(text), do: fn _extract, _seg -> {:ok, text} end

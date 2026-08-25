@@ -354,6 +354,7 @@ defmodule Newbee.Agent.Loop do
     t0 = :erlang.monotonic_time(:millisecond)
     state = %{state | messages: repair_history(drop_empty_assistant_messages(state.messages))}
     state = push_msg(state, message)
+    state = maybe_history_recall(state, message)
     # 回合开始清本会话中断标志（per-session scope，无跨会话竞态）。
     # 标志语义 = "本回合内是否收到 Esc"；execute_calls 阶段的中断检查依赖它。
     Newbee.LLM.Client.clear_interrupt(state.client)
@@ -497,6 +498,39 @@ defmodule Newbee.Agent.Loop do
   defp goal_idle_reminder(round) do
     "（自主模式第 #{round} 轮：你已连续多轮没有调用工具、没有实质进展。" <>
       "请立即采取行动：检查/运行/修改/验证。若目标已达成请调用 done。）"
+  end
+
+  # ── 档案召回（查询感知 rehydration，§6.6）──
+
+  # 用户输入与已压缩档案强相关时，注入一行指针提示（只指路，不推载荷——
+  # 细节仍走 Newbee.read("history://…") 拉取，光头原则不破）。
+  # 确定性打分（词元命中数），无档案/词元不足/求值失败一律静默跳过。
+  defp maybe_history_recall(%{session: nil} = state, _message), do: state
+
+  defp maybe_history_recall(state, message) do
+    text = message["content"]
+
+    with %{session: session} <- state,
+         true <- is_binary(text) and byte_size(text) >= 12,
+         true <- Newbee.Archive.archived?(session),
+         hits when is_list(hits) and hits != [] <- Newbee.Archive.recall(session, text) do
+      inject_prompt(state, %{"role" => "system", "content" => recall_hint(hits)}, %{
+        source: "history_recall",
+        reason: "用户输入命中已压缩档案",
+        timing: "current_turn",
+        hits: length(hits)
+      })
+    else
+      _ -> state
+    end
+  rescue
+    _ -> state
+  end
+
+  defp recall_hint(hits) do
+    "[档案召回] 你这条输入与已压缩的早期对话相关。需要细节时拉取：" <>
+      "Newbee.read(\"history://s/<段id>\") 看该段摘要，Newbee.read(\"history://q/关键词\") 检索全文。\n" <>
+      Enum.map_join(hits, "\n", &"  #{&1}")
   end
 
   # ── turn 循环 ──

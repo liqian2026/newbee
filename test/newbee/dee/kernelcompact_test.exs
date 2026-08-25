@@ -164,4 +164,47 @@ defmodule Newbee.Agent.LoopCompactTest do
       if fun, do: fun.(messages, on_text), else: {:error, :script_exhausted}
     end
   end
+
+  test "档案召回：用户输入命中已压缩档案 → 注入指针提示（不推载荷）", %{id: id, ev: ev} do
+    script =
+      Enum.map(1..6, fn i -> fn _m, _t -> {:ok, tool_msg("x = #{i}", "c#{i}"), %{}} end end) ++
+        [fn _m, _t -> {:ok, done_msg("完成"), %{}} end]
+
+    {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session_id: id, client_fun: scripted(script))
+    assert {:done, "完成"} = Loop.submit(kernel, "处理 parser utf8 崩溃任务：连续六步")
+    assert {:ok, n} = Loop.compact(kernel)
+    assert n > 0
+    GenServer.stop(kernel)
+
+    # 恢复后再次提交相关请求：LLM 应看到 [档案召回] 指针提示
+    parent = self()
+
+    {:ok, k2} =
+      Loop.start_link(
+        client: %{},
+        evaluator: ev,
+        session_id: id,
+        client_fun:
+          scripted([
+            fn messages, _t ->
+              send(parent, {:seen2, messages})
+              {:ok, %{"role" => "assistant", "content" => "ok"}, %{}}
+            end
+          ])
+      )
+
+    assert {:text, "ok"} = Loop.submit(k2, "继续处理 parser utf8 崩溃问题")
+
+    seen =
+      receive do
+        {:seen2, m} -> m
+      after
+        5_000 -> flunk("no capture")
+      end
+
+    recall = Enum.find(seen, &(&1["role"] == "system" and String.contains?(&1["content"] || "", "[档案召回]")))
+    assert recall
+    assert recall["content"] =~ "history://"
+    GenServer.stop(k2)
+  end
 end

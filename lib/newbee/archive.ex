@@ -362,6 +362,80 @@ defmodule Newbee.Archive do
 
   defp msg_search_text(m), do: inspect(m, limit: 10)
 
+  # ── 档案召回（查询感知 rehydration）：零检索基础设施的 mini-RAG ──
+
+  @recall_min_terms 2
+  @recall_term_cap 24
+  @latin_stopwords ~w(the and for with that this from have will into your our their what when then than just also been was are was were you can use using make made like need want get got set let)
+
+  @doc """
+  档案召回：用户输入 → 词元（latin/digit ≥3 字符 + CJK 二元组）→ 跨段打分
+  （命中的 distinct 词元数 ≥ #{@recall_min_terms}）→ top 命中行。
+
+  与 `history://q/` 的分工：q/ 是模型主动 pull；recall 是宿主在用户输入命中
+  旧档案时**推送指针**（只推 pull 通道的一行摘要，不推载荷）——光头原则不破。
+  纯确定性（无嵌入、无外部服务），失败/无档案静默返回 []。
+  """
+  def recall(%Session{} = session, text, opts \\ []) when is_binary(text) do
+    limit = Keyword.get(opts, :limit, 5)
+    terms = query_terms(text)
+
+    if terms == [] or length(terms) < @recall_min_terms do
+      []
+    else
+      session
+      |> segments()
+      |> Enum.flat_map(fn s ->
+        case segment_messages(session, s.id) do
+          {:ok, msgs} ->
+            msgs
+            |> Enum.with_index(1)
+            |> Enum.map(fn {m, i} -> {s.id, i, msg_search_text(m)} end)
+
+          _ ->
+            []
+        end
+      end)
+      |> Enum.reduce([], fn {seg, i, text}, acc ->
+        down = String.downcase(text)
+        score = Enum.count(terms, &String.contains?(down, &1))
+
+        if score >= @recall_min_terms do
+          line = text |> String.replace("\n", " ⏎ ") |> String.slice(0, 200)
+          [{score, "[#{seg}##{i}] " <> line} | acc]
+        else
+          acc
+        end
+      end)
+      |> Enum.sort_by(fn {score, _} -> -score end)
+      |> Enum.take(limit)
+      |> Enum.map(&elem(&1, 1))
+    end
+  rescue
+    _ -> []
+  end
+
+  # 词元提取：latin/digit ≥3（去停用词）+ CJK 连续段做二元组；封顶 @recall_term_cap
+  defp query_terms(text) do
+    latin =
+      ~r/[A-Za-z0-9_]{3,}/
+      |> Regex.scan(text)
+      |> Enum.map(&(&1 |> hd() |> String.downcase()))
+      |> Enum.reject(&(&1 in @latin_stopwords))
+
+    cjk_bigrams =
+      text
+      |> String.split(~r/[^\p{Han}]+/u, trim: true)
+      |> Enum.flat_map(fn run ->
+        gs = String.graphemes(run)
+        Enum.zip(gs, tl(gs)) |> Enum.map(fn {a, b} -> a <> b end)
+      end)
+
+    (latin ++ cjk_bigrams)
+    |> Enum.uniq()
+    |> Enum.take(@recall_term_cap)
+  end
+
   defp files_text(%Session{} = session) do
     files =
       session
