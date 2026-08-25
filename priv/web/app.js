@@ -1283,6 +1283,24 @@ case "goal_round": break;
     } else if (m.role === "tool") {
       const ok = !(m.content || "").startsWith("✗");
       toolResult(m.content, ok);
+    } else if (m.role === "archive") {
+      const d = el("msg-archive", "");
+      const segs = m.segments || [];
+      const head = document.createElement("div");
+      head.className = "archive-head";
+      head.textContent = "⌸ " + (m.content || "已压缩的早期对话");
+      d.appendChild(head);
+      if (segs.length) {
+        const list = document.createElement("div");
+        list.className = "archive-segs";
+        segs.forEach((s) => {
+          const row = document.createElement("div");
+          row.className = "archive-seg";
+          row.textContent = `[${s.id}] ${s.messages} 条` + (s.intent ? ` · ${s.intent}` : "");
+          list.appendChild(row);
+        });
+        d.appendChild(list);
+      }
     }
   }
 

@@ -6,7 +6,7 @@ defmodule Newbee.Commands do
 
   @commands ~w(/model /bindings /tokens /rules /status /dump /resume /reset /approve
     /reject /log /environment /evolve /autonomy /bundles /goal /diff /image
-    /undo /session /init /tools /permissions /compact /attach /new /quit)
+    /undo /session /init /tools /permissions /compact /archive /attach /new /quit)
 
   def commands, do: @commands
 
@@ -180,9 +180,7 @@ defmodule Newbee.Commands do
         end
 
       {:error, reason} ->
-        ctx.say.(
-          "切换失败: #{inspect(reason)}（格式：/model <provider>/<model-id> 或 /model <model-id> 保留当前 provider）"
-        )
+        ctx.say.("切换失败: #{inspect(reason)}（格式：/model <provider>/<model-id> 或 /model <model-id> 保留当前 provider）")
 
         :handled
     end
@@ -533,6 +531,25 @@ defmodule Newbee.Commands do
       end
     else
       ctx.say.("（无 kernel 上下文）")
+    end
+
+    :handled
+  end
+
+  # /archive [关键词]：会话档案索引 / 全文检索（压缩历史的分层视图 + 检索入口，§6.6）
+  defp run("archive", arg, ctx) do
+    query = String.trim(arg)
+    path = if query == "", do: "history://", else: "history://q/" <> query
+
+    case Newbee.read(path) do
+      {:ok, body} ->
+        body
+        |> String.split("\n", trim: true)
+        |> Enum.take(30)
+        |> Enum.each(&ctx.say.(&1))
+
+      {:error, e} ->
+        ctx.say.("档案读取失败: #{inspect(e)}")
     end
 
     :handled

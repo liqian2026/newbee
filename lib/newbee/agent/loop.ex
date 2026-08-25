@@ -121,7 +121,11 @@ defmodule Newbee.Agent.Loop do
 
     # 会话级隔离：每个会话一个中断 scope（注入 client），evaluator 注册到
     # SessionEvaluators（key = 本 Loop pid），interrupt 只作用本会话。
-    client = if Map.get(client, :interrupt_scope), do: client, else: Map.put(client, :interrupt_scope, Newbee.LLM.Client.new_interrupt_scope())
+    client =
+      if Map.get(client, :interrupt_scope),
+        do: client,
+        else: Map.put(client, :interrupt_scope, Newbee.LLM.Client.new_interrupt_scope())
+
     if is_pid(evaluator), do: Newbee.SessionEvaluators.register(self(), {evaluator, Map.get(client, :interrupt_scope)})
 
     client_fun =
@@ -157,7 +161,15 @@ defmodule Newbee.Agent.Loop do
     session =
       if Keyword.get(opts, :session, true) do
         s = Newbee.Session.open(Keyword.get(opts, :session_id))
-        prior = s |> Newbee.Session.messages() |> repair_history()
+        # 恢复 = 物化视图重建（§4.6）：transcript 只增不删，压缩只是账本上的切点；
+        # 视图 = 基底 + 段汇总消息 + 切点后原文。无压缩账本的旧会话逐字节兼容。
+        prior =
+          try do
+            s |> Newbee.Archive.view() |> repair_history()
+          rescue
+            _ -> s |> Newbee.Session.messages() |> repair_history()
+          end
+
         {s, prior}
       else
         {nil, []}
@@ -182,8 +194,11 @@ defmodule Newbee.Agent.Loop do
 
     prompt =
       case session do
-        nil -> system_prompt(root)
-        session -> Newbee.Session.system_prompt(session) || Newbee.Session.save_system_prompt(session, system_prompt(root))
+        nil ->
+          system_prompt(root)
+
+        session ->
+          Newbee.Session.system_prompt(session) || Newbee.Session.save_system_prompt(session, system_prompt(root))
       end
 
     # 同一 session 的 system prompt 是请求头：首次生成后持久化，恢复时逐字复用。
@@ -219,8 +234,8 @@ defmodule Newbee.Agent.Loop do
        compaction_threshold: Keyword.get(opts, :compaction_threshold, 0.8),
        compaction_retain: Keyword.get(opts, :compaction_retain, 0.16),
        compaction_max_tokens: Keyword.get(opts, :compaction_max_tokens, 1_024),
-        auto_compact: Keyword.get(opts, :auto_compact, true),
-        root: Keyword.get(opts, :root)
+       auto_compact: Keyword.get(opts, :auto_compact, true),
+       root: Keyword.get(opts, :root)
      }}
   end
 
@@ -256,11 +271,14 @@ defmodule Newbee.Agent.Loop do
   def handle_call({:submit, text}, _from, state) do
     submit_message(state, %{"role" => "user", "content" => text})
   end
+
   def handle_call(:usage, _from, state), do: {:reply, state.usage, state}
+
   def handle_call(:compact, _from, state) do
     {state, count} = compact_state(state, 8)
     {:reply, {:ok, count}, state}
   end
+
   def handle_call({:set_goal, text, opts}, _from, state) do
     text = String.trim(text)
     max_rounds = Keyword.get(opts, :max_rounds, 50)
@@ -298,7 +316,9 @@ defmodule Newbee.Agent.Loop do
     if state.goal, do: emit(state, {:goal_cancelled, :user})
     {:reply, :ok, %{state | goal: nil}}
   end
+
   def handle_call(:goal, _from, state), do: {:reply, state.goal, state}
+
   def handle_call({:switch_model, client}, _from, state) do
     # 不丢会话/绑定/消息/中断 scope，仅替换后续 turn 所用的 client 与 client_fun。
     # 求值器节点不动，当前 turn 仍用旧 client 完成，下次 submit 即生效。
@@ -334,6 +354,7 @@ defmodule Newbee.Agent.Loop do
     t0 = :erlang.monotonic_time(:millisecond)
     state = %{state | messages: repair_history(drop_empty_assistant_messages(state.messages))}
     state = push_msg(state, message)
+    state = maybe_history_recall(state, message)
     # 回合开始清本会话中断标志（per-session scope，无跨会话竞态）。
     # 标志语义 = "本回合内是否收到 Esc"；execute_calls 阶段的中断检查依赖它。
     Newbee.LLM.Client.clear_interrupt(state.client)
@@ -346,7 +367,6 @@ defmodule Newbee.Agent.Loop do
     flush_bus()
     {:reply, reply, state}
   end
-
 
   # 自主目标循环：异步驱动（每轮之间可处理 mailbox，/goal clear 可插入取消）。
   @impl true
@@ -478,6 +498,39 @@ defmodule Newbee.Agent.Loop do
   defp goal_idle_reminder(round) do
     "（自主模式第 #{round} 轮：你已连续多轮没有调用工具、没有实质进展。" <>
       "请立即采取行动：检查/运行/修改/验证。若目标已达成请调用 done。）"
+  end
+
+  # ── 档案召回（查询感知 rehydration，§6.6）──
+
+  # 用户输入与已压缩档案强相关时，注入一行指针提示（只指路，不推载荷——
+  # 细节仍走 Newbee.read("history://…") 拉取，光头原则不破）。
+  # 确定性打分（词元命中数），无档案/词元不足/求值失败一律静默跳过。
+  defp maybe_history_recall(%{session: nil} = state, _message), do: state
+
+  defp maybe_history_recall(state, message) do
+    text = message["content"]
+
+    with %{session: session} <- state,
+         true <- is_binary(text) and byte_size(text) >= 12,
+         true <- Newbee.Archive.archived?(session),
+         hits when is_list(hits) and hits != [] <- Newbee.Archive.recall(session, text) do
+      inject_prompt(state, %{"role" => "system", "content" => recall_hint(hits)}, %{
+        source: "history_recall",
+        reason: "用户输入命中已压缩档案",
+        timing: "current_turn",
+        hits: length(hits)
+      })
+    else
+      _ -> state
+    end
+  rescue
+    _ -> state
+  end
+
+  defp recall_hint(hits) do
+    "[档案召回] 你这条输入与已压缩的早期对话相关。需要细节时拉取：" <>
+      "Newbee.read(\"history://s/<段id>\") 看该段摘要，Newbee.read(\"history://q/关键词\") 检索全文。\n" <>
+      Enum.map_join(hits, "\n", &"  #{&1}")
   end
 
   # ── turn 循环 ──
@@ -731,6 +784,7 @@ defmodule Newbee.Agent.Loop do
                       "done" => true
                     })
                   end
+
                   # DeepSeek 严格校验：带 tool_calls 的 assistant 后必须跟齐 tool 响应，
                   # 否则下一回合 400（此前 done/ask 从不回填，历史必然悬空）
                   {:halt, {:halt, {:done, summary}, push_msg(state, tool_msg)}}
@@ -991,12 +1045,14 @@ defmodule Newbee.Agent.Loop do
       end
 
       duration_ms = System.monotonic_time(:millisecond) - tool_started_at
+
       Newbee.Environment.UsageTracker.observe_code(code, %{
         success: eval_result.status == :ok,
         latency_ms: duration_ms,
         output_bytes: byte_size(rendered),
         task_type: "run_elixir"
       })
+
       emit(state, {:tool_result, "run_elixir", rendered, duration_ms})
 
       # §12 结构隔离：工具输出是不可信内容，包 envelope（origin/hash/trust）
@@ -1211,7 +1267,10 @@ defmodule Newbee.Agent.Loop do
     div(byte_size(Jason.encode!(message)) + 2, 3) + 8
   end
 
-  defp compact_state(state, retain_target) do
+  # 压缩（§4.6 视图维护）：有会话走 Archive——transcript 永不覆写，归档区间成为
+  # 可寻址段（history:// 拉取），汇总消息由段 digest 确定性装配，LLM 只在蒸馏新段
+  # 时用一次。无会话（session: false 的测试/ephemeral 模式）退回旧的内存压扁路径。
+  defp compact_state(%{session: nil} = state, retain_target) do
     body = tl(state.messages)
     {old, recent} = split_for_retention(body, retain_target)
 
@@ -1220,22 +1279,45 @@ defmodule Newbee.Agent.Loop do
     else
       summary = summarize_conversation(state.client, old, state.compaction_max_tokens)
       summary_msg = %{"role" => "system", "content" => "（以下为较早对话的压缩摘要，细节已丢失）\n" <> summary}
-      messages = [hd(state.messages), summary_msg | recent]
-
-      messages = repair_history(messages)
-
-      messages =
-        if state.session && Newbee.Tools.JSpace.exists?(state.session.id) do
-          [hd(messages), %{"role" => "system", "content" => jspace_recovery_reminder()} | tl(messages)]
-        else
-          messages
-        end
-
-      if state.session, do: Newbee.Session.rewrite(state.session, messages)
+      messages = repair_history([hd(state.messages), summary_msg | recent])
       emit(state, {:compacted, length(old)})
-      Newbee.DebugLog.log(:compact, "compacted #{length(old)} messages")
+      Newbee.DebugLog.log(:compact, "compacted #{length(old)} messages (ephemeral, no session)")
       {%{state | messages: messages}, length(old)}
     end
+  end
+
+  defp compact_state(state, retain_target) do
+    opts = [
+      retain: retain_target,
+      client: state.client,
+      trigger: if(retain_target <= 64, do: "manual", else: "auto")
+    ]
+
+    case Newbee.Archive.compact(state.session, opts) do
+      {:ok, %{view: view, archived: n}} ->
+        # view = [汇总消息 | 近期原文]；头部补回本会话 system 基底（不进 transcript）
+        base = hd(state.messages)
+        messages = [base | view] |> repair_history()
+
+        messages =
+          if Newbee.Tools.JSpace.exists?(state.session.id) do
+            [hd(messages), %{"role" => "system", "content" => jspace_recovery_reminder()} | tl(messages)]
+          else
+            messages
+          end
+
+        emit(state, {:compacted, n})
+        Newbee.DebugLog.log(:compact, "archived #{n} messages → segment (append-only transcript)")
+        {%{state | messages: messages}, n}
+
+      :noop ->
+        {state, 0}
+    end
+  rescue
+    e ->
+      # Archive 故障绝不伤会话：退回内存压扁（transcript 未动，仍可下次重试）
+      Newbee.DebugLog.log(:compact, "archive failed #{inspect(e)}; fallback to ephemeral squash")
+      compact_state(%{state | session: nil}, retain_target)
   end
 
   defp split_for_retention(messages, count) when count <= 64 do

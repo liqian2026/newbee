@@ -46,7 +46,12 @@ defmodule Newbee.Session do
     touch_index(id)
   end
 
-  @doc "重写整个 transcript（/compact 用：摘要 + 最近消息）。"
+  @doc """
+  重写整个 transcript。**已废弃**：/compact 自 Archive 落地后走 append-only 账本
+  （Newbee.Archive），transcript 永不覆写——本函数仅为兼容保留，勿在新代码使用
+  （覆写即销毁日志，违反 §4.6 "压缩改视图不动日志"）。
+  """
+  @deprecated "用 Newbee.Archive.compact/2（append-only，永不覆写 transcript）"
   def rewrite(%__MODULE__{transcript: t}, messages) do
     body = Enum.map_join(messages, "\n", &Jason.encode!/1)
     File.write!(t, body <> "\n")
@@ -457,8 +462,17 @@ defmodule Newbee.Session do
         case File.stat(fp) do
           {:ok, stat} ->
             id = Path.basename(fp, ".jsonl")
-            [%{"id" => id, "mtime" => posix_mtime(stat.mtime), "created" => created_from_id(id) || posix_mtime(stat.mtime)}]
-          _ -> []
+
+            [
+              %{
+                "id" => id,
+                "mtime" => posix_mtime(stat.mtime),
+                "created" => created_from_id(id) || posix_mtime(stat.mtime)
+              }
+            ]
+
+          _ ->
+            []
         end
       end)
 
@@ -497,6 +511,7 @@ defmodule Newbee.Session do
   rescue
     _ -> :ok
   end
+
   # 从会话 id 前缀解析创建时间（YYYYMMDD-HHMMSS-xxxx / YYYYMMDD-HHMMSSxxxx），失败返回 nil。
   # id 前缀是本地时间，需按本地 UTC 偏移换算成 unix 秒（与 System.system_time(:second) 同基准）。
   defp created_from_id(id) when is_binary(id) do
@@ -510,7 +525,8 @@ defmodule Newbee.Session do
           :calendar.datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}}) -
           utc_offset_seconds()
 
-      _ -> nil
+      _ ->
+        nil
     end
   end
 
