@@ -9,6 +9,9 @@ defmodule Newbee.Web.Router do
   use Plug.Router
 
   plug(Plug.Logger)
+  # The web UI is frequently exposed through a local reverse proxy. Keep the
+  # browser-facing surface safe even when the proxy does not add these headers.
+  plug(:security_headers)
   plug(:match)
   plug(:dispatch)
 
@@ -42,7 +45,7 @@ defmodule Newbee.Web.Router do
 
     cond do
       # 目录穿越防护
-      not String.starts_with?(Path.expand(file), Path.expand(@priv_web)) ->
+      not inside_root?(Path.expand(file), Path.expand(@priv_web)) ->
         send_resp(conn, 403, "forbidden")
 
       File.regular?(file) ->
@@ -58,6 +61,19 @@ defmodule Newbee.Web.Router do
       true ->
         send_resp(conn, 404, "newbee webui 前端未构建：priv/web/index.html 不存在")
     end
+  end
+
+  # A plain prefix check would treat /priv/web-evil as a child of
+  # /priv/web. Compare a path segment boundary instead.
+  defp inside_root?(path, root) do
+    path == root or String.starts_with?(path, root <> Path.sep())
+  end
+
+  defp security_headers(conn, _opts) do
+    conn
+    |> Plug.Conn.put_resp_header("x-content-type-options", "nosniff")
+    |> Plug.Conn.put_resp_header("x-frame-options", "DENY")
+    |> Plug.Conn.put_resp_header("referrer-policy", "no-referrer")
   end
 
   defp content_type(file) do

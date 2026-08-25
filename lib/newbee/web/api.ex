@@ -79,8 +79,15 @@ defmodule Newbee.Web.Api do
 
   defp dispatch_rpc("session.create", p) do
     sid = p["sessionId"]
-    {:ok, _pid, sid} = Newbee.Web.Session.ensure(blank_to_nil(sid), blank_to_nil(p["cwd"]))
-    {:ok, %{sessionId: sid, cwd: Newbee.Session.cwd(sid)}}
+    cwd = blank_to_nil(p["cwd"])
+
+    case Newbee.Web.Session.ensure(blank_to_nil(sid), cwd) do
+      {:ok, _pid, created_sid} ->
+        {:ok, %{sessionId: created_sid, cwd: Newbee.Session.cwd(created_sid)}}
+
+      {:error, reason} ->
+        {:error, "session_error", inspect(reason)}
+    end
   end
 
   defp dispatch_rpc("session.cwd", %{"sessionId" => sid, "cwd" => cwd}) do
@@ -114,12 +121,20 @@ defmodule Newbee.Web.Api do
     e -> {:error, "rename_error", Exception.message(e)}
   end
 
-  defp dispatch_rpc("session.prompt", %{"sessionId" => sid, "text" => text}) do
-    with {:ok, pid} <- find_session(sid) do
-      Newbee.Web.Session.prompt(pid, text)
-      {:ok, %{accepted: true}}
+  defp dispatch_rpc("session.prompt", %{"sessionId" => sid, "text" => text})
+       when is_binary(sid) and is_binary(text) do
+    if String.trim(sid) == "" or text == "" do
+      {:error, "bad_request", "sessionId 和 text 不能为空"}
+    else
+      with {:ok, pid} <- find_session(sid) do
+        Newbee.Web.Session.prompt(pid, text)
+        {:ok, %{accepted: true}}
+      end
     end
   end
+
+  defp dispatch_rpc("session.prompt", _payload),
+    do: {:error, "bad_request", "需要 sessionId 和 text 字段"}
 
   defp dispatch_rpc("session.promptImage", %{
          "sessionId" => sid,
@@ -917,6 +932,12 @@ defmodule Newbee.Web.Api do
     end
   end
 
+  # Keep malformed or newly introduced RPCs inside the JSON protocol. Without
+  # this boundary an unknown method raises FunctionClauseError and Plug returns
+  # an HTML 500 page, which makes client retries and diagnostics unreliable.
+  defp dispatch_rpc(method, _payload) when is_binary(method),
+    do: {:error, "unknown_method", "不支持的 RPC 方法: #{method}"}
+
   # ── helpers ──
 
   # llm.setContextWindow 参数解析：nil/""/0 → 清除覆盖；正整数（或数字串）→ 覆盖值；其余拒绝
@@ -1056,7 +1077,6 @@ defmodule Newbee.Web.Api do
 
     conn
     |> put_resp_content_type("application/json")
-    |> put_resp_header("access-control-allow-origin", "*")
     |> send_resp(status, body)
   end
 
