@@ -10,7 +10,7 @@ defmodule Newbee.Plugins.RepoMapV2Test do
   end
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "repomap_v2_test_#{:erlang.unique_integer([:positive])}")
+    dir = Path.join(System.tmp_dir!(), "repomap_v2_test_#{System.system_time(:native)}_#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(dir, "lib"))
 
     # build 需要 mix.exs 才进入 Elixir 建图分支
@@ -159,7 +159,7 @@ defmodule Newbee.Plugins.RepoMapV2Test do
   end
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "repomap_v2_test_#{:erlang.unique_integer([:positive])}")
+    dir = Path.join(System.tmp_dir!(), "repomap_v2_test_#{System.system_time(:native)}_#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(dir, "lib"))
 
     # build 需要 mix.exs 才进入 Elixir 建图分支

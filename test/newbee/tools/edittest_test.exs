@@ -5,7 +5,7 @@ defmodule Newbee.Tools.EditTest do
   @content "line one\nline two\nline three\n"
 
   defp tmpfile(content \\ @content) do
-    path = Path.join(System.tmp_dir!(), "edit_test_#{:erlang.unique_integer([:positive])}.txt")
+    path = Path.join(System.tmp_dir!(), "edit_test_#{System.system_time(:native)}_#{:erlang.unique_integer([:positive])}.txt")
     File.write!(path, content)
     on_exit(fn -> File.rm(path) end)
     path

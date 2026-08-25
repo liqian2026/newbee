@@ -55,7 +55,7 @@ defmodule Newbee.CommandsMoreTest do
   end
 
   test "/model 非法 id 不写配置（未知 provider 前缀被拒）" do
-    tmp = Path.join(System.tmp_dir!(), "newbee-cmdtest-#{System.unique_integer([:positive])}.json")
+    tmp = Path.join(System.tmp_dir!(), "newbee-cmdtest-#{System.system_time(:native)}_#{System.unique_integer([:positive])}.json")
     File.write!(tmp, Jason.encode!(%{"providers" => %{}, "roles" => %{"default" => %{"provider" => "opencode", "model" => "ox-alpha-free"}}}))
     System.put_env("NEWBEE_MODEL_JSON", tmp)
 
@@ -78,7 +78,7 @@ defmodule Newbee.CommandsMoreTest do
   end
 
   test "/init 在临时目录生成 NEWBEE.md" do
-    tmp = Path.join(System.tmp_dir!(), "newbee_init_#{:erlang.unique_integer([:positive])}")
+    tmp = Path.join(System.tmp_dir!(), "newbee_init_#{System.system_time(:native)}_#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
 
     File.cd!(tmp, fn ->

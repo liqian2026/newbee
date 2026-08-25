@@ -52,7 +52,7 @@ defmodule Newbee.LLM.ConfigTest do
 
   describe "set_default_model" do
     setup do
-      tmp = Path.join(System.tmp_dir!(), "newbee-configtest-#{System.unique_integer([:positive])}/model.json")
+      tmp = Path.join(System.tmp_dir!(), "newbee-configtest-#{System.system_time(:native)}_#{System.unique_integer([:positive])}/model.json")
       File.mkdir_p!(Path.dirname(tmp))
       File.write!(
         tmp,
@@ -118,7 +118,7 @@ defmodule Newbee.LLM.ConfigTest do
 
   describe "set_context_window" do
     setup do
-      tmp = Path.join(System.tmp_dir!(), "newbee-configtest-#{System.unique_integer([:positive])}/model.json")
+      tmp = Path.join(System.tmp_dir!(), "newbee-configtest-#{System.system_time(:native)}_#{System.unique_integer([:positive])}/model.json")
       File.mkdir_p!(Path.dirname(tmp))
 
       File.write!(

@@ -14,7 +14,7 @@ defmodule Newbee.EnvironmentCase do
   end
 
   setup do
-    tmp = Path.join(System.tmp_dir!(), "newbee_env_#{System.unique_integer([:positive])}")
+    tmp = Path.join(System.tmp_dir!(), "newbee_env_#{System.system_time(:native)}_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
     original_cwd = File.cwd!()
     File.cd!(tmp)

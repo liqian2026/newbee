@@ -27,7 +27,7 @@ defmodule Newbee.DEE.EvaluatorLongTaskTest do
   test "长任务副作用只执行一次（不重复）" do
     {:ok, ev} = Evaluator.start(mode: :node)
     Process.sleep(2_000)
-    marker = Path.join(System.tmp_dir!(), "eval_long_marker_" <> Integer.to_string(System.unique_integer([:positive])))
+    marker = Path.join(System.tmp_dir!(), "eval_long_marker_" <> Integer.to_string(System.system_time(:native)) <> "_" <> Integer.to_string(System.unique_integer([:positive])))
 
     code = "File.write!(\"" <> marker <> "\", \"x\")\n:timer.sleep(12_000)\n\"done\""
     r = Evaluator.eval(ev, code, [])

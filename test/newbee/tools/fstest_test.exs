@@ -3,7 +3,7 @@ defmodule Newbee.Tools.FsTest do
   alias Newbee.Tools.Fs
 
   test "工程树内路径放行" do
-    tmp = Path.join(File.cwd!(), ".newbee-tmp-test-#{:erlang.unique_integer([:positive])}")
+    tmp = Path.join(File.cwd!(), ".newbee-tmp-test-#{System.system_time(:native)}_#{:erlang.unique_integer([:positive])}")
     assert :ok = Fs.guard_path!(tmp)
     File.rm_rf(tmp)
   end
@@ -13,7 +13,7 @@ defmodule Newbee.Tools.FsTest do
   end
 
   test "工程树外写入被拒（§8 工作目录隔离）" do
-    outside = Path.join(System.tmp_dir!(), "newbee_guard_#{:erlang.unique_integer([:positive])}.txt")
+    outside = Path.join(System.tmp_dir!(), "newbee_guard_#{System.system_time(:native)}_#{:erlang.unique_integer([:positive])}.txt")
 
     assert_raise ArgumentError, ~r/工程树外/, fn ->
       Fs.write!(outside, "x")
