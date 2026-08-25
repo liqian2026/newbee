@@ -70,6 +70,19 @@ defmodule Newbee.Environment.Boot do
     end
   end
 
+  @doc """
+  会话私有求值器 + 归属标记：返回 `{evaluator, owned?}`。
+
+  `owned? = false` 表示降级到了具名共享兜底求值器（`Newbee.DEE.Evaluator`）——
+  调用方必须把 `owned?` 原样透传为 Loop 的 `evaluator_owned`，
+  保证共享求值器绝不随单个会话释放（私有求值器则随 kernel 死亡自停，
+  见 `Newbee.DEE.Evaluator.monitor_owner/2`）。
+  """
+  def session_evaluator(opts \\ []) do
+    ev = evaluator_or_fallback(opts)
+    {ev, ev != Process.whereis(Newbee.DEE.Evaluator)}
+  end
+
   # ── step 1-2: store + coordinator（事件流重放恢复 manifest）──
 
   defp ensure_coordinator do

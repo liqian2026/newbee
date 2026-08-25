@@ -29,7 +29,10 @@ defmodule Newbee.DEE.Evaluator do
             boot_error: nil,
             last_boot_attempt: nil,
             # 会话工作目录（WebUI 选定）：节点 boot 后 cd 过去；nil = 全局默认
-            cwd: nil
+            cwd: nil,
+            # 宿主进程（会话 kernel）：{pid, mref}；宿主死亡时求值器随停，
+            # terminate → stop_all 释放 primary/standby peer 节点（epmd 不残留）
+            owner: nil
 
   @env_deny_prefixes ~w(OPENROUTER_ DEEPSEEK_ ANTHROPIC_ OPENAI_)
   @env_deny_suffixes ~w(_KEY _TOKEN _SECRET)
@@ -85,6 +88,14 @@ defmodule Newbee.DEE.Evaluator do
 
   @doc "节点信息（给 /dump 用）"
   def info(server \\ __MODULE__), do: GenServer.call(server, :info)
+
+  @doc """
+  登记宿主进程（会话 kernel）：宿主死亡（正常停止**或崩溃**）时求值器随之停止，
+  terminate → stop_all 停掉 primary/standby peer 节点。只用于会话私有求值器——
+  具名共享兜底求值器（Newbee.DEE.Evaluator）绝不可登记，否则一个会话结束会
+  杀掉其它会话在用的求值器。
+  """
+  def monitor_owner(server, owner) when is_pid(owner), do: GenServer.cast(server, {:monitor_owner, owner})
 
   # ── init ──
 
@@ -275,9 +286,23 @@ defmodule Newbee.DEE.Evaluator do
      }, state}
   end
 
+  # ── cast ──
+
+  @impl true
+  def handle_cast({:monitor_owner, owner}, state) do
+    {:noreply, %{state | owner: {owner, Process.monitor(owner)}}}
+  end
+
   # ── info ──
 
   @impl true
+  # 宿主（会话 kernel）死亡：随停，terminate 释放 primary/standby peer 节点。
+  # 覆盖 GenServer.stop 与崩溃两种死因——link 传不动的 :normal 停止也走这里。
+  def handle_info({:DOWN, mref, :process, pid, reason}, %{owner: {pid, mref}} = state) do
+    Newbee.DebugLog.log(:node, "owner down reason=#{inspect(reason)}; stopping evaluator node=#{inspect(state.node)}")
+    {:stop, :normal, state}
+  end
+
   def handle_info({:EXIT, pid, reason}, state) do
     cond do
       # primary 死：只清空 primary，不主动提升 standby——切换留给下一次调用
@@ -348,7 +373,21 @@ defmodule Newbee.DEE.Evaluator do
 
   @impl true
   def terminate(_reason, state) do
-    if state.mode == :node, do: stop_all(state)
+    case state.mode do
+      :node ->
+        stop_all(state)
+
+      # local 模式 worker 是 start_link 的，:normal 退出不会经 link 传播，需显式停
+      :local ->
+        if is_pid(state.worker) and Process.alive?(state.worker) do
+          try do
+            GenServer.stop(state.worker, :normal, 5_000)
+          catch
+            _, _ -> :ok
+          end
+        end
+    end
+
     :ok
   end
 
