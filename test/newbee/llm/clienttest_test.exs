@@ -49,4 +49,18 @@ defmodule Newbee.LLM.ClientTest do
 
     if old, do: System.put_env("OPENROUTER_API_KEY", old), else: System.delete_env("OPENROUTER_API_KEY")
   end
+
+  test "format_error: 400/provider 错误转简短提示" do
+    msg = ~s({"error":{"type":"server_error","message":"invalid input"}})
+    out = Client.format_error({:http_error, 400, msg})
+    assert out =~ "HTTP 400"
+    assert out =~ "invalid input"
+    refute out =~ "server_error"
+  end
+
+  test "format_error: 429 提示自动重试" do
+    out = Client.format_error({:http_error, 429, "rate limited"})
+    assert out =~ "HTTP 429"
+    assert out =~ "自动重试"
+  end
 end

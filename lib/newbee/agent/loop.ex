@@ -25,7 +25,10 @@ defmodule Newbee.Agent.Loop do
             compaction_max_tokens: 1_024,
             auto_compact: true,
             # 会话工作目录根（WebUI 选定）；nil = 主节点 File.cwd!
-            root: nil
+            root: nil,
+            # 宿主进程 monitor 引用（web 会话进程）；宿主死亡 → kernel 自停，
+            # 链式触发会话私有求值器释放（见 evaluator_owned / Evaluator.monitor_owner）
+            owner: nil
 
   # ── API ──
 
@@ -121,8 +124,27 @@ defmodule Newbee.Agent.Loop do
 
     # 会话级隔离：每个会话一个中断 scope（注入 client），evaluator 注册到
     # SessionEvaluators（key = 本 Loop pid），interrupt 只作用本会话。
-    client = if Map.get(client, :interrupt_scope), do: client, else: Map.put(client, :interrupt_scope, Newbee.LLM.Client.new_interrupt_scope())
+    client =
+      if Map.get(client, :interrupt_scope),
+        do: client,
+        else: Map.put(client, :interrupt_scope, Newbee.LLM.Client.new_interrupt_scope())
+
     if is_pid(evaluator), do: Newbee.SessionEvaluators.register(self(), {evaluator, Map.get(client, :interrupt_scope)})
+
+    # 资源随会话释放（epmd 残留事故修复）：
+    # 1. owner（web 会话进程）死亡（删除会话/崩溃）→ 本 kernel 自停（见 handle_info DOWN）；
+    # 2. evaluator_owned: true 时把本 kernel 登记为求值器宿主，kernel 停止/崩溃
+    #    → 求值器自停 → terminate 停掉 primary/standby peer 节点。
+    #    具名共享兜底求值器（Newbee.DEE.Evaluator）绝不可标 owned——会误杀其它会话。
+    owner_ref =
+      case Keyword.get(opts, :owner) do
+        pid when is_pid(pid) -> Process.monitor(pid)
+        _ -> nil
+      end
+
+    if Keyword.get(opts, :evaluator_owned, false) and is_pid(evaluator) do
+      Newbee.DEE.Evaluator.monitor_owner(evaluator, self())
+    end
 
     client_fun =
       Keyword.get(opts, :client_fun, fn messages, on_text, on_reasoning ->
@@ -182,8 +204,11 @@ defmodule Newbee.Agent.Loop do
 
     prompt =
       case session do
-        nil -> system_prompt(root)
-        session -> Newbee.Session.system_prompt(session) || Newbee.Session.save_system_prompt(session, system_prompt(root))
+        nil ->
+          system_prompt(root)
+
+        session ->
+          Newbee.Session.system_prompt(session) || Newbee.Session.save_system_prompt(session, system_prompt(root))
       end
 
     # 同一 session 的 system prompt 是请求头：首次生成后持久化，恢复时逐字复用。
@@ -208,6 +233,7 @@ defmodule Newbee.Agent.Loop do
        messages: [%{"role" => "system", "content" => prompt}] ++ recovery ++ prior_messages,
        client: client,
        evaluator: evaluator,
+       owner: owner_ref,
        render: render,
        client_fun: client_fun,
        session: session,
@@ -219,8 +245,8 @@ defmodule Newbee.Agent.Loop do
        compaction_threshold: Keyword.get(opts, :compaction_threshold, 0.8),
        compaction_retain: Keyword.get(opts, :compaction_retain, 0.16),
        compaction_max_tokens: Keyword.get(opts, :compaction_max_tokens, 1_024),
-        auto_compact: Keyword.get(opts, :auto_compact, true),
-        root: Keyword.get(opts, :root)
+       auto_compact: Keyword.get(opts, :auto_compact, true),
+       root: Keyword.get(opts, :root)
      }}
   end
 
@@ -256,11 +282,14 @@ defmodule Newbee.Agent.Loop do
   def handle_call({:submit, text}, _from, state) do
     submit_message(state, %{"role" => "user", "content" => text})
   end
+
   def handle_call(:usage, _from, state), do: {:reply, state.usage, state}
+
   def handle_call(:compact, _from, state) do
     {state, count} = compact_state(state, 8)
     {:reply, {:ok, count}, state}
   end
+
   def handle_call({:set_goal, text, opts}, _from, state) do
     text = String.trim(text)
     max_rounds = Keyword.get(opts, :max_rounds, 50)
@@ -298,7 +327,9 @@ defmodule Newbee.Agent.Loop do
     if state.goal, do: emit(state, {:goal_cancelled, :user})
     {:reply, :ok, %{state | goal: nil}}
   end
+
   def handle_call(:goal, _from, state), do: {:reply, state.goal, state}
+
   def handle_call({:switch_model, client}, _from, state) do
     # 不丢会话/绑定/消息/中断 scope，仅替换后续 turn 所用的 client 与 client_fun。
     # 求值器节点不动，当前 turn 仍用旧 client 完成，下次 submit 即生效。
@@ -347,9 +378,15 @@ defmodule Newbee.Agent.Loop do
     {:reply, reply, state}
   end
 
-
   # 自主目标循环：异步驱动（每轮之间可处理 mailbox，/goal clear 可插入取消）。
   @impl true
+  # 宿主（web 会话进程）死亡：kernel 自停；会话私有求值器经 monitor_owner 链式随停。
+  # GenServer.stop 的 :normal 退出不会经 link 传播，必须靠这个 monitor 兜底。
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{owner: ref} = state) when ref != nil do
+    Newbee.DebugLog.log(:kernel, "owner down reason=#{inspect(reason)}; stopping kernel")
+    {:stop, :normal, state}
+  end
+
   def handle_info(:interrupt_llm, state) do
     scope = Map.get(state.client, :interrupt_scope)
     if scope, do: :persistent_term.put({Newbee.LLM.Client, {:interrupt, scope}}, true)
@@ -454,6 +491,12 @@ defmodule Newbee.Agent.Loop do
   defp retryable_goal_error?({:stream_error, _reason}), do: true
   defp retryable_goal_error?({:upstream_error, _reason}), do: true
   defp retryable_goal_error?(:upstream_error), do: true
+
+  defp retryable_goal_error?({:http_error, status, _body}) when status in [400, 408, 425, 429, 500, 502, 503, 529],
+    do: true
+
+  defp retryable_goal_error?({:http_error, _status, _body}), do: false
+  defp retryable_goal_error?({:error, %Req.TransportError{}}), do: true
   defp retryable_goal_error?(_), do: false
 
   defp goal_system_prompt(text) do
@@ -731,6 +774,7 @@ defmodule Newbee.Agent.Loop do
                       "done" => true
                     })
                   end
+
                   # DeepSeek 严格校验：带 tool_calls 的 assistant 后必须跟齐 tool 响应，
                   # 否则下一回合 400（此前 done/ask 从不回填，历史必然悬空）
                   {:halt, {:halt, {:done, summary}, push_msg(state, tool_msg)}}
@@ -991,12 +1035,14 @@ defmodule Newbee.Agent.Loop do
       end
 
       duration_ms = System.monotonic_time(:millisecond) - tool_started_at
+
       Newbee.Environment.UsageTracker.observe_code(code, %{
         success: eval_result.status == :ok,
         latency_ms: duration_ms,
         output_bytes: byte_size(rendered),
         task_type: "run_elixir"
       })
+
       emit(state, {:tool_result, "run_elixir", rendered, duration_ms})
 
       # §12 结构隔离：工具输出是不可信内容，包 envelope（origin/hash/trust）

@@ -18,19 +18,35 @@ defmodule Newbee.Goal do
     Newbee.Agent.Loop.submit(kernel, text)
   end
 
-  defp do_run(_kernel, _text, max_rounds, round) when round > max_rounds do
+  defp do_run(kernel, text, max_rounds, round, error_retryed? \\ false)
+
+  defp do_run(_kernel, _text, max_rounds, round, _error_retryed?) when round > max_rounds do
     {:goal_limit, round - 1}
   end
 
-  defp do_run(kernel, text, max_rounds, round) do
+  defp do_run(kernel, text, max_rounds, round, error_retryed?) do
     input = if round == 1, do: text, else: "（自主模式第 #{round} 轮：目标未达成，请继续工作。达成后调用 done。）"
 
     case Newbee.Agent.Loop.submit(kernel, input) do
-      {:done, summary} -> {:done, summary}
-      {:ask, q} -> {:ask, q}
-      {:text, _} -> do_run(kernel, text, max_rounds, round + 1)
-      {:interrupted, _} -> {:interrupted, :user}
-      {:error, e} -> {:error, e}
+      {:done, summary} ->
+        {:done, summary}
+
+      {:ask, q} ->
+        {:ask, q}
+
+      {:text, _} ->
+        do_run(kernel, text, max_rounds, round + 1, false)
+
+      {:interrupted, _} ->
+        {:interrupted, :user}
+
+      {:error, e} ->
+        if error_retryed? do
+          {:error, e}
+        else
+          Newbee.DebugLog.log(:goal, "LLM error on round #{round}, retrying once: #{inspect(e)}")
+          do_run(kernel, text, max_rounds, round + 1, true)
+        end
     end
   end
 end

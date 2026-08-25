@@ -11,6 +11,8 @@ defmodule Newbee.Web.Api do
   """
   use Plug.Router
 
+  require Logger
+
   plug(:match)
 
   plug(Plug.Parsers,
@@ -28,13 +30,30 @@ defmodule Newbee.Web.Api do
     rpc_id = get_in(conn.body_params, ["rpcId"]) || "-"
     payload = get_in(conn.body_params, ["payload"]) || %{}
 
-    case dispatch_rpc(method, payload) do
+    case safe_dispatch(method, payload) do
       {:ok, value} ->
         reply(conn, 200, %{rpcId: rpc_id, result: %{ok: json_safe(value)}})
 
       {:error, code, message} ->
         reply(conn, 200, %{rpcId: rpc_id, result: %{error: %{code: code, message: message}}})
     end
+  end
+
+  # 兜底：dispatch 里的异常/exit（典型：GenServer.call 5s 超时、MatchError）不再
+  # 杀死连接进程（那样 Bandit 只会回空 500），而是记日志并回 JSON 错误信封，
+  # 前端能看到真实原因而不是“服务返回空响应 (HTTP 500)”。
+  defp safe_dispatch(method, payload) do
+    dispatch_rpc(method, payload)
+  rescue
+    e ->
+      Logger.error("rpc #{method} crashed:\n" <> Exception.format(:error, e, __STACKTRACE__))
+      {:error, "internal_error", Exception.message(e)}
+  catch
+    :exit, reason ->
+      Logger.error("rpc #{method} exit: #{Exception.format_exit(reason)}")
+
+      {:error, "internal_exit",
+       "内部调用超时或进程退出（服务繁忙/会话进程卡死）: #{Exception.format_exit(reason)}"}
   end
 
   # 便捷 GET：会话列表 / 健康检查（不进 RPC 信封，等价 dsh downloads 的 GET 面）
@@ -54,9 +73,16 @@ defmodule Newbee.Web.Api do
   # ── method 分派 ──
 
   # 会话域
-  defp dispatch_rpc("session.list", _p) do
+  defp dispatch_rpc("session.list", p) do
+    # 分页：limit 默认 50（上限 200），offset 默认 0；total 供前端算“加载更多”
+    limit = clamp_int(p["limit"], 50, 1, 200)
+    offset = clamp_int(p["offset"], 0, 0, 100_000)
+
+    # 空壳会话回收（懒落盘的兜底）：只在拉第一页时做，60s 限频
+    if offset == 0, do: maybe_sweep_empty_sessions()
+
     sessions =
-      Newbee.Session.list_with_meta(50)
+      Newbee.Session.list_with_meta(limit, offset)
       |> Enum.map(fn s ->
         id = s[:id] || s["id"]
         busy = Newbee.Web.Session.peek_busy(id)
@@ -69,7 +95,7 @@ defmodule Newbee.Web.Api do
         })
       end)
 
-    {:ok, %{sessions: Enum.map(sessions, &json_safe/1)}}
+    {:ok, %{sessions: Enum.map(sessions, &json_safe/1), total: Newbee.Session.count_valid()}}
   end
 
   defp dispatch_rpc("session.history", %{"sessionId" => sid}) do
@@ -79,8 +105,12 @@ defmodule Newbee.Web.Api do
 
   defp dispatch_rpc("session.create", p) do
     sid = p["sessionId"]
-    {:ok, _pid, sid} = Newbee.Web.Session.ensure(blank_to_nil(sid), blank_to_nil(p["cwd"]))
-    {:ok, %{sessionId: sid, cwd: Newbee.Session.cwd(sid)}}
+
+    case Newbee.Web.Session.ensure(blank_to_nil(sid), blank_to_nil(p["cwd"])) do
+      {:ok, _pid, sid} -> {:ok, %{sessionId: sid, cwd: Newbee.Session.cwd(sid)}}
+      {:error, r} -> {:error, "session_error", inspect(r)}
+      other -> {:error, "session_error", inspect(other)}
+    end
   end
 
   defp dispatch_rpc("session.cwd", %{"sessionId" => sid, "cwd" => cwd}) do
@@ -765,6 +795,29 @@ defmodule Newbee.Web.Api do
 
   # ── Impact Analysis helpers ──
   defp dispatch_rpc(method, _p), do: {:error, "unknown_method", "未知 RPC 方法: #{method}"}
+  # 60s 限频的清道夫：删 0 字节、超 1 小时、无进程附着的空会话
+  defp maybe_sweep_empty_sessions do
+    key = {__MODULE__, :last_empty_sweep}
+    now = System.system_time(:second)
+
+    if now - :persistent_term.get(key, 0) > 60 do
+      :persistent_term.put(key, now)
+      Newbee.Web.Session.sweep_stale_empty(3600)
+    end
+
+    :ok
+  end
+
+  defp clamp_int(v, _default, min, max) when is_integer(v), do: v |> max(min) |> min(max)
+
+  defp clamp_int(v, default, min, max) when is_binary(v) do
+    case Integer.parse(v) do
+      {i, _} -> clamp_int(i, default, min, max)
+      _ -> default
+    end
+  end
+
+  defp clamp_int(_, default, _, _), do: default
 
   # 构建模块依赖图：{文件路径 => [依赖它的文件列表]}
   defp build_dep_map do
@@ -955,9 +1008,14 @@ defmodule Newbee.Web.Api do
     end
   end
 
-  defp blank_to_nil(nil), do: nil
-  defp blank_to_nil(""), do: nil
-  defp blank_to_nil(s), do: s
+  # 只放行字符串（trim 后空串归 nil）；其他 JSON 类型（对象/数组/数字等，
+  # 如前端误传的事件对象序列化出的 %{}）一律视为 nil，避免下游函数子句崩溃。
+  defp blank_to_nil(s) when is_binary(s) do
+    s = String.trim(s)
+    if s == "", do: nil, else: s
+  end
+
+  defp blank_to_nil(_), do: nil
 
   defp current_model(sid \\ nil) do
     try do

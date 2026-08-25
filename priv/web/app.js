@@ -711,9 +711,36 @@ case "goal_round": break;
   let sessionFilter = "";
 
   async function loadSessions() {
-    const list = await rpc("session.list", {});
-    state.allSessions = list.sessions || [];
+    const list = await rpc("session.list", { limit: 50, offset: 0 });
+    let sessions = list.sessions || [];
+    // 懒落盘：刚建好还没发消息的会话尚未写盘，服务端列表里没有——
+    // 保留本地注入的当前会话条目在顶部，首条消息落盘后由服务端列表接管
+    if (state.sid && !sessions.some((s) => s.id === state.sid)) {
+      const local = (state.allSessions || []).find((s) => s.id === state.sid);
+      if (local && (local.messages || 0) === 0) sessions = [local].concat(sessions);
+    }
+    state.allSessions = sessions;
+    state.sessionsTotal = (typeof list.total === "number") ? list.total : sessions.length;
     renderSessionList();
+  }
+
+  // 分页加载下一页（服务端按 mtime 倒序）：按已加载条数作 offset，按 id 去重
+  async function loadMoreSessions() {
+    if (state.loadingMoreSessions) return;
+    state.loadingMoreSessions = true;
+    renderSessionList();
+    try {
+      const offset = (state.allSessions || []).length;
+      const list = await rpc("session.list", { limit: 50, offset });
+      const more = (list.sessions || []).filter((s) => !(state.allSessions || []).some((x) => x.id === s.id));
+      state.allSessions = (state.allSessions || []).concat(more);
+      if (typeof list.total === "number") state.sessionsTotal = list.total;
+    } catch (e) {
+      line("error", "加载更多会话失败: " + e.message);
+    } finally {
+      state.loadingMoreSessions = false;
+      renderSessionList();
+    }
   }
 
   function renderSessionList() {
@@ -721,10 +748,10 @@ case "goal_round": break;
     box.innerHTML = "";
     const kw = sessionFilter.trim().toLowerCase();
     const all = state.allSessions || [];
-    // 过滤：关键字命中 title/id；空会话（0 条消息且非当前）不显示
+    // 过滤：仅按关键字（title/id）。服务端已懒落盘——磁盘会话都有首条消息，
+    // 0 消息的只可能是刚建好未落盘的当前会话（本地条目），正常显示
     const items = all.filter((s) => {
       if (kw && !String(s.title || "").toLowerCase().includes(kw) && !String(s.id).toLowerCase().includes(kw)) return false;
-      if ((s.messages || 0) === 0 && s.id !== state.sid) return false;
       return true;
     });
     if (items.length === 0) {
@@ -760,6 +787,17 @@ case "goal_round": break;
       item.appendChild(btn);
       box.appendChild(item);
     });
+    // 分页：还有未加载的会话时显示“加载更多”
+    const loaded = (state.allSessions || []).length;
+    const total = state.sessionsTotal || loaded;
+    if (loaded < total) {
+      const more = document.createElement("button");
+      more.className = "session-more";
+      more.textContent = state.loadingMoreSessions ? "加载中…" : `加载更多（已加载 ${loaded}/${total}）`;
+      more.disabled = !!state.loadingMoreSessions;
+      more.onclick = loadMoreSessions;
+      box.appendChild(more);
+    }
   }
 
   // 轻量刷新会话运行状态：只更新已渲染列表项的状态点，不重建 DOM（避免闪烁）。
@@ -1842,7 +1880,7 @@ case "goal_round": break;
     if (hasImage) e.preventDefault();
   });
   $("interrupt").onclick = interrupt;
-  $("new-session").onclick = newSession;
+  $("new-session").onclick = () => newSession(); // 直接绑函数会把 MouseEvent 当 cwd 参数传入
   $("perm-yes").onclick = () => permission(true);
   $("perm-no").onclick = () => permission(false);
   $("model-label").onclick = openModels;

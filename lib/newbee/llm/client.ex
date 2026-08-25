@@ -88,7 +88,19 @@ defmodule Newbee.LLM.Client do
 
       {worker, monitor} =
         spawn_monitor(fn ->
-          result = stream_chat_request(client, messages, on_text, on_reasoning)
+          # 异常就地转结果：worker 一崩，父进程只能拿到无因的 :stream_worker_stopped，
+          # 崩溃栈全丢。这里转成既有 {:error, {:stream_error, reason, content}} 形状：
+          # 既保留诊断信息，又天然进入 goal 模式的可重试白名单。
+          result =
+            try do
+              stream_chat_request(client, messages, on_text, on_reasoning)
+            rescue
+              e -> {:error, {:stream_error, Exception.format(:error, e, __STACKTRACE__), ""}}
+            catch
+              kind, value ->
+                {:error, {:stream_error, Exception.format(kind, value, __STACKTRACE__), ""}}
+            end
+
           send(parent, {:stream_chat_result, ref, result})
         end)
 
@@ -150,12 +162,20 @@ defmodule Newbee.LLM.Client do
       end
 
     # 各家 provider 接受的 reasoning_effort 档位不一（如 sensenova 无 "max"）：
-    # 400 且报错涉及 reasoning 时摘掉该字段重试一次，配置写错不硬死
+    # 上游代理（Console Go 等）也可能因 reasoning_effort 报 400 invalid input。
+    # 400 时：先尝试摘掉 reasoning_effort 重试；若仍失败，再回传错误。
     result =
       case result do
         {:error, {:http_error, 400, msg}} = err ->
-          if client.reasoning_effort && is_binary(msg) && msg =~ "reasoning" do
-            Newbee.DebugLog.log(:llm, "400 on reasoning_effort=#{client.reasoning_effort}, retry without it")
+          should_retry_reasoning? =
+            client.reasoning_effort && is_binary(msg) &&
+              (msg =~ "reasoning" or msg =~ "Upstream" or msg =~ "invalid input")
+
+          if should_retry_reasoning? do
+            Newbee.DebugLog.log(
+              :llm,
+              "400 on reasoning_effort=#{client.reasoning_effort}, retry without it (msg=#{String.slice(msg, 0, 120)})"
+            )
 
             do_request(
               build_req.(Map.delete(body, :reasoning_effort)),
@@ -182,8 +202,9 @@ defmodule Newbee.LLM.Client do
         Process.demonitor(monitor, [:flush])
         result
 
-      {:DOWN, ^monitor, :process, ^worker, _reason} ->
-        {:error, :stream_worker_stopped}
+      {:DOWN, ^monitor, :process, ^worker, reason} ->
+        Newbee.DebugLog.log(:llm, "stream worker DOWN: #{inspect(reason)}")
+        {:error, {:stream_error, "worker 进程异常退出：#{inspect(reason)}", ""}}
     after
       50 ->
         if interrupted?(client) do
@@ -270,6 +291,7 @@ defmodule Newbee.LLM.Client do
 
   defp maybe_put_body(body, _k, nil), do: body
   defp maybe_put_body(body, k, v), do: Map.put(body, k, v)
+
   defp observe_provider(result, client, started_at, task_type) do
     {success, tokens, output_bytes} =
       case result do
@@ -302,7 +324,6 @@ defmodule Newbee.LLM.Client do
   end
 
   defp usage_tokens(_), do: 0
-
 
   # 429/5xx 过载重试（非流式版，无 SSE drain 需求）
   defp complete_req(req, 0), do: Req.request(req)
@@ -580,6 +601,31 @@ defmodule Newbee.LLM.Client do
 
   defp maybe_usage(acc, %{"usage" => usage}) when is_map(usage), do: %{acc | usage: normalize_usage(usage)}
   defp maybe_usage(acc, _), do: acc
+
+  @doc "将 provider 错误转换为可操作的简短提示；原始错误仍写入 debug.log。"
+  def format_error({:http_error, status, body}) do
+    detail = provider_error_detail(body)
+    hint = if status == 400, do: "请检查模型能力、消息内容和请求参数；系统会自动重试。", else: "系统会按策略自动重试。"
+    "LLM 请求失败（HTTP #{status}）：#{detail} #{hint}"
+  end
+
+  def format_error({:upstream_error, reason}), do: "LLM 上游暂时不可用：#{inspect(reason)} 系统会自动重试。"
+  def format_error({:stream_error, reason}), do: "LLM 流式请求失败：#{inspect(reason)} 系统会自动重试。"
+  def format_error({:stream_error, reason, _content}), do: format_error({:stream_error, reason})
+  def format_error(%Req.TransportError{reason: reason}), do: "LLM 网络请求失败：#{inspect(reason)} 系统会自动重试。"
+  def format_error(error), do: "LLM 请求失败：#{inspect(error)}"
+
+  defp provider_error_detail(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{"error" => error}} when is_map(error) ->
+        error["message"] || error["detail"] || "provider 返回未说明具体原因"
+
+      _ ->
+        body |> String.trim() |> String.slice(0, 500)
+    end
+  end
+
+  defp provider_error_detail(body), do: inspect(body)
 
   @doc false
   def normalize_usage(usage) when is_map(usage) do

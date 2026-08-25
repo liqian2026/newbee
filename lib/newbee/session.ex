@@ -400,9 +400,52 @@ defmodule Newbee.Session do
     end
   end
 
+  @doc "可回收的陈旧空会话 id：transcript 存在但 0 字节，且 mtime 早于 older_than_secs 秒前。"
+  def stale_empty_ids(older_than_secs \\ 3600) do
+    cutoff = System.system_time(:second) - older_than_secs
+
+    case File.read(@index) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, entries} when is_list(entries) ->
+            entries
+            |> Enum.filter(fn e ->
+              (e["mtime"] || 0) < cutoff and
+                match?({:ok, %{size: 0}}, File.stat(Path.join(@root, "#{e["id"]}.jsonl")))
+            end)
+            |> Enum.map(& &1["id"])
+
+          _ ->
+            []
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  @doc "有效会话总数（transcript 文件仍存在）。供列表分页计算 total/hasMore。"
+  def count_valid do
+    case File.read(@index) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, entries} when is_list(entries) ->
+            Enum.count(entries, &File.regular?(Path.join(@root, "#{&1["id"]}.jsonl")))
+
+          _ ->
+            length(build_index())
+        end
+
+      _ ->
+        length(build_index())
+    end
+  end
+
   @doc "列出会话元信息（新→旧，默认最多 20 个）：id / when_str / mtime / messages / title。"
-  def list_with_meta(n \\ 20) do
-    # 读索引（O(1)），只对最近 n 个读消息——避免 stat 全部会话文件（§9.1 极简）
+  def list_with_meta(n \\ 20, offset \\ 0) do
+    # 读索引（O(1)），只对最近 n 个读消息——避免 stat 全部会话文件（§9.1 极简）。
+    # 按 mtime（最近活动）排序而非 created：仍在跑的旧会话（如长跑自主任务）
+    # 不应被一批新建的空会话挤出列表。
     recent =
       case File.read(@index) do
         {:ok, body} ->
@@ -410,15 +453,16 @@ defmodule Newbee.Session do
             {:ok, entries} when is_list(entries) ->
               entries
               |> Enum.filter(&File.regular?(Path.join(@root, "#{&1["id"]}.jsonl")))
-              |> Enum.sort_by(&(&1["created"] || &1["mtime"]), :desc)
+              |> Enum.sort_by(&(&1["mtime"] || &1["created"]), :desc)
+              |> Enum.drop(offset)
               |> Enum.take(n)
 
             _ ->
-              build_index() |> Enum.take(n)
+              build_index() |> Enum.drop(offset) |> Enum.take(n)
           end
 
         _ ->
-          build_index() |> Enum.take(n)
+          build_index() |> Enum.drop(offset) |> Enum.take(n)
       end
 
     recent
@@ -465,7 +509,7 @@ defmodule Newbee.Session do
     File.mkdir_p!(@root)
     File.write!(@index, Jason.encode_to_iodata!(entries))
 
-    entries |> Enum.sort_by(&(&1["created"] || &1["mtime"]), :desc)
+    entries |> Enum.sort_by(&(&1["mtime"] || &1["created"]), :desc)
   end
 
   defp touch_index(id) do

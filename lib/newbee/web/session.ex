@@ -62,6 +62,16 @@ defmodule Newbee.Web.Session do
     end
   end
 
+  @doc "回收陈旧空会话（懒落盘的兜底）：0 字节、超过 older_than_secs、且无进程附着才删——有附着的可能是用户刚打开正要输入。返回删除的 id 列表。"
+  def sweep_stale_empty(older_than_secs \\ 3600) do
+    Newbee.Session.stale_empty_ids(older_than_secs)
+    |> Enum.reject(fn sid -> match?({:ok, _}, lookup(sid)) end)
+    |> Enum.map(fn sid ->
+      :ok = Newbee.Session.delete(sid)
+      sid
+    end)
+  end
+
   @doc "销毁会话：停 web 会话进程（如活着）+ 删除底层存储（transcript/artifacts/索引）。"
   def destroy(sid) when is_binary(sid) do
     case lookup(sid) do
@@ -279,8 +289,10 @@ defmodule Newbee.Web.Session do
 
   @impl true
   def init(sid) do
-    # 新会话点完立即出现在侧栏（不再等首条消息才写 transcript/index）。
-    Newbee.Session.mark_created(sid)
+    # 懒落盘：create 只注册进程，不写 transcript/index；首条消息 append 时才落盘
+    # （append 的 File.write! [:append] 会自建文件并 touch_index）。
+    # 否则每点一次“+ 新会话”就留下一个 0 字节空壳会话——前端不显示、用户删不掉、
+    # 还会占用 session.list 的名额把活跃旧会话挤出列表。
 
     case client_for_session(sid) do
       {:error, message} ->
@@ -326,10 +338,12 @@ defmodule Newbee.Web.Session do
     is_binary(client.api_key) and String.trim(client.api_key) != ""
   end
 
-  defp start_kernel(sid, client) do
+  # owner = 本会话进程 pid：kernel 监控它，会话进程死亡（删除/崩溃）时 kernel 自停，
+  # 会话私有求值器再经 monitor_owner 链式随停（释放 peer 节点，epmd 不残留）。
+  defp start_kernel(sid, client, owner) do
     sid_opt = sid
     cwd = Newbee.Session.cwd(sid)
-    evaluator = Newbee.Environment.Boot.evaluator_or_fallback(session_id: sid_opt, cwd: cwd)
+    {evaluator, owned?} = Newbee.Environment.Boot.session_evaluator(session_id: sid_opt, cwd: cwd)
 
     render = fn event ->
       kind = elem(event, 0)
@@ -337,17 +351,31 @@ defmodule Newbee.Web.Session do
       if kind == :usage, do: GenServer.cast(reg_name(sid), {:usage_snap, elem(event, 1)})
     end
 
-    {:ok, kernel} =
-      Newbee.Agent.Loop.start_link(
-        client: client,
-        evaluator: evaluator,
-        session_id: sid_opt,
-        root: cwd,
-        auto_antibodies: true,
-        render: render
-      )
+    case Newbee.Agent.Loop.start_link(
+           client: client,
+           evaluator: evaluator,
+           evaluator_owned: owned?,
+           owner: owner,
+           session_id: sid_opt,
+           root: cwd,
+           auto_antibodies: true,
+           render: render
+         ) do
+      {:ok, kernel} ->
+        kernel
 
-    kernel
+      {:error, reason} ->
+        # kernel 起不来时回收已创建的私有求值器（不留孤儿节点）
+        if owned? do
+          try do
+            GenServer.stop(evaluator, :normal, 5_000)
+          catch
+            _, _ -> :ok
+          end
+        end
+
+        raise "kernel start failed: #{inspect(reason)}"
+    end
   end
 
   @impl true
@@ -540,7 +568,7 @@ defmodule Newbee.Web.Session do
     spawn(fn ->
       result =
         try do
-          {:ok, start_kernel(sid, client)}
+          {:ok, start_kernel(sid, client, parent)}
         rescue
           e -> {:error, Exception.message(e)}
         catch
@@ -680,7 +708,8 @@ defmodule Newbee.Web.Session do
     kernel =
       start_kernel(
         st.sid <> "-w" <> Integer.to_string(:erlang.unique_integer([:positive])),
-        st.client
+        st.client,
+        self()
       )
 
     broadcast(st.sid, :notice, %{text: "已开启新会话"})

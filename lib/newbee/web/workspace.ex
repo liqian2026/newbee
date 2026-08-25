@@ -83,12 +83,17 @@ defmodule Newbee.Web.Workspace do
   end
 
   @doc "校验候选工作目录：存在且是目录则返回展开后的绝对路径，否则 :error。"
-  def valid_dir?(nil), do: false
-
   def valid_dir?(path) when is_binary(path) do
-    expanded = Path.expand(String.trim(path))
-    if File.dir?(expanded), do: {:ok, expanded}, else: :error
+    case String.trim(path) do
+      "" -> :error
+      trimmed ->
+        expanded = Path.expand(trimmed)
+        if File.dir?(expanded), do: {:ok, expanded}, else: :error
+    end
   end
+
+  # 非字符串输入（nil、前端误传的对象等）一律按无效目录处理，不抛函数子句错误
+  def valid_dir?(_), do: :error
 
   # ── 内部 ──
 
