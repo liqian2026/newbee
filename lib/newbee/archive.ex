@@ -120,6 +120,18 @@ defmodule Newbee.Archive do
   @doc "档案是否存在（有段被归档过）。"
   def archived?(%Session{} = session), do: segments(session) != []
 
+  @doc """
+  当前压缩切点与段清单（UI/诊断用）：`%{cut: n, segments: [...]}`；无有效档案返回 nil。
+  """
+  def current_cut(%Session{} = session) do
+    raw = Session.messages(session)
+
+    case validated_cut(session, raw) do
+      nil -> nil
+      cut -> %{cut: cut, segments: segments(session)}
+    end
+  end
+
   @doc "段清单（账本 compacted 事件 → 段元数据，按归档序）。"
   def segments(%Session{} = session) do
     session

@@ -225,6 +225,14 @@ defmodule Newbee.ArchiveTest do
     assert text =~ "尚无归档段"
   end
 
+  test "current_cut：无档案 nil；压缩后返回切点与段清单（WebUI 分隔条数据源）", %{session: s} do
+    assert Archive.current_cut(s) == nil
+    feed(s, conv(8))
+    {:ok, %{cut: cut}} = Archive.compact(s, retain: 4)
+    assert %{cut: ^cut, segments: [seg | _]} = Archive.current_cut(s)
+    assert seg.id == "seg-0001" and seg.messages > 0
+  end
+
   test "digest 事件可补写：先失败后成功，幂等不重复", %{session: s} do
     feed(s, conv(6))
     {:ok, %{segment: seg}} = Archive.compact(s, retain: 4)

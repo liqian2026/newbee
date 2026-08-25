@@ -73,8 +73,29 @@ defmodule Newbee.Web.Api do
   end
 
   defp dispatch_rpc("session.history", %{"sessionId" => sid}) do
-    msgs = Newbee.Session.open(sid) |> Newbee.Session.messages()
-    {:ok, %{messages: Enum.map(msgs, &history_msg/1)}}
+    session = Newbee.Session.open(sid)
+    msgs = session |> Newbee.Session.messages() |> Enum.map(&history_msg/1)
+    {:ok, %{messages: inject_archive_divider(session, msgs)}}
+  end
+
+  # 历史回放在压缩切点处插入档案分隔条（§6.6）：UI 看的是全量日志，
+  # 分隔条标出"此线以上已被压缩成段——模型实际看到的是分层摘要"。
+  defp inject_archive_divider(session, msgs) do
+    case Newbee.Archive.current_cut(session) do
+      nil ->
+        msgs
+
+      %{cut: cut, segments: segs} ->
+        divider = %{
+          role: "archive",
+          content: "已压缩 #{cut} 条早期对话为 #{length(segs)} 段档案（无损，模型可见分层摘要）",
+          segments: Enum.map(segs, &%{id: &1.id, messages: &1.messages, intent: &1.first_intent})
+        }
+
+        List.insert_at(msgs, cut, divider)
+    end
+  rescue
+    _ -> msgs
   end
 
   defp dispatch_rpc("session.create", p) do
@@ -1153,8 +1174,7 @@ defmodule Newbee.Web.Api do
       "author" => to_string(change.author_agent),
       "base_revision" => change.base_revision,
       "candidate_release" => change.candidate_revision,
-      "release_id" =>
-        evaluation["release_id"] || evaluation[:release_id] || change.candidate_revision,
+      "release_id" => evaluation["release_id"] || evaluation[:release_id] || change.candidate_revision,
       "plugin_id" => evaluation["plugin_id"] || evaluation[:plugin_id],
       "ring" => evaluation["ring"] || evaluation[:ring],
       "evidence" => change.evidence,
