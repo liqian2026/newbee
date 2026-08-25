@@ -126,6 +126,8 @@
 ### 🔄 Event Sourcing + 物化视图
 上下文不是日志，是日志的**物化视图**。compaction 改视图不动日志，任意时点可重建。Event Store 单调 `event_id`、checksum frame、durability 三档、崩溃截断安全。
 
+**会话档案库（Archive）把这句话落到会话 transcript 上**：压缩 = 归档（append-only 账本 + sha256 内容寻址段），不是覆写。早期对话分层蒸馏——确定性事实账本（用户意图逐字、文件、✗→✓ 错误对）+ 每段一次的 LLM digest（永不"摘要的摘要"）；被压缩的原文随时 `Newbee.read("history://q/关键词")` 拉回。**在 newbee 里，忘记不是一个不可逆操作。**
+
 *Context is not the log — it's a materialized view of the log. Rebuild any point in time. Crash-safe, checksummed, monotonic.*
 
 ### 👥 Worker / Adapter 双模型拓扑

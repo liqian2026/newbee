@@ -1,0 +1,167 @@
+defmodule Newbee.Agent.LoopCompactTest do
+  @moduledoc """
+  Loop × Archive 集成：压缩经档案库走（不再覆写 transcript），恢复 = 视图重建，
+  LLM 看到的请求里带段汇总消息（history:// 拉取自证闭环）。
+  """
+  use ExUnit.Case, async: false
+  alias Newbee.Agent.Loop
+  alias Newbee.DEE.Evaluator
+  alias Newbee.Session
+
+  setup do
+    id = "kcomp_#{:erlang.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      File.rm(Path.join(System.user_home!(), ".newbee/sessions/#{id}.jsonl"))
+      File.rm_rf(Path.join(System.user_home!(), ".newbee/session-artifacts/#{id}"))
+      Session.set_current(nil)
+    end)
+
+    {:ok, ev} = Evaluator.start(mode: :local)
+
+    on_exit(fn ->
+      ref = ev
+      if Process.alive?(ref), do: GenServer.stop(ref)
+    end)
+
+    {:ok, id: id, ev: ev}
+  end
+
+  defp tool_msg(code, id) do
+    %{
+      "role" => "assistant",
+      "content" => "",
+      "tool_calls" => [
+        %{
+          "id" => id,
+          "type" => "function",
+          "function" => %{"name" => "run_elixir", "arguments" => Jason.encode!(%{code: code})}
+        }
+      ]
+    }
+  end
+
+  defp done_msg(summary),
+    do: %{
+      "role" => "assistant",
+      "content" => "done",
+      "tool_calls" => [
+        %{
+          "id" => "call_done",
+          "type" => "function",
+          "function" => %{"name" => "done", "arguments" => Jason.encode!(%{summary: summary})}
+        }
+      ]
+    }
+
+  defp text_msg(text),
+    do: fn _m, on_text ->
+      on_text.(text)
+      {:ok, %{"role" => "assistant", "content" => text}, %{}}
+    end
+
+  test "压缩后 transcript 字节不变；恢复的会话即压缩视图", %{id: id, ev: ev} do
+    script =
+      Enum.map(1..6, fn i -> fn _m, _t -> {:ok, tool_msg("x = #{i}", "c#{i}"), %{}} end end) ++
+        [fn _m, _t -> {:ok, done_msg("完成 6 步"), %{}} end]
+
+    {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session_id: id, client_fun: scripted(script))
+    assert {:done, "完成 6 步"} = Loop.submit(kernel, "任务 A：连续六步计算")
+
+    transcript = Path.join(System.user_home!(), ".newbee/sessions/#{id}.jsonl")
+    before = File.read!(transcript)
+    assert before != ""
+
+    assert {:ok, n} = Loop.compact(kernel)
+    assert n > 0
+    # §4.6 承诺：压缩改视图不动日志
+    assert File.read!(transcript) == before
+
+    GenServer.stop(kernel)
+
+    # 恢复：新一轮请求捕获 LLM 实际看到的消息（parent = 测试进程；client_fun 在 Loop 进程里跑）
+    parent = self()
+
+    {:ok, k2} =
+      Loop.start_link(
+        client: %{},
+        evaluator: ev,
+        session_id: id,
+        client_fun:
+          scripted([
+            fn messages, _t ->
+              send(parent, {:seen, messages})
+              {:ok, %{"role" => "assistant", "content" => "ok"}, %{}}
+            end
+          ])
+      )
+
+    assert {:text, "ok"} = Loop.submit(k2, "继续任务 A")
+
+    seen =
+      receive do
+        {:seen, m} -> m
+      after
+        5_000 -> flunk("no capture")
+      end
+
+    assert is_list(seen) and length(seen) > 1
+    summary = Enum.find(seen, &(&1["role"] == "system" and String.contains?(&1["content"] || "", "已压缩的早期对话")))
+    assert summary
+    # 意图脊柱：最初的用户请求逐字可见
+    assert summary["content"] =~ "任务 A：连续六步计算"
+    # 检索通道自证：history:// 能拉回被压缩的原文
+    assert {:ok, idx} = Newbee.read("history://")
+    assert idx =~ "1 段"
+  end
+
+  test "auto compact（token 压力）同样走档案且不炸", %{id: id, ev: ev} do
+    big = String.duplicate("数据", 400)
+
+    script =
+      Enum.map(1..4, fn i -> fn _m, _t -> {:ok, tool_msg(~s(y = "#{big}#{i}"), "a#{i}"), %{}} end end) ++
+        [fn _m, _t -> {:ok, done_msg("done"), %{}} end]
+
+    {:ok, kernel} =
+      Loop.start_link(
+        client: %{},
+        evaluator: ev,
+        session_id: id,
+        client_fun: scripted(script),
+        context_window: 2_000,
+        compaction_threshold: 0.2,
+        compaction_retain: 0.4
+      )
+
+    transcript = Path.join(System.user_home!(), ".newbee/sessions/#{id}.jsonl")
+    assert {:done, "done"} = Loop.submit(kernel, "压力任务 #{big}")
+
+    assert Newbee.Archive.archived?(Session.open(id))
+    # transcript 只增不删：所有 4 条工具调用原文仍在
+    assert transcript |> File.read!() |> String.contains?("a4")
+    GenServer.stop(kernel)
+  end
+
+  test "session:false（ephemeral）走旧内存路径不落盘", %{ev: ev} do
+    script = [fn _m, _t -> {:ok, done_msg("ok"), %{}} end]
+
+    {:ok, kernel} = Loop.start_link(client: %{}, evaluator: ev, session: false, client_fun: scripted(script))
+    assert {:done, "ok"} = Loop.submit(kernel, "临时任务")
+    assert {:ok, 0} = Loop.compact(kernel)
+    GenServer.stop(kernel)
+  end
+
+  defp scripted(script) do
+    {:ok, agent} = Agent.start_link(fn -> script end)
+
+    fn messages, on_text ->
+      fun =
+        Agent.get_and_update(agent, fn
+          [f | rest] -> {f, rest}
+          [] -> {nil, []}
+        end)
+
+      if fun, do: fun.(messages, on_text), else: {:error, :script_exhausted}
+    end
+  end
+end
