@@ -22,10 +22,16 @@ defmodule Newbee.CLI do
     Newbee.Bus.subscribe()
     spawn_link(fn -> printer(<<>>) end)
 
-    evaluator = Newbee.Environment.Boot.evaluator_or_fallback()
+    {evaluator, owned?} = Newbee.Environment.Boot.session_evaluator()
 
     {:ok, kernel} =
-      Newbee.Agent.Loop.start_link(client: client, evaluator: evaluator, auto_antibodies: true, render: fn _ -> :ok end)
+      Newbee.Agent.Loop.start_link(
+        client: client,
+        evaluator: evaluator,
+        evaluator_owned: owned?,
+        auto_antibodies: true,
+        render: fn _ -> :ok end
+      )
 
     IO.puts("\e[2msession: #{session_id(kernel)}\e[0m")
 
@@ -126,7 +132,7 @@ defmodule Newbee.CLI do
 
       {:newbee_event, :error, {:error, e}} ->
         buf = flush_buffer(buffer)
-        IO.puts("[31m#{inspect(e)}[0m")
+        IO.puts("\e[31m" <> Newbee.LLM.Client.format_error(e) <> "\e[0m")
         printer(buf)
 
       {:newbee_event, _, _} ->
@@ -261,10 +267,13 @@ defmodule Newbee.CLI do
   end
 
   defp resume_kernel(client, id) do
+    {evaluator, owned?} = Newbee.Environment.Boot.session_evaluator(session_id: id)
+
     {:ok, kernel} =
       Newbee.Agent.Loop.start_link(
         client: client,
-        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(session_id: id),
+        evaluator: evaluator,
+        evaluator_owned: owned?,
         session_id: id,
         auto_antibodies: true,
         render: fn _ -> :ok end
@@ -285,10 +294,13 @@ defmodule Newbee.CLI do
 
   # /new：停掉旧 kernel，以 session_id: nil 起全新会话（全新消息历史与绑定）。
   defp new_kernel(client) do
+    {evaluator, owned?} = Newbee.Environment.Boot.session_evaluator()
+
     {:ok, kernel} =
       Newbee.Agent.Loop.start_link(
         client: client,
-        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(),
+        evaluator: evaluator,
+        evaluator_owned: owned?,
         auto_antibodies: true,
         render: fn _ -> :ok end
       )

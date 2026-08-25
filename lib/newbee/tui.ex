@@ -89,10 +89,13 @@ defmodule Newbee.TUI do
     Task.start(fn -> Newbee.LLM.Client.prewarm(client) end)
     Newbee.Bus.subscribe()
 
+    {evaluator, owned?} = Newbee.Environment.Boot.session_evaluator()
+
     {:ok, kernel} =
       Newbee.Agent.Loop.start_link(
         client: client,
-        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(),
+        evaluator: evaluator,
+        evaluator_owned: owned?,
         auto_antibodies: true,
         render: fn _ -> :ok end
       )
@@ -788,10 +791,13 @@ defmodule Newbee.TUI do
   end
 
   defp resume_kernel(client, id) do
+    {evaluator, owned?} = Newbee.Environment.Boot.session_evaluator(session_id: id)
+
     {:ok, kernel} =
       Newbee.Agent.Loop.start_link(
         client: client,
-        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(session_id: id),
+        evaluator: evaluator,
+        evaluator_owned: owned?,
         session_id: id,
         auto_antibodies: true,
         render: fn _ -> :ok end
@@ -804,10 +810,13 @@ defmodule Newbee.TUI do
 
   # /new：停掉旧 kernel，以 session_id: nil 起全新会话（全新消息历史与绑定）。
   defp new_kernel(client) do
+    {evaluator, owned?} = Newbee.Environment.Boot.session_evaluator()
+
     {:ok, kernel} =
       Newbee.Agent.Loop.start_link(
         client: client,
-        evaluator: Newbee.Environment.Boot.evaluator_or_fallback(),
+        evaluator: evaluator,
+        evaluator_owned: owned?,
         auto_antibodies: true,
         render: fn _ -> :ok end
       )
@@ -1037,7 +1046,7 @@ defmodule Newbee.TUI do
 
   def render_event(%__MODULE__{} = state, :error, {:error, e}) do
     state = flush_text_buffer(state)
-    push_line(state, "\e[31m#{inspect(e)}\e[0m")
+    push_line(state, "\e[31m" <> Newbee.LLM.Client.format_error(e) <> "\e[0m")
   end
 
   def render_event(%__MODULE__{} = state, :done, {:done, summary}) do
