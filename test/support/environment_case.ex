@@ -58,7 +58,15 @@ defmodule Newbee.EnvironmentCase do
   end
 
   def stop_coordinator(pid) do
-    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 5_000)
+    if Process.alive?(pid) do
+      # 正常停 3s；卡在长 call（如 materialize 60s）则强杀，
+      # 否则进程活着时后续 rm_rf(tmp) 会让它写已删目录而崩溃
+      case GenServer.stop(pid, :normal, 3_000) do
+        :ok -> :ok
+        _ -> Process.exit(pid, :kill)
+      end
+    end
+
     Newbee.Events.unregister_store()
     :ok
   catch
