@@ -66,7 +66,7 @@ defmodule Newbee.Web.Router do
   # A plain prefix check would treat /priv/web-evil as a child of
   # /priv/web. Compare a path segment boundary instead.
   defp inside_root?(path, root) do
-    path == root or String.starts_with?(path, root <> Path.sep())
+    path == root or String.starts_with?(path, root <> "/")
   end
 
   defp security_headers(conn, _opts) do
