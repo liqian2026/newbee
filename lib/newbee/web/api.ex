@@ -79,8 +79,15 @@ defmodule Newbee.Web.Api do
 
   defp dispatch_rpc("session.create", p) do
     sid = p["sessionId"]
-    {:ok, _pid, sid} = Newbee.Web.Session.ensure(blank_to_nil(sid), blank_to_nil(p["cwd"]))
-    {:ok, %{sessionId: sid, cwd: Newbee.Session.cwd(sid)}}
+    cwd = blank_to_nil(p["cwd"])
+
+    case Newbee.Web.Session.ensure(blank_to_nil(sid), cwd) do
+      {:ok, _pid, created_sid} ->
+        {:ok, %{sessionId: created_sid, cwd: Newbee.Session.cwd(created_sid)}}
+
+      {:error, reason} ->
+        {:error, "session_error", inspect(reason)}
+    end
   end
 
   defp dispatch_rpc("session.cwd", %{"sessionId" => sid, "cwd" => cwd}) do
@@ -1070,7 +1077,6 @@ defmodule Newbee.Web.Api do
 
     conn
     |> put_resp_content_type("application/json")
-    |> put_resp_header("access-control-allow-origin", "*")
     |> send_resp(status, body)
   end
 
