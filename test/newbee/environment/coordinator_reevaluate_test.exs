@@ -58,7 +58,16 @@ defmodule Newbee.Environment.CoordinatorReevaluateTest do
   defp wait_for_status(coordinator, change_id, statuses, retries \\ 200)
 
   defp wait_for_status(coordinator, change_id, statuses, retries) do
-    change = Enum.find(Coordinator.changes(coordinator), &(&1.change_id == change_id))
+    change =
+      try do
+        Enum.find(Coordinator.changes(coordinator), &(&1.change_id == change_id))
+      catch
+        :exit, _ ->
+          Process.sleep(500)
+          nil
+      end
+
+    change = change || %{status: :missing, change_id: change_id}
 
     if change.status in statuses or retries == 0 do
       change
