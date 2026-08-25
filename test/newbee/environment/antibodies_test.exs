@@ -1,5 +1,5 @@
 defmodule Newbee.Environment.AntibodiesTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Newbee.Environment.Antibodies
 

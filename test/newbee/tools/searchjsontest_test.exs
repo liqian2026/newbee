@@ -1,5 +1,5 @@
 defmodule Newbee.Tools.SearchJsonTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   alias Newbee.Tools.{Search, Json}
 
   test "grep 在工程内命中 defmodule" do

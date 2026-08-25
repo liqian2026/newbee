@@ -1,5 +1,5 @@
 defmodule Newbee.DEE.EvaluatorTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   alias Newbee.DEE.Evaluator
 
   setup do

@@ -1,5 +1,5 @@
 defmodule Newbee.Agent.ProgressTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   alias Newbee.Agent.Progress
 
   describe "刻度映射" do
