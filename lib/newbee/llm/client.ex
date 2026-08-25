@@ -88,7 +88,19 @@ defmodule Newbee.LLM.Client do
 
       {worker, monitor} =
         spawn_monitor(fn ->
-          result = stream_chat_request(client, messages, on_text, on_reasoning)
+          # 异常就地转结果：worker 一崩，父进程只能拿到无因的 :stream_worker_stopped，
+          # 崩溃栈全丢。这里转成既有 {:error, {:stream_error, reason, content}} 形状：
+          # 既保留诊断信息，又天然进入 goal 模式的可重试白名单。
+          result =
+            try do
+              stream_chat_request(client, messages, on_text, on_reasoning)
+            rescue
+              e -> {:error, {:stream_error, Exception.format(:error, e, __STACKTRACE__), ""}}
+            catch
+              kind, value ->
+                {:error, {:stream_error, Exception.format(kind, value, __STACKTRACE__), ""}}
+            end
+
           send(parent, {:stream_chat_result, ref, result})
         end)
 
@@ -190,8 +202,9 @@ defmodule Newbee.LLM.Client do
         Process.demonitor(monitor, [:flush])
         result
 
-      {:DOWN, ^monitor, :process, ^worker, _reason} ->
-        {:error, :stream_worker_stopped}
+      {:DOWN, ^monitor, :process, ^worker, reason} ->
+        Newbee.DebugLog.log(:llm, "stream worker DOWN: #{inspect(reason)}")
+        {:error, {:stream_error, "worker 进程异常退出：#{inspect(reason)}", ""}}
     after
       50 ->
         if interrupted?(client) do
@@ -598,6 +611,7 @@ defmodule Newbee.LLM.Client do
 
   def format_error({:upstream_error, reason}), do: "LLM 上游暂时不可用：#{inspect(reason)} 系统会自动重试。"
   def format_error({:stream_error, reason}), do: "LLM 流式请求失败：#{inspect(reason)} 系统会自动重试。"
+  def format_error({:stream_error, reason, _content}), do: format_error({:stream_error, reason})
   def format_error(%Req.TransportError{reason: reason}), do: "LLM 网络请求失败：#{inspect(reason)} 系统会自动重试。"
   def format_error(error), do: "LLM 请求失败：#{inspect(error)}"
 
