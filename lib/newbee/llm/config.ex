@@ -232,6 +232,7 @@ defmodule Newbee.LLM.Config do
   # ── 模型列表自动拉取 ──
 
   @models_cache :newbee_llm_models_cache
+  @models_ttl :timer.minutes(5)
 
   @doc """
   取某 provider 的模型列表：优先缓存（5 分钟），其次 GET {baseUrl}/models

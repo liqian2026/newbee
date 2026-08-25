@@ -140,9 +140,6 @@ defmodule Newbee.Web.Session do
   def set_cwd(pid, cwd), do: GenServer.call(pid, {:set_cwd, cwd}, 120_000)
   def set_effort(pid, effort), do: GenServer.call(pid, {:set_effort, effort}, 10_000)
 
-  @doc "获取底层 kernel pid（供 API 层查询 evaluator）。"
-  def kernel_pid(pid), do: GenServer.call(pid, :kernel_pid, 3_000)
-
   @doc "当前状态快照（供 HTTP 轮询 / socket 重连对齐）。"
   def state(pid), do: GenServer.call(pid, :state, 5_000)
   @doc "轻量探测会话是否正在运行（非阻塞，短超时；失败视为离线）。"
