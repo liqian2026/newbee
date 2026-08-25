@@ -20,7 +20,12 @@ defmodule Newbee.EnvironmentCase do
     File.cd!(tmp)
 
     on_exit(fn ->
-      File.cd!(original_cwd)
+      # File.cwd! 是 VM 全局：后续用例可能已 cd 走，只有当前 cwd 仍是本用例 tmp 时才回退，
+      # 否则会把别的用例的工作目录劫持回主仓库
+      if File.cwd!() == tmp do
+        File.cd!(original_cwd)
+      end
+
       File.rm_rf(tmp)
     end)
 
@@ -37,15 +42,19 @@ defmodule Newbee.EnvironmentCase do
 
   @doc "启动具名 Coordinator（默认名，供 CapabilityGate/Worker 等全局引用）。"
   def start_coordinator!(opts \\ []) do
+    # 测试要求干净实例：残留的旧 Coordinator 持有已删除 tmp 目录的路径，
+    # 复用会导致 write_atomic! ENOENT 崩溃 → 先停旧的再起新的
     case Process.whereis(Newbee.Environment.Coordinator) do
       nil ->
-        # 测试默认 manual 档（不依赖用户 ~/.newbee/config.json）
-        {:ok, pid} = Newbee.Environment.Coordinator.start(Keyword.put_new(opts, :autonomy, :manual))
-        pid
+        :ok
 
-      pid ->
-        pid
+      stale ->
+        Newbee.EnvironmentCase.stop_coordinator(stale)
+        Process.sleep(50)
     end
+
+    {:ok, pid} = Newbee.Environment.Coordinator.start(Keyword.put_new(opts, :autonomy, :manual))
+    pid
   end
 
   def stop_coordinator(pid) do
