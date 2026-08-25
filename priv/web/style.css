@@ -283,8 +283,7 @@ body {
 
 /* 终态/提示行 */
 .msg-error { color: var(--nb-red); white-space: pre-wrap; font-size: 14px; }
-.msg-done { color: var(--nb-label-1); font-weight: 600; white-space: pre-wrap; font-size: 15px; }
-.msg-done::before { content: '● '; color: var(--nb-accent); }
+.msg-done { color: var(--nb-label-1); white-space: pre-wrap; font-size: 15px; }
 .msg-ask { color: var(--nb-warn); white-space: pre-wrap; font-size: 15px; }
 .msg-ask::before { content: '? '; font-weight: 700; }
 .msg-notice { color: var(--nb-label-caption); font-size: 13px; font-style: italic; }
@@ -492,7 +491,6 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 15px; }
 }
 .md-table th { background: var(--nb-bg-elev); font-weight: 600; color: var(--nb-label-1); }
 .md-table td { color: var(--nb-label-2); }
-.msg-done .md-p, .msg-done .md-h { font-weight: 600; }
 
 /* ── 状态栏 ── */
 .statsbar {
@@ -1111,8 +1109,7 @@ body {
 
 /* 终态/提示行 */
 .msg-error { color: var(--nb-red); white-space: pre-wrap; font-size: 14px; }
-.msg-done { color: var(--nb-label-1); font-weight: 600; white-space: pre-wrap; font-size: 15px; }
-.msg-done::before { content: '● '; color: var(--nb-accent); }
+.msg-done { color: var(--nb-label-1); white-space: pre-wrap; font-size: 15px; }
 .msg-ask { color: var(--nb-warn); white-space: pre-wrap; font-size: 15px; }
 .msg-ask::before { content: '? '; font-weight: 700; }
 .msg-notice { color: var(--nb-label-caption); font-size: 13px; font-style: italic; }
@@ -1320,7 +1317,6 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 15px; }
 }
 .md-table th { background: var(--nb-bg-elev); font-weight: 600; color: var(--nb-label-1); }
 .md-table td { color: var(--nb-label-2); }
-.msg-done .md-p, .msg-done .md-h { font-weight: 600; }
 
 /* ── 状态栏 ── */
 .statsbar {

@@ -73,6 +73,8 @@
       // 无序列表
       const ul = line.match(/^\s*[-*+]\s+(.*)$/);
       if (ul) {
+        // 空列表项（如 "- " 或 "* "）不产出 <li></li>——避免 done 摘要出现孤立空 bullet
+        if (ul[1].trim() === "") { i++; continue; }
         if (!listStack || listStack.type !== "ul") { closeList(); listStack = { type: "ul", html: [] }; }
         listStack.html.push(`<li>${inline(ul[1])}</li>`);
         i++; continue;
@@ -482,7 +484,13 @@ case "goal_round": break;
       clearTurnStatus();
       state.currentAssistant = el("msg-assistant", "");
     }
-    streamAcc += delta || "";
+    const d = delta || "";
+    // 流式去重：同一回合若 delta 已连续出现在 streamAcc 尾部（网络/服务端偶发双发），
+    // 跳过第二次，避免“对话进行中同一段文字逐字重复”。
+    // 仅对较长 delta（≥5 字符）做整段尾部去重，短增量（标点/单个字符）正常追加，
+    // 避免把模型合理输出的连续相同符号（如 **、--、代码缩进）误判为重复。
+    if (d.length >= 5 && streamAcc.endsWith(d)) return;
+    streamAcc += d;
     state.currentAssistant.dataset.raw = streamAcc;
     if (!streamRaf) {
       streamRaf = requestAnimationFrame(() => {
@@ -1259,6 +1267,9 @@ case "goal_round": break;
     if (m.role === "user") {
       if (m.images && m.images.length) renderUserLine(m.content, m.images);
       else line("user", m.content);
+    }
+    else if (m.role === "done") {
+      line("done", m.content, true);
     }
     else if (m.role === "assistant") {
       if (m.reasoning) {
