@@ -32,28 +32,33 @@ defmodule Newbee.Web.Workspace do
         {:error, "not_a_directory", "不是目录: #{dir}"}
 
       true ->
-        entries =
-          dir
-          |> File.ls!()
-          |> Enum.map(fn name ->
-            full = Path.join(dir, name)
+        case File.ls(dir) do
+          {:ok, names} ->
+            entries =
+              names
+              |> Enum.map(fn name ->
+                full = Path.join(dir, name)
 
-            %{
-              "name" => name,
-              "kind" => if(File.dir?(full), do: "dir", else: "file"),
-              "hidden" => String.starts_with?(name, ".")
-            }
-          end)
-          |> Enum.sort_by(&{&1["kind"] != "dir", String.downcase(&1["name"]), &1["name"]})
+                %{
+                  "name" => name,
+                  "kind" => if(File.dir?(full), do: "dir", else: "file"),
+                  "hidden" => String.starts_with?(name, ".")
+                }
+              end)
+              |> Enum.sort_by(&{&1["kind"] != "dir", String.downcase(&1["name"]), &1["name"]})
 
-        {:ok,
-         %{
-           "path" => dir,
-           "name" => display_name(dir),
-           "parent" => parent_of(dir),
-           "separator" => "/",
-           "entries" => entries
-         }}
+            {:ok,
+             %{
+               "path" => dir,
+               "name" => display_name(dir),
+               "parent" => parent_of(dir),
+               "separator" => "/",
+               "entries" => entries
+             }}
+
+          {:error, reason} ->
+            {:error, "list_failed", "#{dir}: #{inspect(reason)}"}
+        end
     end
   rescue
     e -> {:error, "list_failed", Exception.message(e)}
@@ -76,7 +81,14 @@ defmodule Newbee.Web.Workspace do
 
         case File.mkdir(target) do
           :ok -> {:ok, target}
-          {:error, :eexist} -> {:ok, target}
+
+          {:error, :eexist} ->
+            if File.dir?(target) do
+              {:ok, target}
+            else
+              {:error, "not_a_directory", "目标已存在但不是目录: #{target}"}
+            end
+
           {:error, reason} -> {:error, "mkdir_failed", "#{target}: #{inspect(reason)}"}
         end
     end
