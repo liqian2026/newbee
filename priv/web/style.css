@@ -287,6 +287,16 @@ body {
   color: var(--nb-label-2); white-space: pre-wrap; word-break: break-all;
   overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; overflow-x: hidden; }
 .tool-result.ok::before { content: '✓ '; color: var(--nb-green); }
+.msg-archive {
+  font-family: var(--nb-mono); font-size: 12px;
+  border: 1px dashed var(--nb-border); border-radius: var(--nb-radius);
+  color: var(--nb-label-3); margin: 10px 0; padding: 8px 12px;
+  text-align: center; overflow: hidden;
+}
+.archive-head { color: var(--nb-label-2); }
+.archive-segs { margin-top: 6px; opacity: 0.85; line-height: 1.7; }
+.archive-seg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .tool-result.err::before { content: '✗ '; color: var(--nb-red); }
 
 /* 终态/提示行 */

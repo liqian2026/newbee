@@ -10,6 +10,8 @@ defmodule Newbee do
     - `rules://`    → 沉睡规则清单
     - `memory://k`  → 全局记忆条目
     - `bindings://` → 求值器绑定摘要
+    - `history://`  → 本会话压缩档案（索引 / `s/<段>` 摘要 / `s/<段>/raw` 原文 /
+                 `q/<关键词>` 全文检索 / `files` 文件清单）——被压缩的对话随时可拉回
     - `events://`   → 事件日志（可选 ?n= 条数）
     - `skill://n`   → 技能片段（~/.newbee/skills 或工程 .newbee/skills）
     - `agent://<id>/<path>` → 子代理结果按路径抠字段
@@ -47,6 +49,10 @@ defmodule Newbee do
 
       path == "bindings://" ->
         read_bindings()
+
+      # history:// 经 Host.call 回主节点执行：peer 求值节点上的模型代码同样可用
+      path == "history://" or String.starts_with?(path, "history://") ->
+        Newbee.Host.call(Newbee.Archive, :read_history, [String.trim_leading(path, "history://")])
 
       String.starts_with?(path, "events://") ->
         read_events(String.trim_leading(path, "events://"))
